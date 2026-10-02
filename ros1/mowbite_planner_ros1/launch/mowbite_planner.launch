@@ -1,7 +1,6 @@
 <!-- The MowBite Planner in place of OpenMower's slic3r planner: the same service name
      (/slic3r_coverage_planner/plan_path), so mower_logic and the mowing.plan RPC use it as they are.
-     Start it instead of the slic3r_coverage_planner node, not next to it (the slic3r planner below runs under a
-     name of its own). -->
+     Start it instead of the slic3r_coverage_planner node, not next to it. -->
 <launch>
   <node pkg="mowbite_planner_ros1" type="mowbite_planner_node" name="slic3r_coverage_planner" output="screen"
         respawn="true" respawn_delay="10">
@@ -11,15 +10,10 @@
          Without, it plans for OpenMower's forward only FTC controller: allow_reverse false, lane_order skip.
          Lane spacing, loops and skip flags come with mower_logic's request, the angle too unless angle or
          angle_strategy is set here and the area has no angle of its own in the saved map (an editor preview
-         of an angle just added or removed follows the saved area until the edit is saved) -->
-    <rosparam param="settings">{turn_radius: 0.25, narrow_parts: loops}</rosparam>
+         of an angle just added or removed follows the saved area until the edit is saved). The edges are walls
+         until set otherwise (edges: recorded where the lines were driven with the mower's centre on them) -->
+    <rosparam param="settings">{turn_radius: 0.25, narrow_parts: loops, edges: hard}</rosparam>
     <!-- the settings changed with the planner.settings.set RPC, on top of the ones above. Empty: until the next start -->
     <param name="settings_file" value="$(optenv ROS_HOME ~/.ros)/mowbite_planner_settings.json"/>
-  </node>
-  <!-- OpenMower's slic3r planner for mode slic3r: the MowBite Planner hands it mower_logic's request as it came -->
-  <node pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_classic" output="screen"
-        respawn="true" respawn_delay="10">
-    <remap from="slic3r_coverage_planner/plan_path" to="slic3r_classic/plan_path"/>
-    <param name="visualize_plan" value="false"/>
   </node>
 </launch>

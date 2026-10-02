@@ -20,14 +20,11 @@ with it the one that's active and mowable):
 The plan never depends on where the mower is, so the same map gives the same plan (mower_logic compares a
 digest of it to resume an interrupted mow).
 
-With mode slic3r (in settings, or an area's planner property) OpenMower's slic3r planner plans: the launch file starts
-it next to this node with its service moved to classic_service, the request goes there as mower_logic sent it.
-
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
 allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
-until the next start only), max_path_poses (at least 4), frame_id, service, classic_service, map_topic, use_map,
-rpc. The request always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
+until the next start only), max_path_poses (at least 4), frame_id, service, map_topic, use_map, rpc. The request
+always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
 lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an area's own
 outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless settings has
 angle or
@@ -49,15 +46,13 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
 """
 
 import collections
-import dataclasses
 import json
 import math
 import os
 import threading
-import time
 
 import rospy
-from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
 from nav_msgs.msg import Path
 from slic3r_coverage_planner.msg import Path as PlannerPath
 from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
@@ -65,11 +60,9 @@ from std_msgs.msg import Empty, Header, String
 from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
 from xbot_mqtt.srv import RegisterMethodsSrv
 
-from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D, SegmentInfo, plan_coverage,
-                             quaternion_to_yaw, yaw_to_quaternion)
+from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
 from mowbite_planner import planner as limits
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
-from mowbite_planner.geometry import clean_polygon, polygonal, union
 from mowbite_planner.mapfile import area_job, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 
@@ -79,8 +72,7 @@ FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logi
 MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
                'perimeter_passes': '/mower_logic/outline_count',
                'lane_overlap_passes': '/mower_logic/outline_overlap_count'}
-CHOICES = {'mode': tuple(limits.MODES), 'fill_pattern': limits.FILL_PATTERNS,
-           'perimeter_order': limits.PERIMETER_ORDERS,
+CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIMETER_ORDERS,
            'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
            'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS,
            'edges': limits.EDGES, 'narrow_parts': limits.NARROW_PARTS,
@@ -104,10 +96,6 @@ CACHED_PLANS = 8
 # OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
 # backing up leg would hold the mower until it times out): allow_reverse counts only then
 BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
-# OpenMower's slic3r planner, started next to this node with its service moved here (see the launch file): with mode
-# slic3r it plans, the request as mower_logic sent it (s: how long to wait for it)
-CLASSIC_SERVICE = '/slic3r_classic/plan_path'
-CLASSIC_WAIT = 5.0
 
 
 class XbotRpc:
@@ -184,8 +172,6 @@ class MowbitePlannerRos1:
         self.plans_lock = threading.Lock()
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
-        self.classic_name = rospy.get_param('~classic_service', CLASSIC_SERVICE)
-        self.classic = None
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
         if rospy.get_param('~rpc', True):
@@ -301,87 +287,13 @@ class MowbitePlannerRos1:
         current = self.current
         with self.lock:
             data = self.map
-        if self.classic_mode(current, data, params):
-            # what mower_logic would ask the slic3r planner: OpenMower's settings and the area's, not the node's
-            service = PlannerService(PlannerConfig(mower_width=current.mower_width, mode='slic3r', nested_areas=False))
-            service.planner = self.classic_plan
-        else:
-            service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width}),
-                                     current.own_angle)
-            service.planner = self.plan_coverage
-            service.own = current.own
+        service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width}),
+                                 current.own_angle)
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
+        service.planner = self.plan_coverage
+        service.own = current.own
         return service.plan(params)
-
-    @staticmethod
-    def classic_mode(current, data, params):
-        """Whether planner.plan is the slic3r planner's: mode slic3r in its settings, else the area's, else the
-        node's."""
-        settings = params.get('settings')
-        if isinstance(settings, dict) and 'mode' in settings:
-            return settings['mode'] == 'slic3r'
-        if params.get('area_id') is not None and data is not None:
-            try:
-                planner = area_job(data, params['area_id']).planner
-            except PlanningError:
-                planner = {}
-            if 'mode' in planner:
-                return planner['mode'] == 'slic3r'
-        return current.base.mode == 'slic3r'
-
-    def classic_answer(self, req):
-        """The slic3r planner's answer (mode slic3r), PlanningError when there's none."""
-        try:
-            rospy.wait_for_service(self.classic_name, timeout=CLASSIC_WAIT)
-            if self.classic is None:
-                self.classic = rospy.ServiceProxy(self.classic_name, PlanPath)
-            return self.classic(req)
-        except (rospy.ROSException, rospy.ServiceException) as e:
-            raise PlanningError('mode slic3r: no answer from the slic3r planner (%s): %s' % (self.classic_name, e))
-
-    def classic_plan(self, boundary, obstacles, cfg, *rest):
-        """planner.plan with mode slic3r: the slic3r planner asked like mower_logic would, its paths as a plan. Every
-        path is a section of its own (OpenMower drives to the start of each itself), loops perimeter, the rest lanes."""
-        t0 = time.perf_counter()
-        concentric = cfg.fill_pattern == 'concentric'
-        req = PlanPathRequest(
-            fill_type=PlanPathRequest.FILL_CONCENTRIC if concentric else PlanPathRequest.FILL_LINEAR,
-            angle=float(cfg.angle or 0.0), distance=cfg.lane_spacing,
-            outer_offset=float(cfg.perimeter_offset or 0.0), outline_count=cfg.passes,
-            outline_overlap_count=cfg.lane_overlap_passes, skip_area_outline=cfg.skip_outline_loops,
-            skip_obstacle_outlines=cfg.skip_obstacle_loops, skip_fill=cfg.skip_lanes,
-            outline=Polygon(points=[Point32(x=x, y=y, z=0.0) for x, y in boundary]),
-            holes=[Polygon(points=[Point32(x=x, y=y, z=0.0) for x, y in o]) for o in obstacles])
-        poses, segments, starts, loops = [], [], [], []
-        for path in self.classic_answer(req).paths:
-            pts = [Pose2D(ps.pose.position.x, ps.pose.position.y, quaternion_to_yaw(
-                ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w))
-                for ps in path.path.poses]
-            if not pts:
-                continue
-            starts.append(len(poses))
-            segments.append(SegmentInfo(limits.PERIMETER if path.is_outline else limits.LANE, len(poses),
-                                        len(poses) + len(pts) - 1, False, '', len(starts) - 1))
-            if path.is_outline:
-                loops.append([(p.x, p.y) for p in pts])
-            poses.extend(pts)
-        if not poses:
-            raise PlanningError('mode slic3r: the slic3r planner gave no paths')
-        length = sum(math.hypot(b.x - a.x, b.y - a.y) for s in segments
-                     for a, b in zip(poses[s.start:s.end], poses[s.start + 1:s.end + 1]))
-        area = clean_polygon(boundary)
-        free = polygonal(area.difference(union(clean_polygon(o) for o in obstacles))) if obstacles else area
-        stats = {'path_length': length, 'poses': len(poses), 'paths': len(starts), 'area': free.area,
-                 'planning_time': time.perf_counter() - t0,
-                 'chosen': {'lane_spacing': round(cfg.lane_spacing, 4), 'perimeter_passes': cfg.passes,
-                            'mode': 'fixed'}}
-        # (its poses are as far apart as it puts them, the gaps between them aren't checked)
-        return CoveragePlan(poses=poses, segments=segments, angle=req.angle, lane_spacing=cfg.lane_spacing,
-                            perimeter_loops=loops, lanes=[], stats=stats,
-                            warnings=["planned by OpenMower's slic3r planner (mode slic3r)"], area=area,
-                            free_space=free, angles=[req.angle], config=dataclasses.replace(cfg, waypoint_spacing=0.0),
-                            section_starts=starts)
 
     def on_map(self, msg):
         try:
@@ -462,11 +374,6 @@ class MowbitePlannerRos1:
                 obstacles += job.mow_around
                 drivable, keep_out, dock = job.drivable, job.keep_out, job.dock
             cfg = self.settings(req, job)
-            if cfg.mode == 'slic3r':  # as before the MowBite Planner: the request as mower_logic sent it
-                res = self.classic_answer(req)
-                rospy.loginfo('MowBite Planner: %s%d paths from the slic3r planner (mode slic3r)',
-                              'area %s, ' % job.area_id if job else '', len(res.paths))
-                return res
             if job is not None and cfg.nested_areas:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
             plan = self.plan_coverage(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,

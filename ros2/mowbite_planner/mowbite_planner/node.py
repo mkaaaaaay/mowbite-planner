@@ -40,9 +40,9 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, MODES, NARROW_PARTS,
-                      PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES,
-                      CoveragePlan, PlannerConfig, PlanningError, plan_coverage)
+from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, NARROW_PARTS, PERIMETER,
+                      PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan,
+                      PlannerConfig, PlanningError, plan_coverage)
 
 XY = Tuple[float, float]
 
@@ -94,9 +94,6 @@ PARAMETERS = {
                             lambda v: v in PERIMETER_DIRECTIONS, 'must be auto, ccw or cw'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),
-    'mode': ('custom', 'custom (the settings as they are), gentle (as little and as wide turning as it can) or lines, '
-                       'crosshatch, rings (that pattern kept clean); beats fill_pattern, smooth_spins and narrow_parts',
-             lambda v: v in MODES and v != 'slic3r', 'must be custom, gentle, lines, crosshatch or rings'),
     'fill_pattern': ('lanes', 'inside the loops: lanes, crosshatch (lanes, then lanes across them), '
                      'concentric (loops further and further in) or auto (lanes or loops, whichever turns on the spot '
                      'least)', lambda v: v in FILL_PATTERNS, 'must be lanes, crosshatch, concentric or auto'),

@@ -890,28 +890,12 @@ def test_tight_turns():
     assert tight_turns(arc(0.25, 180), 0.25) == 0.0 and tight_turns(arc(1.0, 360), 0.25) == 0.0
     tight = arc(0.1, 180)
     assert tight_turns(tight, 0.25) == pytest.approx(tight[-1].yaw / (2.0 * math.pi))
-    corner = [Pose2D(0.05 * k, 0.0, 0.0) for k in range(20)] + [Pose2D(0.95, 0.05 * k, math.pi / 2) for k in range(1, 20)]
+    corner = [Pose2D(0.05 * k, 0.0, 0.0) for k in range(20)] + \
+        [Pose2D(0.95, 0.05 * k, math.pi / 2) for k in range(1, 20)]
     assert tight_turns(corner, 0.25) == pytest.approx(0.25, abs=1e-9)
     spin = [Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, math.pi)]
     assert tight_turns(spin, 0.05) == pytest.approx(0.5)
     assert tight_turns([Pose2D(0.1 * k, 0.0, 0.0) for k in range(30)], 0.25) == 0.0
-
-
-@pytest.mark.parametrize('mode, settings', [
-    ('gentle', dict(fill_pattern='auto', smooth_spins=True, narrow_parts='loops')),
-    ('lines', dict(fill_pattern='lanes', smooth_spins=False, narrow_parts='lanes')),
-    ('crosshatch', dict(fill_pattern='crosshatch', smooth_spins=False, narrow_parts='lanes')),
-    ('rings', dict(fill_pattern='concentric', smooth_spins=False, narrow_parts='loops'))])
-def test_modes(mode, settings):
-    """A mode plans as its settings would, whatever those are set to; a mode it doesn't know is an error."""
-    other = dict(fill_pattern='crosshatch' if mode != 'crosshatch' else 'lanes', smooth_spins=not settings['smooth_spins'],
-                 narrow_parts='lanes' if settings['narrow_parts'] == 'loops' else 'loops')
-    plan = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, **other, mode=mode)))
-    same = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, **settings)))
-    assert [(p.x, p.y, p.yaw) for p in plan.poses] == [(p.x, p.y, p.yaw) for p in same.poses]
-    assert plan.config.mode == 'custom' and plan.config.fill_pattern == same.config.fill_pattern
-    with pytest.raises(PlanningError, match='mode'):
-        PlannerConfig(mode='pretty').validate()
 
 
 def test_omega():
@@ -986,6 +970,15 @@ def test_min_turn_radius():
     assert all(s.maneuver == 'u_turn' for s in tight)
     with pytest.raises(PlanningError, match='min_turn_radius'):
         PlannerConfig(min_turn_radius=-0.1).validate()
+
+
+def test_turn_radius_at_least_min_turn_radius():
+    """A turn_radius below min_turn_radius plans as that: the turns aren't all left to drives and loops."""
+    base = dict(MOWER, **NX60I, min_turn_radius=0.3)
+    low = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, turn_radius=0.25)), start=(1, 1, 0.0))
+    same = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, turn_radius=0.3)), start=(1, 1, 0.0))
+    assert [(p.x, p.y, p.yaw) for p in low.poses] == [(p.x, p.y, p.yaw) for p in same.poses]
+    assert low.config.turn_radius == 0.3
 
 
 def test_rounded_where_min_turn_radius_doesnt_fit():

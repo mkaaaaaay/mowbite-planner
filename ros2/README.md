@@ -185,7 +185,6 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `perimeter_order` | `first` | loops `first` or `last` (last mows over the marks the turns leave) |
 | `perimeter_direction` | `auto` | `ccw`, `cw` or `auto` (the way the mower faces) |
 | `lane_overlap_passes` | 0 | lanes reach this many loops further out (OpenMower's `outline_overlap_count`), 0..255 |
-| `mode` | `custom` | `custom`: the settings as they are. `gentle`: turning as little and as wide as it can (`fill_pattern` `auto`, loops out in place of turning on the spot, loops in narrow parts). `lines`, `crosshatch`, `rings`: that pattern kept clean (`fill_pattern` `lanes`, `crosshatch` or `concentric`, no loops out in it, lanes in narrow parts, rings driven in one go). Beats `fill_pattern`, `smooth_spins` and `narrow_parts` |
 | `fill_pattern` | `lanes` | `lanes`, `crosshatch`, `concentric` or `auto`: the planner plans lanes and concentric loops and keeps the one that costs least (its length, 10 m more for every full turn tighter than `min_turn_radius` or on the spot, measured over 20 cm of path at a time, 100 m more for every m2 it leaves unmowed); `stats.chosen.fill_pattern` says which |
 | `crosshatch_angle_deg` | 90.0 | direction of crosshatch's second lanes to the first |
 | `angle_strategy` | `longest_edge` | `longest_edge`, `min_width` (across the narrowest width), `optimal` (fewest lanes and cells, tried `angle_step_deg` apart) or `fixed` (`fixed_angle_deg`) |

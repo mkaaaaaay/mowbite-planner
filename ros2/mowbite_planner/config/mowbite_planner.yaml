@@ -16,9 +16,6 @@
     perimeter_direction: auto
     # lanes reach this many loops further out (OpenMower's outline_overlap_count)
     lane_overlap_passes: 0
-    # custom (the settings as they are), gentle (as little and as wide turning as it can) or lines, crosshatch, rings
-    # (that pattern kept clean): beats fill_pattern, smooth_spins and narrow_parts
-    mode: custom
     # inside the loops: lanes, crosshatch (lanes, then lanes at crosshatch_angle_deg to them), concentric or auto
     # (lanes or concentric, whichever turns least tightly)
     fill_pattern: lanes

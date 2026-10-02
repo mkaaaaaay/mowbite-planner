@@ -61,18 +61,6 @@ TIGHT_COST = 10.0  # m per 360 degrees
 TIGHT_FLOOR = 0.05  # m
 TIGHT_WINDOW = 0.2  # m
 LEFT_COST = 100.0  # m per m2
-# what a mode sets, beating those settings ('custom': the settings as they are). gentle: turning as little and as wide
-# as it can; lines, crosshatch, rings: that pattern kept clean (no loops out in it, turning on the spot instead, lanes
-# in narrow parts, the rings of a part in one go). slic3r: OpenMower's slic3r planner plans it as before the MowBite
-# Planner, with OpenMower's settings (the ROS 1 node hands it the request, plan_coverage can't)
-MODES = {
-    'custom': {},
-    'slic3r': {},
-    'gentle': {'fill_pattern': 'auto', 'smooth_spins': True, 'narrow_parts': 'loops'},
-    'lines': {'fill_pattern': 'lanes', 'smooth_spins': False, 'narrow_parts': 'lanes'},
-    'crosshatch': {'fill_pattern': 'crosshatch', 'smooth_spins': False, 'narrow_parts': 'lanes'},
-    'rings': {'fill_pattern': 'concentric', 'smooth_spins': False, 'narrow_parts': 'loops'},
-}
 PERIMETER_ORDERS = ('first', 'last')
 # where the lane region is narrower than a U-turn: 'lanes' anyway, or 'loops' further in instead
 NARROW_PARTS = ('lanes', 'loops')
@@ -139,9 +127,6 @@ class PlannerConfig:
     lane_spacing_max: Optional[float] = None
     # loops along the outline and around every obstacle, -1: as many as the lanes' turns need (see passes)
     perimeter_passes: int = 2
-    # 'custom', 'gentle', 'lines', 'crosshatch', 'rings' (they set fill_pattern, smooth_spins and narrow_parts) or
-    # 'slic3r' (OpenMower's planner plans it): see MODES
-    mode: str = 'custom'
     # 'lanes', 'crosshatch', 'concentric' or 'auto': lanes or loops, whichever turns least tightly (AUTO_PATTERNS)
     fill_pattern: str = 'lanes'
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
@@ -163,10 +148,10 @@ class PlannerConfig:
     # m, radius of the turns between lanes. Tighter ones (down to half the lane spacing, then turning on
     # the spot) only where the headland is too small
     turn_radius: float = 0.25
-    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this: drives, loops out and K-turns turn on the
-    # spot instead, a turn between lanes where none of it fits is rounded as wide as fits (the lanes ending a little
-    # earlier for it where that's what it takes, see _Route.round_earlier), on the spot only where nothing does.
-    # 0: any (the corners of loops are rounded as before)
+    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (a smaller turn_radius counts as this):
+    # drives, loops out and K-turns turn on the spot instead, a turn between lanes where none of it fits is rounded as
+    # wide as fits (the lanes ending a little earlier for it where that's what it takes, see _Route.round_earlier), on
+    # the spot only where nothing does. 0: any (the corners of loops are rounded as before)
     min_turn_radius: float = 0.0
     allow_reverse: bool = True  # K-turns, which back up a little
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
@@ -371,8 +356,7 @@ class PlannerConfig:
             raise PlanningError(f'route_order must be one of {", ".join(ROUTE_ORDERS)}, got {self.route_order!r}')
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
-        for name, allowed in (('mode', tuple(MODES)), ('angle_strategy', ANGLE_STRATEGIES),
-                              ('fill_pattern', FILL_PATTERNS),
+        for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
                               ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
                               ('edges', EDGES), ('narrow_parts', NARROW_PARTS),
                               ('lane_spacing_mode', LANE_SPACING_MODES)):
@@ -1846,10 +1830,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     fill pattern it was planned with."""
     cfg = config or PlannerConfig()
     cfg.validate()
-    if cfg.mode == 'slic3r':
-        raise PlanningError("mode slic3r: OpenMower's slic3r planner plans that (through the ROS 1 node)")
-    if cfg.mode != 'custom':
-        cfg = dataclasses.replace(cfg, mode='custom', **MODES[cfg.mode])
+    if cfg.turn_radius < cfg.min_turn_radius:  # no turn tighter than that, the turns are that wide then
+        cfg = dataclasses.replace(cfg, turn_radius=cfg.min_turn_radius)
     if cfg.fill_pattern == 'auto':
         t0 = time.perf_counter()
         best, best_cost, error = None, math.inf, None
