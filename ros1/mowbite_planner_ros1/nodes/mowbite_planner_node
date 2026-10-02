@@ -594,13 +594,14 @@ def canon(value):
 
 
 def code_version():
-    """A digest of the planner's code: a plan kept on disk counts for that code only."""
-    root = os.path.dirname(mowbite_planner.__file__)
+    """A digest of the planner's code: a plan kept on disk counts for that code only. (Built with catkin, the package
+    first found is a stand-in that only points to the code, its __path__ has both.)"""
     digest = hashlib.sha1()
-    for name in sorted(os.listdir(root)):
-        if name.endswith('.py'):
-            with open(os.path.join(root, name), 'rb') as f:
-                digest.update(name.encode() + b'\0' + f.read())
+    for root in mowbite_planner.__path__:
+        for name in sorted(os.listdir(root)):
+            if name.endswith('.py'):
+                with open(os.path.join(root, name), 'rb') as f:
+                    digest.update(name.encode() + b'\0' + f.read())
     return digest.hexdigest()
 
 

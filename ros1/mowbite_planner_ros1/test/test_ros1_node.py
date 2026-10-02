@@ -775,6 +775,19 @@ def test_plan_ahead(planner, monkeypatch):
     assert calls == [1, 1, 1]
 
 
+def test_code_version_of_the_code_itself(monkeypatch, tmp_path):
+    """Built with catkin the package found first is a stand-in pointing to the code: a change in the code counts."""
+    stand_in, code = tmp_path / 'devel', tmp_path / 'src'
+    stand_in.mkdir()
+    code.mkdir()
+    (stand_in / '__init__.py').write_text('# points to src\n')
+    (code / 'planner.py').write_text('A = 1\n')
+    monkeypatch.setattr(node_module.mowbite_planner, '__path__', [str(stand_in), str(code)])
+    before = node_module.code_version()
+    (code / 'planner.py').write_text('A = 2\n')
+    assert node_module.code_version() != before
+
+
 def event(kind):
     rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
         topic='events/json', payload=json.dumps({'id': 'x', 't': 1.0, 'type': kind})))
