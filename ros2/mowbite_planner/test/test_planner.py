@@ -16,10 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_angle,  # noqa: E402
                              plan_coverage, quaternion_to_yaw, swept_area, yaw_to_quaternion)
-from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, plan_turn, u_turn  # noqa: E402
+from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, omega, plan_turn, u_turn  # noqa: E402
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
-                                     angle_in_range, best_order, longest_edge_angle, scan_lanes, split_cells)
+                                     SPIN_LIMIT, angle_in_range, best_order, longest_edge_angle, scan_lanes,
+                                     split_cells)
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
@@ -818,6 +819,29 @@ def test_lane_spacing_auto():
                       (dict(lane_spacing_max=0.5), 'lane_spacing_max')):
         with pytest.raises(PlanningError, match=match):
             PlannerConfig(**dict(MOWER, **kw)).validate()
+
+
+def test_omega():
+    for deg in (60, 90, 150, -120, 180):
+        loop = omega(Pose2D(1.0, 2.0, 0.3), math.radians(deg), 0.25, 0.05)
+        assert (loop[0].x, loop[0].y, loop[-1].x, loop[-1].y) == (1.0, 2.0, 1.0, 2.0)
+        assert loop[-1].yaw == pytest.approx(normalize_angle(0.3 + math.radians(deg)))
+        assert all(angle_diff(a.yaw, b.yaw) <= math.radians(10.0) + 1e-9 for a, b in zip(loop, loop[1:]))
+        assert all(math.hypot(b.x - a.x, b.y - a.y) <= 0.05 + 1e-6 for a, b in zip(loop, loop[1:]))
+
+
+def test_smooth_spins():
+    """Turns on the spot by more than SPIN_LIMIT become an omega where there's room, the plan as well mowed."""
+    def spins(plan):
+        return sum(1 for a, b in zip(plan.poses, plan.poses[1:]) if angle_diff(a.yaw, b.yaw) > SPIN_LIMIT)
+
+    kw = dict(MOWER, **NX60I)
+    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(kw, smooth_spins=False)), start=(1, 1, 0.0))
+    cfg = PlannerConfig(**kw)
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg, [TREE, BED])
+    assert spins(plan) < spins(plain) and plan.stats['path_length'] > plain.stats['path_length']
+    assert check_plan(plan)['left_m2'] == pytest.approx(check_plan(plain)['left_m2'], abs=0.02)
 
 
 def test_body_corner_rounding():

@@ -31,7 +31,7 @@ from shapely.ops import nearest_points
 
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
-from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, path_length,
+from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, omega, path_length,
                         plan_turn, same_position, sample_arc, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
@@ -80,6 +80,9 @@ MAX_PASSES = 255
 MAX_TURN_RADIUS = 10.0
 # m, coordinates further out are a mistake (or the wrong frame), not a lawn
 MAX_COORDINATE = 1e7
+# rad, smooth_spins replaces turns on the spot by more than this, with an omega of these shares of turn_radius
+SPIN_LIMIT = math.radians(60.0)
+SMOOTH_RADII = (1.0, 0.75, 0.5, 0.35)
 # m2, lane_spacing_mode 'auto': a plan leaves nothing unmowed with no piece this big and not LEFT_TOTAL together of
 # pieces from LEFT_TUFT on (tufts at corners), like the report
 LEFT_TUFT = 0.01
@@ -141,6 +144,8 @@ class PlannerConfig:
     # in there instead until it's mowed, the pieces they come apart into driven on the way round (in from the loop
     # next to them and back out), so no trips along a path from piece to piece
     narrow_parts: str = 'lanes'
+    # where the path would turn on the spot by more than SPIN_LIMIT, a loop out (an omega) in its place where it fits
+    smooth_spins: bool = True
     route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
@@ -336,7 +341,8 @@ class PlannerConfig:
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
-        for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas'):
+        for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
+                     'smooth_spins'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 
@@ -1008,7 +1014,9 @@ class _Route:
                               'level': level}
         self.go_to(entry, math.atan2(first[1], first[0]) if first else None)
         # with the mowable side on the left only left turns go round a corner of it and get rounded
-        poses = drive_polyline(loop, self.step, radius, self.area.is_free, -1 if flip else 1,
+        # (right turns too: the arc cuts their corner on the side mowed already or keeps off the edge where it
+        # doesn't fit)
+        poses = drive_polyline(loop, self.step, radius, self.area.is_free, 0,
                                CORNER_CUT * self.cfg.mower_width, level, spacing, self.cfg.mower_width, self.body)
         self.add(kind, poses, maneuver=maneuver)
         self.loops.append([(p.x, p.y) for p in poses])
@@ -1481,6 +1489,53 @@ def _driven(geoms, half: float, ahead: float):
     return union(parts)
 
 
+def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
+    """Where the path turns on the spot by more than SPIN_LIMIT (a sharp corner of a loop, a drive arriving across
+    a lane, a pivot), an omega (maneuvers.omega) of turn_radius (down to SMOOTH_RADII of it) in its place if it fits in
+    the space of the segment (the drivable areas for drives) and the body fits: the wheels keep rolling."""
+    inserts: Dict[Tuple[int, int], List[Pose2D]] = {}
+    before: Optional[Pose2D] = None  # the last pose before the position the mower is at
+    here: Optional[Tuple[Pose2D, int, int]] = None  # the pose it leaves this position with, where it is
+
+    def smooth() -> None:
+        if before is None or here is None:
+            return
+        p, i, j = here
+        turn = normalize_angle(p.yaw - before.yaw)
+        if abs(turn) <= SPIN_LIMIT:
+            return
+        def straight(k: int) -> bool:
+            return route.segments[k].kind == LANE and route.segments[k].maneuver not in ('ring', 'bend')
+
+        if j == 0 and i > 0 and straight(i):  # where a lane starts: on the end of the segment before
+            i, j = i - 1, len(route.segments[i - 1].poses)
+        if straight(i):  # (a lane keeps its heading)
+            return
+        fits = route.transit.is_free if route.segments[i].kind == TRANSIT else route.area.is_free
+        at = Pose2D(p.x, p.y, before.yaw)
+        for share in SMOOTH_RADII:
+            r = share * cfg.turn_radius
+            if r < 1e-3:
+                return
+            loop = omega(at, turn, r, route.step)
+            if fits([(q.x, q.y) for q in loop]) and (route.body is None or route.body([before] + loop)):
+                inserts[(i, j)] = loop[:-1]
+                route._count('spins_smoothed')
+                return
+
+    for i, seg in enumerate(route.segments):
+        for j, p in enumerate(seg.poses):
+            if here is not None and route.segments[here[1]].section != seg.section:
+                before = here = None  # the path jumps to the next section
+            if here is not None and same_position(here[0], p):
+                here = (p, i, j)  # the same position, now left facing p's way
+                continue
+            smooth()
+            before, here = (here[0] if here is not None else None), (p, i, j)
+    for (i, j), loop in sorted(inserts.items(), reverse=True):
+        route.segments[i].poses[j:j] = loop
+
+
 def _splice(ring: List[XY], other: List[XY]) -> List[XY]:
     """ring with a trip round other from the closest point between them: there, over to other, round it and
     back, on along ring."""
@@ -1899,6 +1954,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         else:
             loops()
             lanes()
+    if cfg.smooth_spins:
+        _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
     took('route')
     if not poses:

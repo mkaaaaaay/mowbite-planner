@@ -195,6 +195,21 @@ def pivot_turn(d: float, dx: float, step: float) -> Maneuver:
     return Maneuver('pivot', 0.0, [Piece(poses)])
 
 
+def omega(at: Pose2D, turn: float, r: float, step: float) -> List[Pose2D]:
+    """In place of turning on the spot at `at` by `turn` (rad, > 0 left): a swerve the other way by b, a loop by
+    |turn| + 2 b, a swerve back by b, arcs of radius r, back at the same point facing at.yaw + turn. The last arc
+    ends there tangent when the loop's centre is 2 r from its centre: sin(b + |turn| / 2) = sin(|turn| / 2) / 2."""
+    s = 1.0 if turn >= 0.0 else -1.0
+    a = abs(turn)
+    b = math.pi - math.asin(0.5 * math.sin(0.5 * a)) - 0.5 * a
+    first = sample_arc(at.x, at.y, at.yaw, r, -s * b, step)
+    loop = sample_arc(first[-1].x, first[-1].y, first[-1].yaw, r, s * (a + 2.0 * b), step)
+    last = sample_arc(loop[-1].x, loop[-1].y, loop[-1].yaw, r, -s * b, step)
+    # snap away the rounding of three chained arcs, it has to meet the point exactly
+    last[-1] = Pose2D(at.x, at.y, normalize_angle(at.yaw + turn))
+    return join(first, loop, last)
+
+
 def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
     c, s = math.cos(origin.yaw), math.sin(origin.yaw)
     pieces = []
