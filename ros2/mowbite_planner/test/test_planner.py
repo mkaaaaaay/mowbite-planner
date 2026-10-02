@@ -738,6 +738,17 @@ def test_body_in_the_garden():
         assert sum(o['kind'] in ('turn', 'lane_end') for o in report['body_out']) == 0
 
 
+def test_body_bent_lanes():
+    """Lanes bending around trees get their ends pulled back too: U-turns, nothing replaced by a drive."""
+    trees = [circle(4, 4, 0.4), circle(9, 10, 0.5)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, bend_max_gap=3.0))
+    plan = plan_coverage(GARDEN, [TREE, BED] + trees, cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, [TREE, BED] + trees)
+    assert any(s.maneuver == 'bend' for s in plan.segments)
+    assert plan.stats['turns_fallback'] == 0 and plan.stats['turns_pivot'] <= 2
+    assert not [o for o in check_plan(plan)['body_out'] if o['kind'] in ('turn', 'lane_end')]
+
+
 def test_body_corner_rounding():
     """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
     with a larger one."""

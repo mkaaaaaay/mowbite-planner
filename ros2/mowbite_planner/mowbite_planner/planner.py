@@ -1226,11 +1226,21 @@ class _Route:
                         continue
                     a, b = piece
             yaw = normalize_angle(angle if direction > 0 else angle + math.pi)
-            if self.footprint is not None and not lane.bends:
+            head = b  # where the lane's first straight piece ends
+            if self.footprint is not None:
                 # the side the turns come from and go to (left of the lanes going +x is +y)
                 side = [0.0 if o is None else direction * math.copysign(1.0, o.y - lane.y)
                         for o in (lanes[i - 1] if driven else None, lanes[i + 1] if i + 1 < len(lanes) else None)]
-                ends = self.body_ends(a, b, yaw, side[0], side[1])
+                if lane.bends:
+                    # the straight pieces at its ends
+                    pieces = lane.pieces()[::direction]
+                    first = to_map((pieces[0][1] if direction > 0 else pieces[0][0]) - back, y)
+                    last = to_map((pieces[-1][0] if direction > 0 else pieces[-1][1]) - back, y)
+                    ends = self.body_ends(a, first, yaw, side[0], 0.0), self.body_ends(last, b, yaw, 0.0, side[1])
+                    head = ends[0][1] if ends[0] is not None else head
+                    ends = None if None in ends else (ends[0][0], ends[1][1])
+                else:
+                    ends = self.body_ends(a, b, yaw, side[0], side[1])
                 if ends is None:
                     continue
                 a, b = ends
@@ -1250,9 +1260,9 @@ class _Route:
                 # made room for a turn level with each end): this lane starts level with the last one's end then
                 ux, uy = math.cos(yaw), math.sin(yaw)
                 level = (self.pos[0] - a[0]) * ux + (self.pos[1] - a[1]) * uy
-                rest = math.hypot(b[0] - a[0], b[1] - a[1]) - self.cfg.min_lane_length
+                rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
                 if (turn is None or turn.name in ('detour', 'pivot')) and self.footprint is not None and \
-                        not lane.bends and 1e-6 < level < rest:
+                        1e-6 < level < rest:
                     start = (a[0] + level * ux, a[1] + level * uy)
                     other = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), start, self.cfg.turn_radius,
                                       self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
