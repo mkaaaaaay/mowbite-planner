@@ -234,7 +234,9 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   choices, and whether it can be set here. The ones that come with `mower_logic`'s request say where from
   (`/mower_logic/tool_width`, ...). `allow_reverse` (K-turns: backing up between lanes and in place of a turn on
   the spot where no loop out fits) is off: OpenMower's FTC controller with `forward_only` stops on a backing up
-  leg until it times out, it needs the change that lets it back up where the plan does. `mower_width` is the
+  leg until it times out, it needs the change that lets it back up where the plan does (`back_up_with_plan`):
+  without `/move_base_flex/FTCPlanner/back_up_with_plan` true the node leaves `allow_reverse` out and logs that,
+  `planner.settings` says which in `can_back_up`. `mower_width` is the
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
   (both may be negative).

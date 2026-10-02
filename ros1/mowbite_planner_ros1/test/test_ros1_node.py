@@ -101,6 +101,9 @@ def install():
         def logerr(self, *a):
             self.log.append(('error', a[0] % a[1:] if len(a) > 1 else a[0]))
 
+        def logwarn_throttle(self, period, *a):
+            self.logwarn(*a)
+
     rospy = Rospy('rospy')
     modules = {
         'rospy': rospy,
@@ -379,6 +382,20 @@ def test_obstacles_come_with_the_request(planner):
     assert inside(planner.handle(request(holes=[])), BED)
 
 
+def test_backing_up_only_where_the_ftc_controller_does(planner, monkeypatch):
+    # allow_reverse counts only with OpenMower's FTC controller backing up where the plan does, else it would hold the
+    # mower at every backing up leg until it times out
+    got, real = [], node_module.plan_coverage
+    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: got.append(args[2]) or real(*args, **kw))
+    rpc('planner.settings.set', {'allow_reverse': True})
+    planner.handle(request())
+    assert got[-1].allow_reverse is False and any('allow_reverse left out' in m for _, m in rospy.log)
+    rospy.params[node_module.BACK_UP_PARAM] = True
+    planner.handle(request(angle=0.4))
+    assert got[-1].allow_reverse is True
+    assert rpc('planner.settings')[0]['can_back_up'] is True
+
+
 def test_area_in_the_area_mowed_on_its_own(planner):
     # a zone in the garden with an angle of its own: the garden mows round it, unless nested_areas is off
     zone = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
@@ -580,6 +597,7 @@ def test_rpc_settings(planner):
     assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
     assert not s['skip_lanes']['settable'] and s['skip_lanes']['from']
     assert s['allow_reverse']['settable'] and s['allow_reverse']['value'] is False
+    assert result['can_back_up'] is False
     # mower_logic's until set here
     for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes'):
         assert s[name]['settable'] and s[name]['from'].startswith('/mower_logic/'), name

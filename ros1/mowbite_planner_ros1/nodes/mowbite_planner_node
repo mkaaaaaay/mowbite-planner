@@ -92,6 +92,9 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET)}
 # plans kept: the same request again (a preview, then the mow; mowing.plan, then planner.plan) gets the plan at once
 CACHED_PLANS = 8
+# OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
+# backing up leg would hold the mower until it times out): allow_reverse counts only then
+BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
 
 
 class XbotRpc:
@@ -255,7 +258,9 @@ class MowbitePlannerRos1:
                 if hi is not None:
                     entry['max'] = hi
             out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
-        return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None}
+        # whether allow_reverse counts: OpenMower's FTC controller backs up where the plan does
+        return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
+                'can_back_up': bool(rospy.get_param(BACK_UP_PARAM, False))}
 
     def rpc_settings_set(self, params):
         fixed = sorted(set(params) & set(FIXED))
@@ -334,7 +339,12 @@ class MowbitePlannerRos1:
 
     def plan_coverage(self, *args, **kwargs):
         """plan_coverage(), the last CACHED_PLANS kept: the plan only depends on what it's given, the same again
-        (to the last bit) is the same plan."""
+        (to the last bit) is the same plan. allow_reverse only where the FTC controller backs up (BACK_UP_PARAM)."""
+        cfg = args[2]
+        if cfg.allow_reverse and not rospy.get_param(BACK_UP_PARAM, False):
+            rospy.logwarn_throttle(600, 'MowBite Planner: allow_reverse left out, OpenMower\'s FTC controller doesn\'t '
+                                   'back up (%s is not true)' % BACK_UP_PARAM)
+            args = args[:2] + (cfg.with_overrides({'allow_reverse': False}),) + args[3:]
         key = repr((args, sorted(kwargs.items())))
         with self.plans_lock:
             plan = self.plans.get(key)

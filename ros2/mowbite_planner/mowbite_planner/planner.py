@@ -1871,7 +1871,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         # what that takes away: narrow parts, and the tips of corners (smaller than r * r), which keep their lanes
         cut = [p for p in polygons(lane_region.difference(opened)) if p.area >= r * r]
         if cut:
-            wide = polygonal(subtract(lane_region, cut))
+            # (opened by a hair: GEOS can leave a spike without area there, the first row of lanes would go by it)
+            wide = polygonal(subtract(lane_region, cut).buffer(-1e-6, 1, join_style=2).buffer(1e-6, 1, join_style=2))
             # bits left between narrow parts too small for more than a few lanes go to the loops as well
             wide = polygonal(union(p for p in polygons(wide) if p.area >= (4.0 * r) ** 2))
             keep_off = None if wide.is_empty else wide.buffer(half, QUAD_SEGS)  # the lanes mow that far round it
