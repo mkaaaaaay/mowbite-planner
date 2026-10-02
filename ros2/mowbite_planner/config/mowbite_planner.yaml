@@ -46,7 +46,7 @@
     min_lane_length: 0.10
     # the mower's body [m] around its centre (base_link): robot_width wide, robot_front ahead, robot_rear behind
     # (negative: not set). With all three the turns, lane ends, loops and drives keep it in: on recorded edges
-    # (the outline and obstacles are where the centre drove) up to half its width past them, on hard ones
+    # (the outline and obstacles are where the centre drove) where it was when they were recorded, on hard ones
     # (walls) not past them, the centre keeps robot_width / 2 off them. blade_offset: the blade's centre this far
     # left of the mower's (negative: right), the loops then go round with the blade on their outer side
     # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds): lanes
@@ -56,6 +56,8 @@
     robot_front: -1.0
     robot_rear: -1.0
     edges: recorded
+    # how much further the body may reach than the edges allow [m] (a recorded edge is a few cm off)
+    body_tolerance: 0.05
     blade_offset: 0.0
     # the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels),
     # negative: behind it. The lanes start and end that much earlier

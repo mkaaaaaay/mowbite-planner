@@ -76,8 +76,10 @@ PARAMETERS = {
     'narrow_parts': ('lanes', 'where the lanes would lie in a part narrower than their turns need (a path): lanes '
                      'anyway, or loops further in, the pieces they come apart into driven on the way round',
                      lambda v: v in NARROW_PARTS, 'must be lanes or loops'),
-    'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may reach half '
-              'its width past them. hard: walls, the centre keeps robot_width / 2 off them',
+    'body_tolerance': (0.05, "how much further the mower's body may reach than the edges allow [m] (a recorded edge "
+                       'is a few cm off where the mower was)', lambda v: v >= 0.0, 'must be >= 0'),
+    'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may be where '
+              'it was then. hard: walls, the centre keeps robot_width / 2 off them',
               lambda v: v in EDGES, 'must be recorded or hard'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
@@ -151,6 +153,7 @@ RANGES = {
     'turn_radius': (0.0, 5.0),
     'robot_width': (-1.0, 5.0),
     'robot_front': (-1.0, 5.0),
+    'body_tolerance': (0.0, 1.0),
     'robot_rear': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),

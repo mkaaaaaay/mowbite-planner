@@ -718,8 +718,8 @@ def test_footprint():
 
 def test_body_turns_and_lane_ends_stay_inside():
     """The turns fit with the body: lane ends pulled back for the U-turns, no turn on the spot or replaced by a
-    drive, and nothing of the body past the edges but on the outer loop: its centre runs on the line (perimeter_offset
-    0), at its corners and turning off it the body can't keep within half its width."""
+    drive, and the body nowhere it wasn't when the edges were recorded (driving along them, turning at the corners)
+    but for a few poses where the outer loop, its centre on the line (perimeter_offset 0), rounds a corner."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg)
@@ -728,7 +728,7 @@ def test_body_turns_and_lane_ends_stay_inside():
     assert plan.stats['turns_u_turn'] == plain.stats['turns_u_turn'] + plain.stats['turns_pivot'] > 0
     assert plan.stats['turns_pivot'] == plan.stats['turns_fallback'] == plan.stats['turns_detour'] == 0
     out = check_plan(plan)['body_out']
-    assert out and {o['kind'] for o in out} <= {'loop', 'spin'}
+    assert len(out) <= 12 and {o['kind'] for o in out} <= {'loop', 'spin'}
     edge = Polygon(rect(0, 0, 10, 6)).exterior
     assert all(edge.distance(Point(o['x'], o['y'])) < 0.05 for o in out)  # (its corner arcs a few cm in)
     # the lanes end where the U-turn's arc keeps the front in: a turn of 0.25 reaches 0.62 past the end, the body

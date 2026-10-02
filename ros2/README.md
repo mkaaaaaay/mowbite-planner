@@ -207,7 +207,8 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `robot_width` | -1.0 | width of the mower's body [m], negative = not set |
 | `robot_front` | -1.0 | how far the body reaches ahead of the mower's centre (base_link) [m], negative = not set |
 | `robot_rear` | -1.0 | how far it reaches behind the centre [m], negative = not set. With all three the turns, lane ends, loops and drives keep the body in (see `edges`): lane ends move back until the turn's arcs fit, loop corners get larger arcs; `report` lists the poses where it still sticks out (`body_out`) |
-| `edges` | `recorded` | `recorded`: the outline and obstacles are where the mower's centre drove, the body may reach half its width past them. `hard`: walls, nothing of the body past them, the centre keeps `robot_width` / 2 off them |
+| `edges` | `recorded` | `recorded`: the outline and obstacles are where the mower's centre drove, the body may be where it was then (half its width each side, the front past corners and on the outside of bends). `hard`: walls, nothing of the body past them, the centre keeps `robot_width` / 2 off them |
+| `body_tolerance` | 0.05 | how much further the body may reach than `edges` allow before it counts as sticking out [m] (a recorded edge is a few cm off where the mower was) |
 | `blade_offset` | 0.0 | the blade's centre this far left of the mower's [m] (negative: right), the loops go round with the blade on their outer side, -1..1 |
 | `blade_ahead` | 0.0 | the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels) [m], negative = behind; the lanes start and end that much earlier, -1..1 |
 | `bend_max_gap` | 0.0 | a row split by an obstacle with at most this much between its pieces becomes one lane bending around it [m], 0 = split |

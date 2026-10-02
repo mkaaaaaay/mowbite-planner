@@ -82,7 +82,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'perimeter_passes': (0, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
-          'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET)}
+          'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
+          'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET)}
 # plans kept: the same request again (a preview, then the mow; mowing.plan, then planner.plan) gets the plan at once
 CACHED_PLANS = 8
 

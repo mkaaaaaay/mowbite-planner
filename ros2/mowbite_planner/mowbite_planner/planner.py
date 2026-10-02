@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 
-from .footprint import Footprint
+from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, path_length,
                         plan_turn, same_position, sample_arc, sample_straight)
@@ -78,8 +78,6 @@ MAX_TURN_RADIUS = 10.0
 MAX_COORDINATE = 1e7
 # m, a blade further off the mower's centre is a mistake
 MAX_BLADE_OFFSET = 1.0
-# m, the body may reach this much further than the edges allow (rounding, simplifying)
-BODY_TOLERANCE = 0.01
 # m, lane ends are pulled back to this when the body doesn't fit at them
 BODY_STEP = 0.01
 
@@ -155,10 +153,14 @@ class PlannerConfig:
     robot_width: Optional[float] = None
     robot_front: Optional[float] = None
     robot_rear: Optional[float] = None
-    # 'recorded': the outline and obstacles are where the centre drove, the body may reach half its width past
-    # them, like when they were recorded. 'hard': they're walls, nothing of the body goes past them, the centre
-    # keeps robot_width / 2 off them (the first loop moves further in where perimeter_offset would come closer)
+    # 'recorded': the outline and obstacles are where the centre drove, the body may be where it was when they were
+    # recorded (half its width each side, the front past corners and on the outside of bends, turning at corners).
+    # 'hard': they're walls, nothing of the body goes past them, the centre keeps robot_width / 2 off them (the first
+    # loop moves further in where perimeter_offset would come closer)
     edges: str = 'recorded'
+    # m, the body may reach this much further than the edges allow before it counts as sticking out (a recorded edge
+    # is a few cm off where the mower was)
+    body_tolerance: float = 0.05
     # m, how far the blade's centre sits to the left of the mower's centre (negative: right). The loops go
     # round with the blade on their outer side, so it mows up to perimeter_offset while the body stays further
     # in, the lanes move so the blade's lines stay a lane spacing apart
@@ -267,6 +269,7 @@ class PlannerConfig:
         for name in ('robot_width', 'robot_front', 'robot_rear'):
             if getattr(self, name) is not None:
                 finite(name, 0.0)
+        finite('body_tolerance', 0.0, MAX_BLADE_OFFSET)
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         finite('blade_ahead', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         for name in ('perimeter_passes', 'lane_overlap_passes'):
@@ -1400,6 +1403,36 @@ class _Route:
         self._count('bends')
 
 
+DRIVEN_SIMPLIFY = 0.02
+
+
+def _driven(geoms, half: float, ahead: float):
+    """Where a body half wide each side and reaching ahead in front (and behind, the way round isn't known) was
+    while its centre drove along the rings of geoms: every edge that much wider and longer, so past a corner and on
+    the outside of a bend the front reaches out too, and at a corner (turning by more than SPIN) all round it, turning
+    there."""
+    parts = []
+    reach = math.hypot(half, ahead)
+    for geom in geoms:
+        # (a recorded edge has a point every few cm: 2 cm simpler is a lot fewer pieces, and no more than that off)
+        simple = geom.simplify(DRIVEN_SIMPLIFY, preserve_topology=True)
+        for _, ring in rings(simple if simple.is_valid else geom):
+            n = len(ring)
+            for i, (bx, by) in enumerate(ring):
+                (ax, ay), (cx, cy) = ring[i - 1], ring[(i + 1) % n]
+                if angle_diff(math.atan2(cy - by, cx - bx), math.atan2(by - ay, bx - ax)) > SPIN:
+                    parts.append(Point(bx, by).buffer(reach, 4))  # (a 16-gon, inside the circle)
+            for (ax, ay), (bx, by) in zip(ring, ring[1:] + ring[:1]):
+                length = math.hypot(bx - ax, by - ay)
+                if length < 1e-9:
+                    continue
+                ux, uy = (bx - ax) / length, (by - ay) / length
+                a, b = (ax - ahead * ux, ay - ahead * uy), (bx + ahead * ux, by + ahead * uy)
+                parts.append(Polygon([(a[0] - half * uy, a[1] + half * ux), (b[0] - half * uy, b[1] + half * ux),
+                                      (b[0] + half * uy, b[1] - half * ux), (a[0] + half * uy, a[1] - half * ux)]))
+    return union(parts)
+
+
 def _splice(ring: List[XY], other: List[XY]) -> List[XY]:
     """ring with a trip round other from the closest point between them: there, over to other, round it and
     back, on along ring."""
@@ -1676,10 +1709,11 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                                                                              **edges)
     body_space = footprint = None
     if cfg.body:
-        # recorded edges are where the centre drove, the body reached half its width past them
-        reach = (0.5 * cfg.robot_width if cfg.edges == 'recorded' else 0.0) + BODY_TOLERANCE
-        # (square corners: driving along both edges into a corner it reached that far past each)
-        body_space = union([free, union(clean_polygon(d) for d in drivable)]).buffer(reach, QUAD_SEGS, join_style=2)
+        lawn = [free] + [clean_polygon(d) for d in drivable]
+        if cfg.edges == 'recorded':
+            # the edges are where the centre drove: the body may be where it was then
+            lawn.append(_driven(lawn, 0.5 * cfg.robot_width, max(cfg.robot_front, cfg.robot_rear)))
+        body_space = union(lawn).buffer(cfg.body_tolerance, QUAD_SEGS, join_style=2)
         if keep_out:
             body_space = body_space.difference(union(clean_polygon(k) for k in keep_out))
         footprint = Footprint(body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
