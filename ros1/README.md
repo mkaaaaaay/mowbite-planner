@@ -219,6 +219,28 @@ in the map editor (`mowing.plan` with the outline and the edited angle) of an ar
 added or removed follows the saved area until the edit is saved. An area's `planner` property can set all
 of them, without a new image.
 
+### Over RPC
+
+Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mowing.plan`):
+
+- `planner.settings`: every setting with its value, default, whether it's stored, type, unit, range or
+  choices, and whether it can be set here. The ones that come with `mower_logic`'s request say where from
+  (`/mower_logic/tool_width`, ...), `allow_reverse` stays off (FTC only drives forwards). `mower_width` is the
+  blade and beats `OM_BLADE_WIDTH`.
+- `planner.settings.set` with `{"turn_radius": 0.3, "fill_pattern": "crosshatch"}`: checked as a whole, a bad
+  value changes nothing and the error says why. `null` goes back to the default. Kept in
+  `$ROS_HOME/mowbite_planner_settings.json` (`/data/ros` in the container, it outlives a new image) and used
+  from the next plan on, an interrupted area whose plan changes starts again. Answers like `planner.settings`.
+- `planner.plan`: like the MQTT service's `ext.mowbite_planner.plan` (`area_id` or `outline`, `settings` to
+  try before setting them, `poses`), with the node's settings and `mower_logic`'s parameters. On top of
+  `mowing.plan`'s answer: segments, warnings, stats and a fingerprint. Without the increment `mower_logic`
+  adds to the angle after every finished job.
+
+```bash
+mosquitto_pub -h <mower> -t rpc/request \
+  -m '{"jsonrpc": "2.0", "id": "1", "method": "planner.settings.set", "params": {"turn_radius": 0.3}}'
+```
+
 ## Tests
 
 ```bash

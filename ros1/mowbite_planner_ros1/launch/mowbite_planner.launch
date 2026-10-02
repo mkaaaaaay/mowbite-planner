@@ -12,5 +12,7 @@
          angle_strategy is set here and the area has no angle of its own in the saved map (an editor preview
          of an angle just added or removed follows the saved area until the edit is saved) -->
     <rosparam param="settings">{turn_radius: 0.25}</rosparam>
+    <!-- the settings changed with the planner.settings.set RPC, on top of the ones above. Empty: until the next start -->
+    <param name="settings_file" value="$(optenv ROS_HOME ~/.ros)/mowbite_planner_settings.json"/>
   </node>
 </launch>

@@ -11,11 +11,15 @@ import os
 import re
 import struct
 import sys
+import tempfile
+import threading
 import types
 
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# the node keeps the settings changed over RPC in $ROS_HOME, not in the real one
+os.environ['ROS_HOME'] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner'))
 
 
@@ -47,12 +51,22 @@ def install():
                   outline=polygon, holes=list)
     request.FILL_LINEAR, request.FILL_CONCENTRIC = 0, 1
     response = msg('PlanPathResponse', paths=list)
+    rpc_error = msg('RpcError', code=int, message=str, id=str)
+    rpc_error.ERROR_INVALID_PARAMS, rpc_error.ERROR_INTERNAL = -32602, -32603
 
     class Rospy(types.ModuleType):
         params = {}
         log = []
         services = {}
         subscribers = {}
+        published = []
+        registered = []
+
+        class ROSException(Exception):
+            pass
+
+        class ServiceException(Exception):
+            pass
 
         class Time:
             @staticmethod
@@ -62,8 +76,17 @@ def install():
         def get_param(self, name, default=None):
             return self.params.get(name, default)
 
-        def Subscriber(self, topic, kind, callback):
+        def Subscriber(self, topic, kind, callback, **kwargs):
             self.subscribers[topic] = callback
+
+        def Publisher(self, topic, kind, **kwargs):
+            return types.SimpleNamespace(publish=lambda m: self.published.append((topic, m)))
+
+        def ServiceProxy(self, name, kind):
+            return lambda *a: self.registered.append(a)
+
+        def wait_for_service(self, name, timeout=None):
+            pass
 
         def Service(self, name, kind, handler):
             self.services[name] = handler
@@ -82,7 +105,11 @@ def install():
     modules = {
         'rospy': rospy,
         'std_msgs': types.ModuleType('std_msgs'),
-        'std_msgs.msg': types.SimpleNamespace(Header=header, String=msg('String', data=str)),
+        'std_msgs.msg': types.SimpleNamespace(Header=header, String=msg('String', data=str), Empty=msg('Empty')),
+        'xbot_mqtt': types.ModuleType('xbot_mqtt'),
+        'xbot_mqtt.msg': types.SimpleNamespace(RpcRequest=msg('RpcRequest', method=str, params=str, id=str),
+                                               RpcResponse=msg('RpcResponse', result=str, id=str), RpcError=rpc_error),
+        'xbot_mqtt.srv': types.SimpleNamespace(RegisterMethodsSrv=object),
         'geometry_msgs': types.ModuleType('geometry_msgs'),
         'geometry_msgs.msg': types.SimpleNamespace(Point=point, Point32=point32, Pose=pose, PoseStamped=pose_stamped,
                                                    Quaternion=quat, Polygon=polygon),
@@ -159,6 +186,12 @@ def send_map(data):
 def planner():
     rospy.params = {}
     rospy.log.clear()
+    rospy.published.clear()
+    rospy.registered.clear()
+    try:
+        os.remove(os.path.join(os.environ['ROS_HOME'], 'mowbite_planner_settings.json'))
+    except FileNotFoundError:
+        pass
     return node_module.MowbitePlannerRos1()
 
 
@@ -461,3 +494,174 @@ def test_patch_writes_the_known_properties_first():
     assert lines[update - 1].startswith('if (!std::isnan(data.outline_offset)) properties["outline_offset"]')
     assert lines[update + 1] == 'j["properties"] = properties;'
     assert 'json properties = data.other_properties' not in patch
+
+
+# OpenMower RPCs (planner.settings, planner.settings.set, planner.plan)
+
+def rpc(method, params=None, rid='1'):
+    """Hands the node a request like xbot_monitoring does, gives (result, None) or (None, (code, message))."""
+    rospy.published.clear()
+    raw = '' if params is None else params if isinstance(params, str) else json.dumps(params)
+    rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method=method, params=raw, id=rid))
+    assert len(rospy.published) <= 1
+    if not rospy.published:
+        return None, None
+    topic, m = rospy.published[0]
+    assert m.id == rid
+    if topic == '/xbot/rpc/response':
+        return json.loads(m.result), None
+    assert topic == '/xbot/rpc/error'
+    return None, (m.code, m.message)
+
+
+def stored_file():
+    return os.path.join(os.environ['ROS_HOME'], 'mowbite_planner_settings.json')
+
+
+def test_rpc_methods_registered(planner):
+    for t in threading.enumerate():  # the first registration runs on a thread of its own
+        if t is not threading.current_thread() and t.daemon:
+            t.join(1.0)
+    methods = ['planner.plan', 'planner.settings', 'planner.settings.set']
+    assert ('mowbite_planner', methods) in rospy.registered
+    rospy.registered.clear()
+    rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
+    assert rospy.registered == [('mowbite_planner', methods)]
+
+
+def test_rpc_settings(planner):
+    result, error = rpc('planner.settings')
+    assert error is None and result['file'] == stored_file() and result['own_angle'] is False
+    s = result['settings']
+    assert set(s) == set(node_module.PlannerConfig.names())
+    assert s['turn_radius'] == {'value': 0.25, 'default': 0.25, 'stored': False, 'type': 'number', 'settable': True,
+                                'unit': 'm', 'min': 0.0, 'max': 10.0}
+    assert s['mower_width']['value'] == 0.18 and s['mower_width']['settable']
+    assert s['lane_order']['value'] == 'skip' and s['lane_order']['choices'] == ['snake', 'skip']
+    assert s['turn_types']['type'] == 'list' and s['turn_types']['value'] == s['turn_types']['choices']
+    assert s['angle'] == {'value': None, 'default': None, 'stored': False, 'type': 'number', 'settable': True,
+                          'nullable': True, 'unit': 'rad'}
+    assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
+    for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes', 'skip_lanes',
+                 'allow_reverse'):
+        assert not s[name]['settable'] and s[name]['from'], name
+    assert s['overlap']['from'] == '/mower_logic/tool_width'
+
+
+def test_rpc_settings_set(planner):
+    result, error = rpc('planner.settings.set', {'turn_radius': 1, 'fill_pattern': 'crosshatch',
+                                                 'turn_types': 'u_turn,pivot', 'mower_width': 0.2})
+    assert error is None
+    s = result['settings']
+    assert s['turn_radius']['value'] == 1.0 and s['turn_radius']['stored'] and s['turn_radius']['default'] == 0.25
+    assert s['turn_types']['value'] == ['u_turn', 'pivot'] and s['mower_width']['value'] == 0.2
+    with open(stored_file()) as f:
+        assert json.load(f) == {'fill_pattern': 'crosshatch', 'mower_width': 0.2, 'turn_radius': 1.0,
+                                'turn_types': ['u_turn', 'pivot']}
+    # the next plan uses them, the blade too
+    cfg = planner.settings(request(distance=0.13), None)
+    assert cfg.turn_radius == 1.0 and cfg.fill_pattern == 'crosshatch' and cfg.mower_width == 0.2
+    assert cfg.lane_spacing == pytest.approx(0.13)
+    # and so does the node after a restart
+    again = node_module.MowbitePlannerRos1()
+    assert again.base.turn_radius == 1.0 and again.current.mower_width == 0.2
+    # null: back to the default
+    result, error = rpc('planner.settings.set', {'turn_radius': None, 'mower_width': None})
+    assert result['settings']['turn_radius']['value'] == 0.25 and not result['settings']['turn_radius']['stored']
+    assert result['settings']['mower_width']['value'] == 0.18
+    with open(stored_file()) as f:
+        assert json.load(f) == {'fill_pattern': 'crosshatch', 'turn_types': ['u_turn', 'pivot']}
+
+
+def test_rpc_settings_angle(planner):
+    # an angle or angle_strategy stored: the lanes go that way unless the area has an angle of its own
+    result, _ = rpc('planner.settings.set', {'angle_strategy': 'min_width'})
+    assert result['own_angle'] is True
+    assert planner.settings(request(angle=0.7), None).angle is None
+    rpc('planner.settings.set', {'angle_strategy': None})
+    assert planner.settings(request(angle=0.7), None).angle == 0.7
+
+
+@pytest.mark.parametrize('params, message', [
+    ({'turn_radius': -1}, 'turn_radius must be >= 0.0'),
+    ({'turn_radius': 11}, 'turn_radius must be <= 10.0'),
+    ({'turn_radius': True}, 'turn_radius must be a finite number'),
+    ({'turn_radius': '0.3'}, 'turn_radius must be a finite number'),
+    ({'fill_pattern': 'spiral'}, 'fill_pattern must be one of'),
+    ({'turn_types': []}, 'turn_types must be some of'),
+    ({'angle_min': 0.1}, 'angle_min and angle_max go together'),
+    ({'mower_width': 0}, 'mower_width must be > 0.0'),
+    ({'overlap': 0.2}, 'not settable here: overlap (/mower_logic/tool_width)'),
+    ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: allow_reverse'),
+    ({'nope': 1}, 'unknown planner settings: nope'),
+])
+def test_rpc_settings_set_refused(planner, params, message):
+    rpc('planner.settings.set', {'turn_radius': 0.3})
+    before = open(stored_file()).read()
+    result, error = rpc('planner.settings.set', params)
+    assert result is None and error[0] == -32602 and message in error[1], error
+    # nothing changed
+    assert open(stored_file()).read() == before and planner.base.turn_radius == 0.3
+
+
+def test_stored_settings_that_dont_fit_are_left_out(planner):
+    for content in ('{"turn_radius": -2}', '[1]', 'not json', '{"overlap_typo": 1}'):
+        with open(stored_file(), 'w') as f:
+            f.write(content)
+        rospy.log.clear()
+        node = node_module.MowbitePlannerRos1()
+        assert node.base.turn_radius == 0.25 and node.current.stored == {}
+        assert any(level == 'warn' and 'stored settings' in line for level, line in rospy.log), content
+        check(node.handle(request()))
+
+
+def test_no_settings_file(planner):
+    rospy.params = {'~settings_file': ''}
+    node = node_module.MowbitePlannerRos1()
+    result, _ = rpc('planner.settings.set', {'turn_radius': 0.4})
+    assert result['file'] is None and node.base.turn_radius == 0.4 and not os.path.exists(stored_file())
+
+
+def test_rpc_plan(planner):
+    send_map(the_map())
+    rospy.params['/mower_logic'] = {'tool_width': 0.13, 'outline_count': 2, 'mow_angle_offset': 0.0}
+    result, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and result['area_id'] == 'a' and result['paths']
+    assert result['lane_spacing'] == pytest.approx(0.13)
+    # trying a setting gives what setting it gives
+    tried, _ = rpc('planner.plan', {'area_id': 'a', 'settings': {'turn_radius': 0.6}})
+    assert tried['fingerprint'] != result['fingerprint']
+    rpc('planner.settings.set', {'turn_radius': 0.6})
+    after, _ = rpc('planner.plan', {'area_id': 'a'})
+    assert after['fingerprint'] == tried['fingerprint']
+    # the outline of an area like mowing.plan takes it
+    outline, _ = rpc('planner.plan', {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]})
+    assert outline['area_id'] is None and outline['paths']
+
+
+@pytest.mark.parametrize('method, params, code, message', [
+    ('planner.plan', {'area_id': 'nope'}, -32602, 'nope'),
+    ('planner.plan', '[1, 2]', -32602, 'params must be an object'),
+    ('planner.plan', 'not json', -32602, 'params must be an object'),
+    ('planner.settings.set', {'turn_radius': 'x'}, -32602, 'turn_radius'),
+])
+def test_rpc_errors(planner, method, params, code, message):
+    send_map(the_map())
+    result, error = rpc(method, params)
+    assert result is None and error[0] == code and message in error[1], error
+
+
+def test_rpc_plan_without_map(planner):
+    result, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error[0] == -32602 and 'no map' in error[1]
+
+
+def test_rpc_internal_error_and_others(planner, monkeypatch):
+    monkeypatch.setitem(planner.rpc.methods, 'planner.settings', lambda p: 1 / 0)
+    result, error = rpc('planner.settings')
+    assert error[0] == -32603 and 'division by zero' in error[1]
+    assert any(level == 'error' for level, _ in rospy.log)
+    # another node's method, a notification (no id): no answer
+    assert rpc('mowing.plan', {}) == (None, None)
+    assert rpc('planner.settings.set', {'turn_radius': 0.5}, rid='') == (None, None)
+    assert planner.base.turn_radius == 0.5

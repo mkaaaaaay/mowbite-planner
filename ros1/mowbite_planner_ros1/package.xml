@@ -14,5 +14,7 @@
   <exec_depend>nav_msgs</exec_depend>
   <!-- OpenMower's planner messages: PlanPath.srv and Path.msg -->
   <exec_depend>slic3r_coverage_planner</exec_depend>
+  <!-- OpenMower's RPC messages (planner.settings, planner.settings.set, planner.plan) -->
+  <exec_depend>xbot_mqtt</exec_depend>
   <exec_depend>python3-shapely</exec_depend>
 </package>

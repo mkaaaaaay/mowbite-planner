@@ -20,17 +20,33 @@ The plan never depends on where the mower is, so the same map gives the same pla
 digest of it to resume an interrupted mow).
 
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
-allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), max_path_poses (at least
-4), frame_id, service, map_topic, use_map. The request always gives the lane spacing (with mower_width the
-overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a concentric fill_pattern,
-settings can't change them (an area's planner property can). The angle too, unless settings has angle or
+allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
+settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
+until the next start only), max_path_poses (at least 4), frame_id, service, map_topic, use_map, rpc. The request
+always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
+lane_overlap_passes, the skip flags and a concentric fill_pattern, settings can't change them (an area's planner
+property can). The angle too, unless settings has angle or
 angle_strategy and the area has no angle of its own. Whether it has one comes from the saved map: a preview in
 the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just added or
 removed follows the saved area until the edit is saved.
+
+OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
+  planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
+                        choices, settable. Not settable: what comes with mower_logic's request (from its
+                        parameters tool_width, outline_count, ...) and allow_reverse (FTC only drives forwards).
+                        mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH)
+  planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
+                        the next plan uses them (an interrupted area whose plan changes starts again). Answers
+                        like planner.settings
+  planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
+                        before setting them, poses...) with the node's settings and mower_logic's parameters.
+                        Not in it: the increment mower_logic adds to the angle after every finished job
 """
 
+import collections
 import json
 import math
+import os
 import threading
 
 import rospy
@@ -38,34 +54,212 @@ from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
 from nav_msgs.msg import Path
 from slic3r_coverage_planner.msg import Path as PlannerPath
 from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
-from std_msgs.msg import Header, String
+from std_msgs.msg import Empty, Header, String
+from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
+from xbot_mqtt.srv import RegisterMethodsSrv
 
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
+from mowbite_planner import planner as limits
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.mapfile import area_job, match_area
+from mowbite_planner.mqtt_service import PlannerService
+
+# set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
+FIXED = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
+         'perimeter_passes': '/mower_logic/outline_count', 'lane_overlap_passes': '/mower_logic/outline_overlap_count',
+         'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
+         'allow_reverse': 'forwards only (FTC)'}
+CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIMETER_ORDERS,
+           'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
+           'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES}
+RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
+Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored')
+RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
+          'perimeter_passes': (0, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
+          'angle_step': (limits.MIN_ANGLE_STEP, None)}
+
+
+class XbotRpc:
+    """OpenMower's RPC methods from Python, like xbot_mqtt's RpcProvider: xbot_monitoring hands the requests
+    for registered methods to /xbot/rpc/request, the answers go back on /xbot/rpc/response or /xbot/rpc/error.
+    methods: name -> callback(params) giving the result, a PlanningError is the caller's mistake."""
+
+    def __init__(self, node_id, methods):
+        self.node_id, self.methods = node_id, methods
+        self.response = rospy.Publisher('/xbot/rpc/response', RpcResponse, queue_size=100)
+        self.error = rospy.Publisher('/xbot/rpc/error', RpcError, queue_size=100)
+        self.register = rospy.ServiceProxy('/xbot/rpc/register', RegisterMethodsSrv)
+        rospy.Subscriber('/xbot/rpc/request', RpcRequest, self.on_request, queue_size=100, tcp_nodelay=True)
+        # latched by xbot_monitoring when it starts: it forgot the methods, register them again
+        rospy.Subscriber('/xbot/rpc/registry', Empty, lambda _: self.publish_methods())
+        threading.Thread(target=self.publish_methods, daemon=True).start()
+
+    def publish_methods(self):
+        try:
+            rospy.wait_for_service('/xbot/rpc/register', timeout=30.0)
+            self.register(self.node_id, sorted(self.methods))
+        except (rospy.ROSException, rospy.ServiceException) as e:  # RPCs aren't needed for mowing
+            rospy.logwarn('MowBite Planner: RPC methods not registered: %s', e)
+
+    def on_request(self, req):
+        if req.method not in self.methods:  # another node's
+            return
+        try:
+            try:
+                params = json.loads(req.params) if req.params else {}
+            except ValueError:
+                params = None
+            if not isinstance(params, dict):
+                raise PlanningError('params must be an object (by name)')
+            result = json.dumps(self.methods[req.method](params), allow_nan=False)
+        except PlanningError as e:
+            rospy.loginfo('MowBite Planner: %s: %s', req.method, e)
+            return self.fail(req, RpcError.ERROR_INVALID_PARAMS, str(e))
+        except Exception as e:  # noqa: BLE001 - an RPC must not take the planner down
+            rospy.logerr('MowBite Planner: %s failed: %s: %s', req.method, type(e).__name__, e)
+            return self.fail(req, RpcError.ERROR_INTERNAL, 'internal error: %s' % e)
+        if req.id:
+            self.response.publish(RpcResponse(result=result, id=req.id))
+
+    def fail(self, req, code, message):
+        if req.id:
+            self.error.publish(RpcError(code=code, message=message, id=req.id))
 
 
 class MowbitePlannerRos1:
     def __init__(self):
-        self.mower_width = float(rospy.get_param('~mower_width', 0.18))
-        # OpenMower's FTC controller only drives forwards: no K-turns, and lanes far enough apart that every
-        # turn is a forward U-turn of turn_radius. ~settings can change that (and anything else)
-        settings = dict(rospy.get_param('~settings', {}) or {})
-        self.base = PlannerConfig(allow_reverse=False, lane_order='skip').with_overrides(settings)
-        self.base.validate()
-        # with angle or angle_strategy in settings the lanes go that way, not mower_logic's angle, unless the area
-        # has its own
-        self.own_angle = 'angle' in settings or 'angle_strategy' in settings
+        self.launch_width = float(rospy.get_param('~mower_width', 0.18))
+        self.launch = dict(rospy.get_param('~settings', {}) or {})
+        self.defaults = self.setup(self.launch_width, self.launch, {})
+        self.file = os.path.expanduser(rospy.get_param('~settings_file', os.path.join(
+            os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_planner_settings.json')))
+        # swapped as a whole, a plan never sees half of a change
+        self.current = self.defaults
+        stored = self.read_stored()
+        if stored:
+            try:
+                self.current = self.setup(self.launch_width, self.launch, stored)
+            except PlanningError as e:  # the launch file changed since, its settings still work
+                rospy.logwarn('MowBite Planner: stored settings left out (%s): %s', self.file, e)
         # OpenMower's FTC controller needs 3 poses a path, pieces of at most 3 can't always have them
         self.max_poses = max(4, int(rospy.get_param('~max_path_poses', MAX_PATH_POSES)))
         self.frame_id = rospy.get_param('~frame_id', 'map')
         self.map = None
         self.lock = threading.Lock()
+        self.set_lock = threading.Lock()
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
+        if rospy.get_param('~rpc', True):
+            self.rpc = XbotRpc('mowbite_planner', {'planner.settings': self.rpc_settings,
+                                                   'planner.settings.set': self.rpc_settings_set,
+                                                   'planner.plan': self.rpc_plan})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
+
+    @property
+    def base(self):
+        return self.current.base
+
+    @staticmethod
+    def setup(width, settings, stored):
+        """The settings with the stored ones on top, PlanningError if they don't go together."""
+        on_top = {n: v for n, v in stored.items() if n != 'mower_width'}
+        settings = dict(settings, **on_top)
+        # OpenMower's FTC controller only drives forwards: no K-turns, and lanes far enough apart that every
+        # turn is a forward U-turn of turn_radius. ~settings can change that (and anything else)
+        base = PlannerConfig(allow_reverse=False, lane_order='skip').with_overrides(settings)
+        base.validate()
+        blade = base.with_overrides({'mower_width': stored.get('mower_width', width)})
+        blade.validate()
+        # with angle or angle_strategy in settings the lanes go that way, not mower_logic's angle, unless the area
+        # has its own
+        own_angle = 'angle' in settings or 'angle_strategy' in settings
+        # as the planner took them: ints of a float setting as floats, turn_types as a list
+        stored = {n: getattr(blade if n == 'mower_width' else base, n) for n in stored}
+        return Setup(blade.mower_width, base, own_angle,
+                     {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()})
+
+    def read_stored(self):
+        if not self.file or not os.path.exists(self.file):
+            return {}
+        try:
+            with open(self.file) as f:
+                stored = json.load(f)
+            if not isinstance(stored, dict):
+                raise ValueError('not an object')
+            return stored
+        except (OSError, ValueError) as e:
+            rospy.logwarn('MowBite Planner: stored settings not readable (%s): %s', self.file, e)
+            return {}
+
+    def write_stored(self, stored):
+        if not self.file:
+            return
+        tmp = self.file + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(stored, f, indent=1, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.file)
+
+    def rpc_settings(self, params=None):
+        current, defaults = self.current, self.defaults
+        out = {}
+        for name in PlannerConfig.names():
+            default = PlannerConfig.__dataclass_fields__[name].default
+            kind = ('boolean' if isinstance(default, bool) else 'integer' if isinstance(default, int)
+                    else 'string' if isinstance(default, str) else 'list' if isinstance(default, tuple) else 'number')
+            blade = name == 'mower_width'
+            entry = {'value': current.mower_width if blade else getattr(current.base, name),
+                     'default': defaults.mower_width if blade else getattr(defaults.base, name),
+                     'stored': name in current.stored, 'type': kind, 'settable': name not in FIXED}
+            if name in FIXED:
+                entry['from'] = FIXED[name]
+            if default is None:
+                entry['nullable'] = True
+            if name in CHOICES:
+                entry['choices'] = CHOICES[name]
+            if kind == 'number':
+                entry['unit'] = 'rad' if name in RAD else '' if name == 'overlap' else 'm'
+                if name not in RAD:
+                    entry['min'] = 0.0
+            if name in RANGES:
+                entry['min'], hi = RANGES[name]
+                if hi is not None:
+                    entry['max'] = hi
+            out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
+        return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None}
+
+    def rpc_settings_set(self, params):
+        fixed = sorted(set(params) & set(FIXED))
+        if fixed:
+            raise PlanningError('not settable here: %s' % ', '.join('%s (%s)' % (n, FIXED[n]) for n in fixed))
+        unknown = sorted(set(params) - set(PlannerConfig.names()))
+        if unknown:
+            raise PlanningError('unknown planner settings: %s' % ', '.join(unknown))
+        with self.set_lock:
+            stored = dict(self.current.stored)
+            for name, value in params.items():
+                if value is None:
+                    stored.pop(name, None)
+                else:
+                    stored[name] = value
+            current = self.setup(self.launch_width, self.launch, stored)
+            self.write_stored(current.stored)
+            self.current = current
+        rospy.loginfo('MowBite Planner: settings %s', json.dumps(current.stored, sort_keys=True))
+        return self.rpc_settings()
+
+    def rpc_plan(self, params):
+        current = self.current
+        with self.lock:
+            data = self.map
+        service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width}),
+                                 current.own_angle)
+        service.map = data
+        service.params = rospy.get_param('/mower_logic', {})
+        return service.plan(params)
 
     def on_map(self, msg):
         try:
@@ -79,7 +273,8 @@ class MowbitePlannerRos1:
     def settings(self, req, job):
         """The node's settings, then what mower_logic asks for, then the area's own (planner property and
         angle range)."""
-        width = max(self.mower_width, req.distance)
+        current = self.current
+        width = max(current.mower_width, req.distance)
         asked = dict(
             mower_width=width,
             # OpenMower's distance is the lane spacing
@@ -92,11 +287,11 @@ class MowbitePlannerRos1:
             skip_lanes=bool(req.skip_fill),
         )
         # the area's own angle (mower_logic adds mow_angle_offset) beats settings, its planner property beats both
-        if not self.own_angle or (job is not None and job.overrides.get('angle') is not None):
+        if not current.own_angle or (job is not None and job.overrides.get('angle') is not None):
             asked['angle'] = float(req.angle)
         if req.fill_type == PlanPathRequest.FILL_CONCENTRIC:
             asked['fill_pattern'] = 'concentric'
-        cfg = self.base.with_overrides(asked)
+        cfg = current.base.with_overrides(asked)
         return cfg.with_overrides(job.planner) if job else cfg
 
     def handle(self, req):
