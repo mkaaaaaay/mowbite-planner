@@ -20,6 +20,8 @@ from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, plan_tu
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
                                      angle_in_range, best_order, longest_edge_angle, scan_lanes, split_cells)
+from mowbite_planner.footprint import Footprint  # noqa: E402
+from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -614,7 +616,7 @@ def test_blade_offset_with_few_loops_warns():
 
 @pytest.mark.parametrize('off', [0.0, 0.1])
 def test_robot_width_keeps_the_body_inside(off):
-    cfg = PlannerConfig(**dict(FORWARD, robot_width=0.4, blade_offset=off))
+    cfg = PlannerConfig(**dict(FORWARD, robot_width=0.4, blade_offset=off, edges='hard'))
     assert cfg.blade_loop_offset == pytest.approx(0.2 - off) and cfg.centre_offset == pytest.approx(0.2)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [TREE, BED])
@@ -654,7 +656,8 @@ def test_blade_ahead_mows_the_lanes_where_they_are(ahead):
 def test_robot_width_narrower_than_the_loop_changes_nothing():
     cfg = PlannerConfig(**FORWARD)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg)
-    narrow = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, perimeter_offset=0.1, robot_width=0.1)))
+    narrow = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, perimeter_offset=0.1, robot_width=0.1,
+                                                                     edges='hard')))
     wider = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, perimeter_offset=0.1)))
     assert [(p.x, p.y) for p in narrow.poses] == [(p.x, p.y) for p in wider.poses]
     assert plan.poses != wider.poses
@@ -666,6 +669,83 @@ def test_body_and_blade_settings_out_of_range():
         with pytest.raises(PlanningError, match=match):
             PlannerConfig(**kw).validate()
     assert PlannerConfig().with_overrides({'robot_width': None, 'blade_offset': 0}).blade_offset == 0.0
+    for kw, match in ((dict(robot_front=-0.1), 'robot_front'), (dict(robot_rear=math.inf), 'robot_rear'),
+                      (dict(edges='soft'), 'edges')):
+        with pytest.raises(PlanningError, match=match):
+            PlannerConfig(**kw).validate()
+    assert PlannerConfig().with_overrides({'robot_front': 1}).robot_front == 1.0
+
+
+# the body (robot_width, robot_front, robot_rear) -----------------------------------------------------------
+
+NX60I = dict(robot_width=0.40, robot_front=0.43, robot_rear=0.14)
+MOWER = dict(FORWARD, mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0, blade_ahead=0.17,
+             perimeter_passes=4, lane_overlap_passes=1)
+
+
+def test_robot_width_alone_changes_nothing_on_recorded_edges():
+    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**FORWARD))
+    width = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, robot_width=0.4)))
+    assert width.poses == plain.poses and width.body_space is None
+    assert check_plan(width)['body_out'] == []
+
+
+def test_footprint():
+    fp = Footprint(Polygon(rect(0, 0, 10, 10)), 0.4, 0.43, 0.14)
+    assert fp.fits_pose(5, 5, 0.0) and fp.fits_pose(9.5, 5, 0.0) and not fp.fits_pose(9.6, 5, 0.0)
+    assert fp.fits_pose(0.2, 5, 0.0) and not fp.fits_pose(0.1, 5, 0.0)  # the rear
+    assert fp.fits_turn(0.5, 0.5, 0.0, math.pi) and not fp.fits_turn(0.2, 5, 0.0, math.pi / 2)
+    # turning on the spot where the heading jumps from the pose before: half way round the rear corner sticks out
+    poses = [Pose2D(9.4, 0.22, 0.0), Pose2D(9.5, 0.22, math.pi / 2), Pose2D(9.5, 0.32, math.pi / 2)]
+    assert fp.bad_poses(poses) == [1] and fp.spins(poses, 1) and not fp.poses_fit(poses)
+
+
+def test_body_turns_and_lane_ends_stay_inside():
+    """The turns fit with the body: lane ends pulled back for the U-turns, no turn on the spot or replaced by a
+    drive, and nothing of the body past the edges but on the outer loop: its centre runs on the line (perimeter_offset
+    0), at its corners and turning off it the body can't keep within half its width."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg)
+    plain = plan_coverage(rect(0, 0, 10, 6), [], PlannerConfig(**dict(MOWER, angle=0.0)), start=(1, 1, 0.0),
+                          end=(1, 1))
+    assert plan.stats['turns_u_turn'] == plain.stats['turns_u_turn'] + plain.stats['turns_pivot'] > 0
+    assert plan.stats['turns_pivot'] == plan.stats['turns_fallback'] == plan.stats['turns_detour'] == 0
+    out = check_plan(plan)['body_out']
+    assert out and {o['kind'] for o in out} <= {'loop', 'spin'}
+    edge = Polygon(rect(0, 0, 10, 6)).exterior
+    assert all(edge.distance(Point(o['x'], o['y'])) < 0.05 for o in out)  # (its corner arcs a few cm in)
+    # the lanes end where the U-turn's arc keeps the front in: a turn of 0.25 reaches 0.62 past the end, the body
+    # may go 0.21 past the edge
+    ends = [x for a, b in plan.lanes for x in (a[0], b[0])]
+    assert max(ends) <= 10 + 0.21 - math.hypot(0.25 + 0.2, 0.43) + 0.02
+    assert any('lanes shortened' in w for w in plan.warnings)
+
+
+def test_body_in_the_garden():
+    obstacles = [TREE, BED]
+    for edges in ('recorded', 'hard'):
+        cfg = PlannerConfig(**dict(MOWER, **NX60I, edges=edges))
+        plan = plan_coverage(GARDEN, obstacles, cfg, start=(1, 1, 0.0), end=(1, 1))
+        check_invariants(plan, cfg, obstacles)
+        assert plan.stats['turns_fallback'] == 0 and plan.stats['turns_pivot'] <= 2
+        report = check_plan(plan)
+        assert {'x', 'y', 'yaw', 'kind'} == set(report['body_out'][0])
+        assert any('body sticks out' in h for h in report['hard'])
+        assert any('body sticks out' in w for w in plan.warnings)
+        # left: the corners the body keeps the mower out of, and the lane starts of the turns
+        assert report['left_m2'] < (0.5 if edges == 'recorded' else 1.5)
+        assert sum(o['kind'] in ('turn', 'lane_end') for o in report['body_out']) == 0
+
+
+def test_body_corner_rounding():
+    """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
+    with a larger one."""
+    fp = Footprint(Polygon(rect(0, 0, 10, 10)).buffer(0.21, 8, join_style=2), 0.4, 0.43, 0.14)
+    loop = [(0.13, 0.13), (9.87, 0.13), (9.87, 5.0)]
+    plain = drive_polyline(loop, 0.05, 0.15, lambda pts: True, 1, 0.054)
+    rounded = drive_polyline(loop, 0.05, 0.15, lambda pts: True, 1, 0.054, body=fp.poses_fit)
+    assert fp.bad_poses(plain) and not fp.bad_poses(rounded)
 
 
 # drives off the edges --------------------------------------------------------------------------------------

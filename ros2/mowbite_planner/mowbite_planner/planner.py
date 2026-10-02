@@ -28,9 +28,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
 
+from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .maneuvers import (CORNER_ANGLE, closest_on_polyline, connect, drive_polyline, path_length, plan_turn,
-                        same_position, sample_straight)
+                        same_position, sample_arc, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -52,6 +53,8 @@ FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
 PERIMETER_ORDERS = ('first', 'last')
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
 TURN_TYPES = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')
+# 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
+EDGES = ('recorded', 'hard')
 # recorded outlines have a point every few cm, for finding their longest edge they're simplified this much
 ANGLE_SIMPLIFY_TOLERANCE = 0.10
 # rounding a loop's corner may cut it by this share of the mower width at most, 90 degree corners keep the
@@ -72,6 +75,10 @@ MAX_TURN_RADIUS = 10.0
 MAX_COORDINATE = 1e7
 # m, a blade further off the mower's centre is a mistake
 MAX_BLADE_OFFSET = 1.0
+# m, the body may reach this much further than the edges allow (rounding, simplifying)
+BODY_TOLERANCE = 0.01
+# m, lane ends are pulled back to this when the body doesn't fit at them
+BODY_STEP = 0.01
 
 
 class PlanningError(ValueError):
@@ -131,9 +138,16 @@ class PlannerConfig:
     skip_outline_loops: bool = False
     skip_obstacle_loops: bool = False
     skip_lanes: bool = False
-    # m, the mower's body: its centre keeps robot_width / 2 off the outline and the obstacles, the first loop
-    # moves further in where perimeter_offset would bring the body closer. None: only perimeter_offset counts
+    # m, the mower's body around its centre (base_link): robot_width wide, robot_front ahead of it, robot_rear
+    # behind. With all three the turns, lane ends, loops and drives keep the body in the space it may take (see
+    # edges). None: not checked
     robot_width: Optional[float] = None
+    robot_front: Optional[float] = None
+    robot_rear: Optional[float] = None
+    # 'recorded': the outline and obstacles are where the centre drove, the body may reach half its width past
+    # them, like when they were recorded. 'hard': they're walls, nothing of the body goes past them, the centre
+    # keeps robot_width / 2 off them (the first loop moves further in where perimeter_offset would come closer)
+    edges: str = 'recorded'
     # m, how far the blade's centre sits to the left of the mower's centre (negative: right). The loops go
     # round with the blade on their outer side, so it mows up to perimeter_offset while the body stays further
     # in, the lanes move so the blade's lines stay a lane spacing apart
@@ -154,8 +168,8 @@ class PlannerConfig:
     @property
     def blade_loop_offset(self) -> float:
         """m, how far inside the outline (and off the obstacles) the blade's centre runs on the first loop:
-        first_loop_offset, further in where the body (robot_width) wouldn't fit there."""
-        if self.robot_width is None:
+        first_loop_offset, further in where the body (robot_width, hard edges) wouldn't fit there."""
+        if self.robot_width is None or self.edges != 'hard':
             return self.first_loop_offset
         return max(self.first_loop_offset, 0.5 * self.robot_width - abs(self.blade_offset))
 
@@ -163,6 +177,11 @@ class PlannerConfig:
     def centre_offset(self) -> float:
         """m, how far the mower's centre keeps off the outline and the obstacles."""
         return self.blade_loop_offset + abs(self.blade_offset)
+
+    @property
+    def body(self) -> bool:
+        """Whether the body is checked: robot_width, robot_front and robot_rear set."""
+        return None not in (self.robot_width, self.robot_front, self.robot_rear)
 
     @property
     def allowed_turns(self) -> Tuple[str, ...]:
@@ -234,8 +253,9 @@ class PlannerConfig:
             raise PlanningError('angle_min and angle_max go together')
         if self.perimeter_offset is not None:
             finite('perimeter_offset')
-        if self.robot_width is not None:
-            finite('robot_width', 0.0)
+        for name in ('robot_width', 'robot_front', 'robot_rear'):
+            if getattr(self, name) is not None:
+                finite(name, 0.0)
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         finite('blade_ahead', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         for name in ('perimeter_passes', 'lane_overlap_passes'):
@@ -248,7 +268,8 @@ class PlannerConfig:
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
-                              ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS)):
+                              ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
+                              ('edges', EDGES)):
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
@@ -260,7 +281,7 @@ class PlannerConfig:
 
 
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
-_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width')
+_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear')
 _FLOATS = tuple(f.name for f in dataclasses.fields(PlannerConfig) if isinstance(f.default, float)) + _OPTIONAL
 
 
@@ -306,6 +327,7 @@ class CoveragePlan:
     remaining: object = None  # free_space minus the strips the perimeter loops mow
     angles: List[float] = dataclasses.field(default_factory=list)  # of every set of lanes (crosshatch: 2)
     transit_space: object = None  # robot_space and the drivable areas
+    body_space: object = None  # where the mower's body may be (robot_width, robot_front, robot_rear set)
     config: Optional[PlannerConfig] = None  # what it was planned with
     section_starts: List[int] = dataclasses.field(default_factory=lambda: [0])  # first pose of every section
     # where things come from, for following a plan through its stages (export's Planner Studio payload):
@@ -779,8 +801,10 @@ def best_order(start: List[List[float]], link, end: List[List[float]],
 
 class _Route:
     def __init__(self, cfg: PlannerConfig, transit: TransitPlanner, area: TransitPlanner, start: Optional[XY],
-                 heading: Optional[float], end: Optional[XY]):
+                 heading: Optional[float], end: Optional[XY], footprint: Optional[Footprint] = None):
         self.cfg = cfg
+        self.footprint = footprint
+        self.body = footprint.poses_fit if footprint is not None else None
         self.transit = transit  # shortest ways, through the drivable areas too
         self.area = area  # turns and loops stay inside the mowing area
         self.step = cfg.waypoint_spacing
@@ -832,7 +856,7 @@ class _Route:
             return
         # leaving and arriving on arcs where they fit
         poses = connect(self.pos, self.heading, target, heading, self.cfg.turn_radius, self.step,
-                        self.transit.is_free, self.transit.careful_path)
+                        self.transit.is_free, self.transit.careful_path, self.body)
         if poses is None:
             self.warnings.append(f'no way found from ({self.pos[0]:.2f}, {self.pos[1]:.2f}) to ({target[0]:.2f}, '
                                  f'{target[1]:.2f}): the path jumps there')
@@ -923,7 +947,7 @@ class _Route:
         self.go_to(entry, math.atan2(first[1], first[0]) if first else None)
         # with the mowable side on the left only left turns go round a corner of it and get rounded
         poses = drive_polyline(loop, self.step, radius, self.area.is_free, -1 if flip else 1,
-                               CORNER_CUT * self.cfg.mower_width, level, spacing, self.cfg.mower_width)
+                               CORNER_CUT * self.cfg.mower_width, level, spacing, self.cfg.mower_width, self.body)
         self.add(kind, poses, maneuver=maneuver)
         self.loops.append([(p.x, p.y) for p in poses])
 
@@ -1145,7 +1169,7 @@ class _Route:
             return False
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
-                         self.cfg.allowed_turns)
+                         self.cfg.allowed_turns, self.body)
         if turn is None:
             return False
         for piece in turn.pieces:
@@ -1202,6 +1226,14 @@ class _Route:
                         continue
                     a, b = piece
             yaw = normalize_angle(angle if direction > 0 else angle + math.pi)
+            if self.footprint is not None and not lane.bends:
+                # the side the turns come from and go to (left of the lanes going +x is +y)
+                side = [0.0 if o is None else direction * math.copysign(1.0, o.y - lane.y)
+                        for o in (lanes[i - 1] if driven else None, lanes[i + 1] if i + 1 < len(lanes) else None)]
+                ends = self.body_ends(a, b, yaw, side[0], side[1])
+                if ends is None:
+                    continue
+                a, b = ends
             name = f'lane-{len(self.lanes)}'
             self.source = name
             self.origins[name] = {'parent': self.cell_of.get(id(lane), ''),
@@ -1213,7 +1245,21 @@ class _Route:
             else:
                 turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                                  self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
-                                 self.cfg.allowed_turns)
+                                 self.cfg.allowed_turns, self.body)
+                # the turn goes level with the lane end further out, where the body may not fit (body_ends only
+                # made room for a turn level with each end): this lane starts level with the last one's end then
+                ux, uy = math.cos(yaw), math.sin(yaw)
+                level = (self.pos[0] - a[0]) * ux + (self.pos[1] - a[1]) * uy
+                rest = math.hypot(b[0] - a[0], b[1] - a[1]) - self.cfg.min_lane_length
+                if (turn is None or turn.name in ('detour', 'pivot')) and self.footprint is not None and \
+                        not lane.bends and 1e-6 < level < rest:
+                    start = (a[0] + level * ux, a[1] + level * uy)
+                    other = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), start, self.cfg.turn_radius,
+                                      self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
+                                      self.cfg.allowed_turns, self.body)
+                    if other is not None and (turn is None or other.name not in ('detour', 'pivot')):
+                        a, turn = start, other
+                        self._count('lanes_body')
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, piece.reverse, turn.name)
@@ -1222,8 +1268,8 @@ class _Route:
                     pts = self.transit.path(self.pos, a)
                     if pts is None:
                         return lanes[i:]
-                    self.add(TRANSIT, drive_polyline(pts, self.step, self.cfg.turn_radius,
-                                                     self.transit.is_free), maneuver='turn_fallback')
+                    self.add(TRANSIT, drive_polyline(pts, self.step, self.cfg.turn_radius, self.transit.is_free,
+                                                     body=self.body), maneuver='turn_fallback')
                     self._count('turns_fallback')
             if lane.bends:
                 self.bent_lane(lane, direction, a, b, to_map)
@@ -1233,6 +1279,50 @@ class _Route:
             direction = -direction
             driven += 1
         return None
+
+    def body_ends(self, a: XY, b: XY, yaw: float, arrive: float, leave: float) -> Optional[Tuple[XY, XY]]:
+        """The lane from a to b pulled back at its ends until the body fits there, and on the quarter arcs of
+        turn_radius the turns arrive and leave on: arrive, leave 1 from or to the left, -1 the right, 0 no turn.
+        None if less than min_lane_length is left."""
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        ux, uy = math.cos(yaw), math.sin(yaw)
+        r, quarter = self.cfg.turn_radius, 0.5 * math.pi
+
+        def fits(t: float) -> bool:
+            x, y = a[0] + t * ux, a[1] + t * uy
+            if not self.footprint.fits_pose(x, y, yaw):
+                return False
+            if r <= 1e-3:
+                return True
+            # leaving at the end, arriving at the start (worked out backwards, facing the other way)
+            if t > 0.5 * length:
+                return not leave or self.footprint.poses_fit(sample_arc(x, y, yaw, r, leave * quarter, self.step))
+            return not arrive or self.footprint.poses_fit(
+                [Pose2D(p.x, p.y, p.yaw + math.pi) for p in sample_arc(x, y, yaw + math.pi, r, -arrive * quarter,
+                                                                         self.step)])
+
+        def edge(inside: float, outside: float) -> float:
+            # where between a point that fits and one that doesn't it stops fitting, the side that fits
+            while abs(outside - inside) > BODY_STEP:
+                t = 0.5 * (inside + outside)
+                inside, outside = (t, outside) if fits(t) else (inside, t)
+            return inside
+
+        t0, t1 = 0.0, length
+        if fits(t0) and fits(t1):
+            return a, b
+        # the body and a turn reach no further than this past the lane's end
+        mid = 0.5 * length
+        near = min(mid, 2.0 * (self.footprint.reach + self.cfg.turn_radius))
+        if not fits(mid):
+            t0 = t1 = mid
+        else:
+            t0 = t0 if fits(t0) else edge(near if fits(near) else mid, t0)
+            t1 = t1 if fits(t1) else edge(length - near if fits(length - near) else mid, t1)
+        self._count('lanes_body')
+        if t1 - t0 < max(self.cfg.min_lane_length, 1e-6):
+            return None
+        return (a[0] + t0 * ux, a[1] + t0 * uy), (a[0] + t1 * ux, a[1] + t1 * uy)
 
     def bent_lane(self, lane: Lane, direction: int, a: XY, b: XY, to_map) -> None:
         """A lane that bends around obstacles (see bend_lanes), from a to b, its corners rounded. With
@@ -1248,7 +1338,8 @@ class _Route:
             bends = [way[::-1] for way in bends[::-1]]
         pts = [a] + [p for way in bends for p in way] + [b]
         pts = [p for i, p in enumerate(pts) if i == 0 or not same_position(p, pts[i - 1])]
-        self.add(LANE, drive_polyline(pts, self.step, self.cfg.turn_radius, self.area.is_free), maneuver='bend')
+        self.add(LANE, drive_polyline(pts, self.step, self.cfg.turn_radius, self.area.is_free, body=self.body),
+                 maneuver='bend')
         self._count('bends')
 
 
@@ -1487,7 +1578,14 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         transit_space = polygonal(union([robot_space, extra_space]))
     transit = area_space if transit_space is robot_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
-    route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy)
+    body_space = footprint = None
+    if cfg.body:
+        # recorded edges are where the centre drove, the body reached half its width past them
+        reach = (0.5 * cfg.robot_width if cfg.edges == 'recorded' else 0.0) + BODY_TOLERANCE
+        # (square corners: driving along both edges into a corner it reached that far past each)
+        body_space = union([free, union(clean_polygon(d) for d in drivable)]).buffer(reach, QUAD_SEGS, join_style=2)
+        footprint = Footprint(body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
+    route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
     route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
                      for ci, cell in enumerate(cells) for lane in cell}
     last = cfg.perimeter_order == 'last'
@@ -1590,6 +1688,17 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                               f'blade_offset {cfg.blade_offset} m the centre runs that far off the blade\'s line, '
                               'more perimeter loops leave room for it')
     section_starts = [s.start for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section]
+    if route.counts.get('lanes_body'):
+        route.warnings.append(f'{route.counts["lanes_body"]} lanes shortened or left out where the body would stick '
+                              'out at their ends')
+    out = body_out(poses, segments, section_starts, footprint) if footprint is not None else []
+    if out:
+        kinds: Dict[str, int] = {}
+        for o in out:
+            kinds[o['kind']] = kinds.get(o['kind'], 0) + 1
+        route.warnings.append(f'the body sticks out at {len(out)} poses ('
+                              f'{", ".join(f"{k} {n}" for k, n in sorted(kinds.items()))}), the first '
+                              f'({out[0]["kind"]}) at ({out[0]["x"]:.2f}, {out[0]["y"]:.2f})')
     if len(section_starts) > 1:
         route.warnings.append(f'the area has {len(section_starts)} parts with no way between them: the path '
                               'jumps from one to the next')
@@ -1620,8 +1729,35 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         poses=poses, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=route.loops,
         lanes=route.lanes, stats=stats, warnings=route.warnings, area=area, free_space=free,
         robot_space=robot_space, lane_region=lane_region, remaining=remaining,
-        angles=[a for a, _ in passes] or [angle], transit_space=transit_space, config=cfg,
+        angles=[a for a, _ in passes] or [angle], transit_space=transit_space, body_space=body_space, config=cfg,
         section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
+
+
+def plan_footprint(plan: CoveragePlan) -> Optional[Footprint]:
+    cfg = plan.config
+    if cfg is None or not cfg.body or plan.body_space is None:
+        return None
+    return Footprint(plan.body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
+
+
+def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
+             footprint: Footprint) -> List[Dict[str, Any]]:
+    """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
+    'lane_end', 'loop' or 'transit' (what the pose belongs to)."""
+    kind_at: Dict[int, str] = {}
+    for seg in segments:
+        kind = {TURN: 'turn', TRANSIT: 'transit', PERIMETER: 'loop'}.get(seg.kind, 'loop' if seg.maneuver == 'ring'
+                                                                         else 'lane_end')
+        for i in range(seg.start, seg.end + 1):
+            kind_at[i] = kind
+    out = []
+    for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
+        part = poses[a:b]
+        for i in footprint.bad_poses(part):
+            p = part[i]
+            out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
+                        'kind': 'spin' if footprint.spins(part, i) else kind_at.get(a + i, 'transit')})
+    return out
 
 
 def blade_points(plan: CoveragePlan, start: int, end: int) -> List[XY]:

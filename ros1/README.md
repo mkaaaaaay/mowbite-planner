@@ -226,7 +226,9 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
 - `planner.settings`: every setting with its value, default, whether it's stored, type, unit, range or
   choices, and whether it can be set here. The ones that come with `mower_logic`'s request say where from
   (`/mower_logic/tool_width`, ...), `allow_reverse` stays off (FTC only drives forwards). `mower_width` is the
-  blade and beats `OM_BLADE_WIDTH`.
+  blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
+  the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
+  (both may be negative).
 - `planner.settings.set` with `{"turn_radius": 0.3, "fill_pattern": "crosshatch"}`: checked as a whole, a bad
   value changes nothing and the error says why. `null` goes back to the default. Kept in
   `$ROS_HOME/mowbite_planner_settings.json` (`/data/ros` in the container, it outlives a new image) and used
@@ -234,7 +236,9 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
 - `planner.plan`: like the MQTT service's `ext.mowbite_planner.plan` (`area_id` or `outline`, `settings` to
   try before setting them, `poses`, `report`, `trace`), with the node's settings and `mower_logic`'s
   parameters. On top of `mowing.plan`'s answer: segments, warnings, stats and a fingerprint, with
-  `report: true` a check of the plan (unmowed pieces, poses off the area, gaps, how much is mowed twice),
+  `report: true` a check of the plan (unmowed pieces, poses off the area, gaps, how much is mowed twice, and
+  in `body_out` the poses `{x, y, yaw, kind}` where the body sticks out past the edges, `kind` one of `turn`,
+  `spin` (turning on the spot), `lane_end`, `loop`, `transit`),
   with `trace: true` where every loop, lane and segment comes from. Without the increment `mower_logic`
   adds to the angle after every finished job.
 

@@ -8,7 +8,7 @@ from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 
 from .geometry import inset, polygons, union
-from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, blade_points, swept_area
+from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, blade_points, body_out, plan_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
@@ -24,7 +24,8 @@ TOLERANCE = 2e-3
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
-    """{'hard': [...], 'soft': [...], 'mowed_m2', 'left_m2', 'left_pieces', 'double_mowed_pct', ...}.
+    """{'hard': [...], 'soft': [...], 'body_out': [...], 'mowed_m2', 'left_m2', 'left_pieces', 'double_mowed_pct',
+    ...}. body_out: the poses where the mower's body sticks out (see planner.body_out), empty when it isn't checked.
 
     double_mowed_pct: how much more is mowed than the area, every further pass over a spot counted again
     (the sum of what each segment mows on its own, less what they mow together)."""
@@ -54,9 +55,14 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
                     f'{gaps[0]}')
     if cfg is not None and not cfg.allow_reverse and any(s.reverse for s in plan.segments):
         hard.append('drives backwards with allow_reverse off')
+    footprint = plan_footprint(plan)
+    body = body_out(poses, plan.segments, plan.section_starts, footprint) if footprint is not None else []
+    if body:
+        hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '
+                    f'({body[0]["x"]:.2f}, {body[0]["y"]:.2f})')
 
     mowed = swept_area(plan, width).intersection(plan.free_space) if width > 0 else None
-    out: Dict[str, Any] = {'hard': hard, 'soft': soft}
+    out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': body}
     if mowed is not None:
         # what's meant to be mowed: with the first loop further in than half the blade (perimeter_offset,
         # robot_width) a strip along the edges stays

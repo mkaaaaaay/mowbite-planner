@@ -274,7 +274,7 @@ def test_check_plan_finds_what_is_wrong():
 
 def test_check_plan_tells_left_on_purpose_from_left_out():
     # a body that keeps the blade off the edges: a strip left on purpose, not a mistake
-    body = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.5))
+    body = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.5, edges='hard'))
     report = check_plan(body)
     assert report['hard'] == [] and report['edge_left_m2'] > 0.5
     assert any('left on purpose' in s for s in report['soft'])

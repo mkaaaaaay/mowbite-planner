@@ -71,7 +71,8 @@ FIXED = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic
          'allow_reverse': 'forwards only (FTC)'}
 CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIMETER_ORDERS,
            'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
-           'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS}
+           'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS,
+           'edges': limits.EDGES}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
 SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')

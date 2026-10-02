@@ -36,6 +36,8 @@ from .mathutil import Pose2D, normalize_angle
 XY = Tuple[float, float]
 Fits = Callable[[Sequence[XY]], bool]
 Route = Callable[[XY, XY], Optional[List[XY]]]
+# whether the mower's body stays where it may be at these poses (footprint.py), None: not checked
+Body = Optional[Callable[[Sequence['Pose2D']], bool]]
 
 # arcs get a pose at least every 10 degrees, whatever the waypoint spacing
 MAX_ARC_STEP = math.radians(10.0)
@@ -45,6 +47,8 @@ CORNER_ANGLE = math.radians(15.0)
 DETOUR_MAX_JUMP = math.radians(45.0)
 # poses closer than this are one position
 SAME_POSITION = 1e-6
+# m, the radii a corner gets where the body doesn't fit round it (more would leave a lot of the corner unmowed)
+BODY_RADII = (0.25, 0.5, 1.0)
 _EPS = 1e-9
 
 
@@ -214,7 +218,7 @@ def turn_radii(radius: float, d: float) -> List[float]:
 
 
 def detour_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float, fits: Fits,
-                route: Route) -> Optional[Maneuver]:
+                route: Route, body: Body = None) -> Optional[Maneuver]:
     """Quarter arc out of the lane towards the next one, route() between the arcs, quarter arc into the next
     lane. Only for lanes at least two radii apart, closer ones would need the middle to go backwards."""
     h = exit_pose.yaw
@@ -232,12 +236,12 @@ def detour_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float, fits: 
         if not fits([(p.x, p.y) for p in out_arc]) or not fits([(p.x, p.y) for p in in_arc]):
             continue
         a, b = out_arc[-1], in_arc[0]
-        middle = connect((a.x, a.y), a.yaw, (b.x, b.y), b.yaw, r, step, fits, route)
+        middle = connect((a.x, a.y), a.yaw, (b.x, b.y), b.yaw, r, step, fits, route, body)
         if middle is None:
             continue
         poses = join(out_arc, middle, in_arc)
         # where the edge leaves no room for arcs it would still turn on the spot, a pivot does that shorter
-        if max_heading_jump(poses) > DETOUR_MAX_JUMP:
+        if max_heading_jump(poses) > DETOUR_MAX_JUMP or body is not None and not body([exit_pose] + poses):
             continue
         return Maneuver('detour', r, [Piece(poses)])
     return None
@@ -259,7 +263,7 @@ def arc_towards(a: XY, heading: float, target: XY, radius: float, step: float) -
 
 
 def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float], radius: float, step: float,
-            fits: Fits, route: Route) -> Optional[List[Pose2D]]:
+            fits: Fits, route: Route, body: Body = None) -> Optional[List[Pose2D]]:
     """From a (facing heading_a) to b (arriving facing heading_b) the way route() finds. Where it fits it
     leaves on an arc that turns it towards the first bend and arrives on one from the last bend (a Dubins
     like start and end), the bends between are rounded: no turning on the spot at a and b. None if route()
@@ -269,12 +273,14 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
         return None
     pts = [tuple(p) for p in pts]
 
-    def arc(start: XY, heading: float, toward: XY) -> Optional[List[Pose2D]]:
-        # the widest arc that fits, from where it ends the way to `toward` has to be free too
+    def arc(start: XY, heading: float, toward: XY, back: bool = False) -> Optional[List[Pose2D]]:
+        # the widest arc that fits, from where it ends the way to `toward` has to be free too. back: an arc
+        # worked out backwards from the end, the mower faces the other way on it
         for r in (radius, 0.75 * radius, 0.5 * radius):
             poses = arc_towards(start, heading, toward, r, step) if r > 1e-3 else None
             if poses is not None and len(poses) > 2 and fits([(p.x, p.y) for p in poses]) and \
-                    fits([(poses[-1].x, poses[-1].y), toward]):
+                    fits([(poses[-1].x, poses[-1].y), toward]) and \
+                    (body is None or body([Pose2D(p.x, p.y, p.yaw + math.pi) for p in poses] if back else poses)):
                 return poses
         return None
 
@@ -286,13 +292,13 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
             if out is not None:
                 leave, pts[0] = out, (out[-1].x, out[-1].y)
         if heading_b is not None:
-            back = arc(b, heading_b + math.pi, pts[-2])
+            back = arc(b, heading_b + math.pi, pts[-2], True)
             if back is not None:
                 arrive = [Pose2D(p.x, p.y, normalize_angle(p.yaw + math.pi)) for p in reversed(back)]
                 pts[-1] = (back[-1].x, back[-1].y)
         if len(pts) > 2:
             break
-    return join(leave, drive_polyline(pts, step, radius, fits), arrive)
+    return join(leave, drive_polyline(pts, step, radius, fits, body=body), arrive)
 
 
 def max_heading_jump(poses: Sequence[Pose2D]) -> float:
@@ -301,11 +307,17 @@ def max_heading_jump(poses: Sequence[Pose2D]) -> float:
 
 def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, step: float,
               fits: Fits, route: Optional[Route] = None,
-              types: Sequence[str] = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')) -> Optional[Maneuver]:
+              types: Sequence[str] = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'),
+              body: Body = None) -> Optional[Maneuver]:
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
     detours. types: the kinds allowed, preferred first; larger radii always come before smaller ones,
-    detours and pivots after all radii. None if nothing allowed fits."""
+    detours and pivots after all radii. body: the turn's poses have to pass it too. None if nothing allowed
+    fits."""
+
+    def ok(m: Maneuver) -> bool:
+        return fits(m.points()) and (body is None or body([exit_pose] + [p for pc in m.pieces for p in pc.poses]))
+
     h = exit_pose.yaw
     vx, vy = entry[0] - exit_pose.x, entry[1] - exit_pose.y
     dx = vx * math.cos(h) + vy * math.sin(h)
@@ -325,16 +337,16 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
             if local is None:
                 continue
             m = _to_map(local, exit_pose, side)
-            if fits(m.points()):
+            if ok(m):
                 return m
     for name in types:
         if name == 'detour' and route is not None:
-            m = detour_turn(exit_pose, entry, radius, step, fits, route)
+            m = detour_turn(exit_pose, entry, radius, step, fits, route, body)
             if m is not None:
                 return m
         elif name == 'pivot':
             m = _to_map(pivot_turn(d, dx, step), exit_pose, side)
-            if fits(m.points()):
+            if ok(m):
                 return m
     return None
 
@@ -374,7 +386,7 @@ def inner_radius(rho: float, turn: float, spacing: float, width: float) -> float
 
 def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits: Optional[Fits] = None,
                    turn_sign: int = 0, max_cut: Optional[float] = None, level: int = 0, spacing: float = 0.0,
-                   width: float = 0.0) -> List[Pose2D]:
+                   width: float = 0.0, body: Body = None) -> List[Pose2D]:
     """Poses along a polyline, facing the way it goes.
 
     Corners are rounded with arcs of up to `radius` where `fits` accepts the arc (smaller ones are tried
@@ -383,7 +395,9 @@ def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits:
     corner at most (a sharp corner rounded with the full radius would leave a lot of it unmowed). level: the
     polyline is the level-th of loops `spacing` apart, mowing `width` wide, rounded like that from the
     outermost one in: its corners get less radius (inner_radius), so no tuft stays between them (but
-    for a few cm2 where the outer loop's corner is spread over short edges, see there).
+    for a few cm2 where the outer loop's corner is spread over short edges, see there). body: where the body
+    doesn't fit round a corner (or turning on the spot at it), the BODY_RADII are tried as far as the segments
+    allow, max_cut, level and turn_sign don't count then.
     """
     pts = _dedupe_xy(points)
     if len(pts) < 2:
@@ -420,6 +434,27 @@ def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits:
                     rounded[i] = (trim, arc)
                     break
                 rho *= 0.5
+        if body is not None:
+            for i in range(1, n - 1):
+                turn = normalize_angle(yaws[i] - yaws[i - 1])
+                if abs(turn) < 1e-6 or abs(turn) > math.pi - 1e-3:
+                    continue
+                corner = rounded[i][1] if i in rounded else [Pose2D(pts[i][0], pts[i][1], yaws[i - 1]),
+                                                             Pose2D(pts[i][0], pts[i][1], yaws[i])]
+                if body(corner):
+                    continue
+                tan_half = math.tan(abs(turn) / 2.0)
+                most = 0.5 * min(lengths[i - 1], lengths[i]) / tan_half
+                least = rounded[i][0] / tan_half if i in rounded else 0.0
+                for rho in BODY_RADII:
+                    if rho <= least + 1e-3 or rho > most:
+                        continue
+                    trim = rho * tan_half
+                    ux, uy = math.cos(yaws[i - 1]), math.sin(yaws[i - 1])
+                    arc = sample_arc(pts[i][0] - trim * ux, pts[i][1] - trim * uy, yaws[i - 1], rho, turn, step)
+                    if (fits is None or fits([(p.x, p.y) for p in arc])) and body(arc):
+                        rounded[i] = (trim, arc)
+                        break
 
     out: List[Pose2D] = []
     for i in range(n - 1):

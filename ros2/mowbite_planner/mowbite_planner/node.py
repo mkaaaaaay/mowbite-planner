@@ -40,7 +40,7 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .planner import (ANGLE_STRATEGIES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, PERIMETER,
+from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, PERIMETER,
                       PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan,
                       PlannerConfig, PlanningError, plan_coverage)
 
@@ -66,9 +66,16 @@ PARAMETERS = {
                          'mower_width / 2, the blade edge on the outline. 0 for outlines recorded by driving '
                          "the mower's centre along the edge (OpenMower's outline_offset)", math.isfinite,
                          'must be a number'),
-    'robot_width': (-1.0, "width of the mower's body [m]: its centre keeps half of it off the outline and the "
-                    'obstacles, the first loop moves further in if needed. Negative: only perimeter_offset counts',
+    'robot_width': (-1.0, "width of the mower's body [m]. With robot_front and robot_rear the turns, lane ends, "
+                    'loops and drives keep the body in (see edges). Negative: not set', math.isfinite,
+                    'must be a number'),
+    'robot_front': (-1.0, "how far the mower's body reaches ahead of its centre (base_link) [m], negative: not set",
                     math.isfinite, 'must be a number'),
+    'robot_rear': (-1.0, "how far the mower's body reaches behind its centre [m], negative: not set", math.isfinite,
+                   'must be a number'),
+    'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may reach half '
+              'its width past them. hard: walls, the centre keeps robot_width / 2 off them',
+              lambda v: v in EDGES, 'must be recorded or hard'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
     'blade_ahead': (0.0, "how far the blade's centre sits ahead of the mower's centre [m] (OpenMower's base_link "
@@ -140,6 +147,8 @@ RANGES = {
     'angle_step_deg': (0.5, 90.0),
     'turn_radius': (0.0, 5.0),
     'robot_width': (-1.0, 5.0),
+    'robot_front': (-1.0, 5.0),
+    'robot_rear': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),
 }
@@ -289,6 +298,8 @@ class MowbitePlannerNode(Node):
                    crosshatch_angle=rad('crosshatch_angle_deg'),
                    perimeter_offset=None if values['perimeter_offset'] < 0.0 else values['perimeter_offset'],
                    robot_width=None if values['robot_width'] < 0.0 else values['robot_width'],
+                   robot_front=None if values['robot_front'] < 0.0 else values['robot_front'],
+                   robot_rear=None if values['robot_rear'] < 0.0 else values['robot_rear'],
                    turn_types=tuple(values['turn_types']))
         cfg.update(overrides)
         return PlannerConfig(**cfg)

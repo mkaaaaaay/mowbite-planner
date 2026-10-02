@@ -550,6 +550,11 @@ def test_rpc_settings(planner):
     assert s['blade_offset'] == {'value': 0.0, 'default': 0.0, 'stored': False, 'type': 'number', 'settable': True,
                                  'unit': 'm', 'min': -1.0, 'max': 1.0}
     assert s['robot_width']['nullable'] and s['robot_width']['min'] == 0.0 and 'max' not in s['robot_width']
+    for name in ('robot_front', 'robot_rear'):
+        assert s[name]['nullable'] and s[name]['min'] == 0.0 and s[name]['unit'] == 'm', name
+    assert s['edges'] == {'value': 'recorded', 'default': 'recorded', 'stored': False, 'type': 'string',
+                          'settable': True, 'choices': ['recorded', 'hard']}
+    assert s['blade_ahead']['min'] == -1.0 and s['blade_offset']['min'] == -1.0
     assert s['transit_edge_cost']['unit'] == ''
 
 
@@ -642,6 +647,12 @@ def test_rpc_plan(planner):
     # the outline of an area like mowing.plan takes it
     outline, _ = rpc('planner.plan', {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]})
     assert outline['area_id'] is None and outline['paths']
+    # the body checked, where it sticks out in the report
+    body = {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'}
+    checked, error = rpc('planner.plan', {'area_id': 'a', 'settings': body, 'report': True})
+    assert error is None and isinstance(checked['report']['body_out'], list)
+    assert all(set(o) == {'x', 'y', 'yaw', 'kind'} for o in checked['report']['body_out'])
+    assert result['fingerprint'] != checked['fingerprint']
 
 
 @pytest.mark.parametrize('method, params, code, message', [
