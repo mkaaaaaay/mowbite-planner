@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""OpenMower's planner service, slic3r_coverage_planner/plan_path, answered by the MowBite Planner (ROS 1 Noetic).
+
+Started in place of the slic3r planner, mower_logic and the mowing.plan RPC use it as they are. The request
+gives what it always did (outline, holes, angle, lane spacing, loops, offset, skip flags), the answer is the
+same list of paths (perimeter loops is_outline 1, the lanes with their turns 0), poses 0.1 m apart facing
+the next one, each path continuous and at most max_path_poses long.
+
+On top, from OpenMower's map (mower_map_service/json_map) it finds the area the outline belongs to (of two
+with it the one that's active and mowable):
+  - its "planner" property: any MowBite Planner setting for this area (pattern, turns, angle strategy...),
+    and its angle_min/angle_max. With angle or angle_strategy in it the lanes go that way instead of
+    mower_logic's angle. Stock mower_map drops properties it doesn't know, see openmower.patch.
+  - its own angle: with one, mower_logic's angle counts even with angle or angle_strategy in settings.
+  - the areas to mow around (mow_around) in it, on top of the obstacles mower_logic sends.
+  - the other lawns: the shortest way between parts of the area may go through them. Not the navigation
+    areas: mower_logic mows a path from start to end, a part only reachable over them gets paths of its own.
+  - the docking station: plans start on the loop next to it and end close to it.
+The plan never depends on where the mower is, so the same map gives the same plan (mower_logic compares a
+digest of it to resume an interrupted mow).
+
+Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
+allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), max_path_poses (at least
+4), frame_id, service, map_topic, use_map. The request always gives the lane spacing (with mower_width the
+overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a concentric fill_pattern,
+settings can't change them (an area's planner property can). The angle too, unless settings has angle or
+angle_strategy and the area has no angle of its own. Whether it has one comes from the saved map: a preview in
+the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just added or
+removed follows the saved area until the edit is saved.
+"""
+
+import json
+import math
+import threading
+
+import rospy
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
+from nav_msgs.msg import Path
+from slic3r_coverage_planner.msg import Path as PlannerPath
+from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
+from std_msgs.msg import Header, String
+
+from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
+from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
+from mowbite_planner.mapfile import area_job, match_area
+
+
+class MowbitePlannerRos1:
+    def __init__(self):
+        self.mower_width = float(rospy.get_param('~mower_width', 0.18))
+        # OpenMower's FTC controller only drives forwards: no K-turns, and lanes far enough apart that every
+        # turn is a forward U-turn of turn_radius. ~settings can change that (and anything else)
+        settings = dict(rospy.get_param('~settings', {}) or {})
+        self.base = PlannerConfig(allow_reverse=False, lane_order='skip').with_overrides(settings)
+        self.base.validate()
+        # with angle or angle_strategy in settings the lanes go that way, not mower_logic's angle, unless the area
+        # has its own
+        self.own_angle = 'angle' in settings or 'angle_strategy' in settings
+        # OpenMower's FTC controller needs 3 poses a path, pieces of at most 3 can't always have them
+        self.max_poses = max(4, int(rospy.get_param('~max_path_poses', MAX_PATH_POSES)))
+        self.frame_id = rospy.get_param('~frame_id', 'map')
+        self.map = None
+        self.lock = threading.Lock()
+        if rospy.get_param('~use_map', True):
+            rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
+        self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
+                                     self.handle)
+        rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
+
+    def on_map(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except ValueError as e:
+            rospy.logwarn('MowBite Planner: map not readable: %s', e)
+            return
+        with self.lock:
+            self.map = data
+
+    def settings(self, req, job):
+        """The node's settings, then what mower_logic asks for, then the area's own (planner property and
+        angle range)."""
+        width = max(self.mower_width, req.distance)
+        asked = dict(
+            mower_width=width,
+            # OpenMower's distance is the lane spacing
+            overlap=1.0 - req.distance / width,
+            perimeter_offset=float(req.outer_offset),
+            perimeter_passes=int(req.outline_count),
+            lane_overlap_passes=int(req.outline_overlap_count),
+            skip_outline_loops=bool(req.skip_area_outline),
+            skip_obstacle_loops=bool(req.skip_obstacle_outlines),
+            skip_lanes=bool(req.skip_fill),
+        )
+        # the area's own angle (mower_logic adds mow_angle_offset) beats settings, its planner property beats both
+        if not self.own_angle or (job is not None and job.overrides.get('angle') is not None):
+            asked['angle'] = float(req.angle)
+        if req.fill_type == PlanPathRequest.FILL_CONCENTRIC:
+            asked['fill_pattern'] = 'concentric'
+        cfg = self.base.with_overrides(asked)
+        return cfg.with_overrides(job.planner) if job else cfg
+
+    def handle(self, req):
+        res = PlanPathResponse()
+        boundary = [(p.x, p.y) for p in req.outline.points]
+        obstacles = [[(p.x, p.y) for p in hole.points] for hole in req.holes]
+        with self.lock:
+            data = self.map
+        index = match_area(data, boundary) if data else None
+        job, drivable, dock = None, [], None
+        try:
+            if index is not None:
+                job = area_job(data, index)
+                # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
+                obstacles += job.mow_around
+                drivable, dock = job.drivable, job.dock
+            plan = plan_coverage(boundary, obstacles, self.settings(req, job), start=dock, end=dock,
+                                 drivable=drivable)
+        except PlanningError as e:
+            rospy.logwarn('MowBite Planner: %s', e)
+            return res
+        except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
+            rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e)
+            return res
+        stamp = rospy.Time.now()
+        for is_outline, first, last in plan_pieces(plan, self.max_poses):
+            res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
+                                         path=self.to_path(plan.poses[first:last + 1], stamp)))
+        st = plan.stats
+        rospy.loginfo('MowBite Planner: %s%d paths, %d poses, %.0f m, lanes at %.1f deg, %.0f ms%s',
+                      'area %s, ' % job.area_id if job else '', len(res.paths), len(plan.poses),
+                      st['path_length'], math.degrees(plan.angle), 1000 * st['planning_time'],
+                      '. ' + '; '.join(plan.warnings) if plan.warnings else '')
+        return res
+
+    def to_path(self, poses, stamp):
+        header = Header(frame_id=self.frame_id, stamp=stamp)
+        path = Path(header=header)
+        for p in poses:
+            x, y, z, w = yaw_to_quaternion(p.yaw)
+            path.poses.append(PoseStamped(header=header, pose=Pose(position=Point(x=p.x, y=p.y, z=0.0),
+                                                                   orientation=Quaternion(x=x, y=y, z=z, w=w))))
+        return path
+
+
+def main():
+    rospy.init_node('slic3r_coverage_planner')
+    MowbitePlannerRos1()
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()

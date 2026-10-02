@@ -1,0 +1,32 @@
+# The request and response of OpenMower's slic3r_coverage_planner/PlanPath, field by field, so whatever
+# calls OpenMower's planner today can call this one (the MowBite Planner's ~/plan_path).
+# Fill, lane direction, spacing, loop offset and loop count come from the request, everything else (turn
+# radius, K-turns, lane order, waypoint spacing, max_path_poses) from the node's parameters. Without a
+# usable plan the response has no paths.
+
+# lanes
+uint8 FILL_LINEAR=0
+# loops further and further in
+uint8 FILL_CONCENTRIC=1
+
+uint8 fill_type
+# rad, lane direction in the map frame, 0 = +x, counter-clockwise
+float64 angle
+# m, lane spacing (OpenMower's tool_width)
+float64 distance
+# m, how far the first perimeter loop runs inside the outline (OpenMower's outline_offset, usually 0)
+float64 outer_offset
+# perimeter loops along the outline and around every obstacle
+uint8 outline_count
+# the lanes reach this many loops further out
+uint8 outline_overlap_count
+bool skip_area_outline
+bool skip_obstacle_outlines
+bool skip_fill
+geometry_msgs/Polygon outline
+geometry_msgs/Polygon[] holes
+---
+# The perimeter loops as one path (is_outline 1), the lanes with their turns and the drives between them
+# as another (is_outline 0). Each path is continuous, poses 0.1 m apart (parameter waypoint_spacing),
+# facing the next one. A path longer than max_path_poses goes on in the next one, from its last pose.
+Path[] paths

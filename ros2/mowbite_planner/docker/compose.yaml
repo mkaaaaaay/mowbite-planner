@@ -1,0 +1,16 @@
+# The planner next to OpenMower, e.g. as a stack on OpenMower OS: docker compose up -d (in this folder).
+name: mowbite-planner
+services:
+  mowbite-planner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mowbite-planner
+    container_name: mowbite-planner
+    restart: unless-stopped
+    network_mode: host  # the mower's broker is on 127.0.0.1:1883
+    environment:
+      MOWER_MQTT_HOST: 127.0.0.1
+      MOWER_MQTT_PORT: 1883
+      # OpenMower's FTC controller only drives forwards: no K-turns, lanes far enough apart for U-turns
+      PLANNER_SETTINGS: '{"allow_reverse": false, "lane_order": "skip"}'

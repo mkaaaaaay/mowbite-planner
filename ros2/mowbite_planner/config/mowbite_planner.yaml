@@ -1,0 +1,50 @@
+# Parameters of the MowBite Planner. Write doubles with a decimal point (0.0, not 0): rclpy refuses an
+# int for a double parameter and doesn't start. /** matches the node whatever it's called (node_name).
+/**:
+  ros__parameters:
+    frame_id: map
+    # cutting width and how much neighbouring lanes overlap (0.15 = 15 %), lane spacing = 0.22 * 0.85
+    mower_width: 0.22
+    overlap: 0.15
+    # loops along the outline and around every obstacle before the lanes (0..255)
+    perimeter_passes: 2
+    # first loop this far inside the outline. Negative: mower_width / 2 (the blade's edge on the outline).
+    # 0.0 for outlines recorded by driving the mower's centre along the edge, like OpenMower does
+    perimeter_offset: -1.0
+    # loops first or last (last mows over the marks the turns leave), ccw, cw or auto (the way the mower faces)
+    perimeter_order: first
+    perimeter_direction: auto
+    # lanes reach this many loops further out (OpenMower's outline_overlap_count)
+    lane_overlap_passes: 0
+    # inside the loops: lanes, crosshatch (lanes, then lanes at crosshatch_angle_deg to them) or concentric
+    fill_pattern: lanes
+    crosshatch_angle_deg: 90.0
+    # lane direction: longest_edge, min_width, optimal (fewest lanes, tried angle_step_deg apart) or fixed
+    # (fixed_angle_deg), plus angle_offset_deg. It stays within angle_min_deg..angle_max_deg (both or neither,
+    # .nan: no range). Not for ~/plan_path: OpenMower sends the angle with its own offset
+    angle_strategy: longest_edge
+    fixed_angle_deg: 0.0
+    angle_offset_deg: 0.0
+    angle_min_deg: .nan
+    angle_max_deg: .nan
+    angle_step_deg: 5.0
+    # turns between lanes: arcs of this radius. Where a forward turn doesn't fit, a K-turn backs up a
+    # little (allow_reverse). OpenMower's FTC controller only drives forwards: there use
+    # allow_reverse: false and lane_order: skip (every turn a forward U-turn of turn_radius).
+    # These and waypoint_spacing also apply to ~/plan_path, the rest comes with its request
+    turn_radius: 0.25
+    allow_reverse: true
+    # the turns allowed, preferred first
+    turn_types: [u_turn, bulb, k_turn, detour, pivot]
+    lane_order: snake
+    perimeter_corner_radius: 0.15
+    waypoint_spacing: 0.10
+    transit_clearance: 0.05
+    simplify_tolerance: 0.01
+    min_lane_length: 0.10
+    publish_path: true
+    # ~/plan_path splits longer paths (OpenMower counts the poses of a path in an int16), at least 4
+    max_path_poses: 30000
+    # only for the ~/plan_from_parameters service, an example garden (leave both out if not needed):
+    # boundary_polygon: [0.0, 0.0, 20.0, 0.0, 20.0, 8.0, 12.0, 8.0, 12.0, 15.0, 0.0, 15.0]
+    # obstacles: ["4.0,4.0; 6.0,4.0; 6.0,6.0; 4.0,6.0", "14.0,2.0; 17.0,2.0; 17.0,4.0; 14.0,4.0"]

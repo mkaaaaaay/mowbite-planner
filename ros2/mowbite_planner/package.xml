@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mowbite_planner</name>
+  <version>0.1.0</version>
+  <description>MowBite Planner: coverage path planner for robot mowers (perimeter loops, boustrophedon lanes with gentle turns, nav_msgs/Path out)</description>
+  <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
+  <license>GPL-3.0-only</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>mowbite_planner_interfaces</exec_depend>
+  <exec_depend>python3-shapely</exec_depend>
+  <!-- only for the MQTT service (mowbite_planner_mqtt) -->
+  <exec_depend>python3-paho-mqtt</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

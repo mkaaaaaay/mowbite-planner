@@ -1,0 +1,19 @@
+name: check
+
+# the planner's tests on every push, they need only shapely: rclpy and rospy are stood in for
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  planner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q shapely pytest
+      - run: /tmp/venv/bin/python -m pytest ros2/mowbite_planner/test -q -p no:cacheprovider
+      - run: /tmp/venv/bin/python -m pytest ros1/mowbite_planner_ros1/test -q -p no:cacheprovider

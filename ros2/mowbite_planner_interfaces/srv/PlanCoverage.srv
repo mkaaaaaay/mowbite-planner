@@ -1,0 +1,66 @@
+# Plans the coverage path of one mowing area (MowBite Planner, mowbite_planner).
+# Coordinates are metres in a flat frame, the planner's frame_id parameter (default map).
+
+# Outline of the area: at least 3 points, the closing point and the orientation don't matter.
+geometry_msgs/Polygon boundary
+# No-go zones (flower beds, trees). Parts outside the boundary are ignored.
+geometry_msgs/Polygon[] obstacles
+# Where the mower may drive between parts of the area without mowing (navigation areas, other lawns).
+geometry_msgs/Polygon[] drivable_areas
+
+# Overrides for this request. Left at their defaults, the node's parameters apply.
+# any of the node's parameters by its name (e.g. fill_pattern, turn_radius), the fields below go on top
+rcl_interfaces/Parameter[] overrides
+# m, cutting width. <= 0: parameter mower_width
+float64 mower_width -1.0
+# share of the cutting width neighbouring lanes overlap, 0 <= overlap < 1. < 0: parameter overlap
+float64 overlap -1.0
+# loops along the outline and around every obstacle. < 0: parameter perimeter_passes
+int32 perimeter_passes -1
+# true: lanes run at angle. false: parameter angle_strategy decides (default: along the longest edge)
+bool use_angle false
+# rad, lane direction in the map frame, 0 = +x, counter-clockwise
+float64 angle 0.0
+# true: the path starts on the perimeter loop closest to start_pose (e.g. the mower's pose)
+bool use_start_pose false
+geometry_msgs/Pose start_pose
+# true: the path ends close to end_point (e.g. the docking station)
+bool use_end_point false
+geometry_msgs/Point end_point
+---
+# a loop along the outline or around an obstacle
+uint8 SEGMENT_PERIMETER=0
+# a straight lane
+uint8 SEGMENT_LANE=1
+# a turn from the end of one lane into the next
+uint8 SEGMENT_TURN=2
+# a drive to where mowing goes on (the next loop, the next group of lanes)
+uint8 SEGMENT_TRANSIT=3
+
+bool success
+# why planning failed, or a summary and any warnings
+string message
+# The whole route. Each pose faces the way the mower faces, which is the way it drives except on the
+# segments marked reverse. Consecutive poses never share a position.
+nav_msgs/Path path
+# Parts of the area with no way between them (a hedge across it, a neck narrower than the mower) are
+# sections of their own, each starts at path.poses[section_start[i]]. The path jumps from the last pose of
+# one section to the first of the next: getting there is up to whoever drives it. Mostly just [0].
+uint32[] section_start
+# rad, the lane direction used (0..pi)
+float64 angle
+# rad, the direction of every set of lanes (crosshatch: two)
+float64[] angles
+# m, mower_width * (1 - overlap)
+float64 lane_spacing
+# m
+float64 path_length
+# SHA-256 of the poses: the same request gives the same fingerprint, a changed area or setting another
+string fingerprint
+# The path in segments: segment i runs from path.poses[segment_start[i]] to path.poses[segment_end[i]],
+# the next one starts on that pose or the one after it.
+uint32[] segment_start
+uint32[] segment_end
+uint8[] segment_type
+# driven backwards (the middle leg of a K-turn)
+bool[] segment_reverse

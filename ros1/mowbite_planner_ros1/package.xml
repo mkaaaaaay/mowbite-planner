@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>mowbite_planner_ros1</name>
+  <version>0.1.0</version>
+  <description>The MowBite Planner for OpenMower on ROS 1 Noetic: answers slic3r_coverage_planner/plan_path in place of the slic3r planner</description>
+  <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
+  <license>GPL-3.0-only</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <!-- OpenMower's planner messages: PlanPath.srv and Path.msg -->
+  <exec_depend>slic3r_coverage_planner</exec_depend>
+  <exec_depend>python3-shapely</exec_depend>
+</package>
