@@ -130,6 +130,12 @@ class PlannerConfig:
     angle_min: Optional[float] = None
     angle_max: Optional[float] = None
     angle_step: float = math.radians(5.0)  # rad, between the angles 'optimal' tries
+    # rad, the lanes turn this much further every angle_increment_every finished mows (angle_steps of those so far, the
+    # ROS 1 node counts them), on top of angle_offset and within angle_min..angle_max (bouncing back at the ends).
+    # 0: they don't
+    angle_increment: float = 0.0
+    angle_increment_every: int = 1
+    angle_steps: int = 0
     # m, the first perimeter loop runs this far inside the outline. None: mower_width / 2, the blade's edge
     # on the outline. OpenMower records outlines driving the mower's centre along the edge and uses 0,
     # negative goes outside the outline (OpenMower's outline_offset allows that too)
@@ -314,6 +320,11 @@ class PlannerConfig:
         finite('transit_edge_distance', 0.0)
         finite('transit_edge_cost', 0.0)
         finite('angle_offset')
+        finite('angle_increment')
+        for name, lo in (('angle_increment_every', 1), ('angle_steps', 0)):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+                raise PlanningError(f'{name} must be a whole number >= {lo}, got {v!r}')
         finite('crosshatch_angle')
         # finer steps only take longer: half a degree turns a 10 m lane by 9 cm at its end
         finite('angle_step', MIN_ANGLE_STEP)
@@ -525,7 +536,7 @@ def lane_angle(area, free, cfg: PlannerConfig, lane_region=None, target=None, ro
         a = optimal_angle(lane_region, cfg, longest_edge_angle(area), target, room)
     else:
         a = longest_edge_angle(area)
-    a = angle_in_range(a + cfg.angle_offset, cfg.angle_min, cfg.angle_max)
+    a = angle_in_range(a + cfg.angle_offset + cfg.angle_steps * cfg.angle_increment, cfg.angle_min, cfg.angle_max)
     # lanes have no front, 30 and 210 degrees are the same lanes
     a = math.fmod(a, math.pi)
     return a + math.pi if a < 0 else a

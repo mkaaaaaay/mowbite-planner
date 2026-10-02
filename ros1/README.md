@@ -240,6 +240,11 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
   (both may be negative).
+- `angle_increment` (rad, 0: off) turns the lanes on every `angle_increment_every` finished mows (`mower_logic`'s
+  `JOB_COMPLETE` event), within an area's `angle_min`..`angle_max` (bouncing back at the ends); for one area in its
+  `planner` property. The steps so far are kept next to the settings file, `planner.settings` says `angle_steps`,
+  `angle_mows` (towards the next step) and `angle_turned` (rad), `planner.angle.reset` sets them back to 0. Leave
+  `mower_logic`'s `mow_angle_increment` at 0, both add up.
 - Plans are kept, the last 64 in `$ROS_HOME/mowbite_plans` (`/data/ros` in the container, parameter `plans_dir`), for
   this planner code only. 5 s after the map or the settings last changed every active mowing area is planned ahead
   like `planner.plan` plans it: the app's preview and the next mow find it at once (`kept: true` in `planner.plan`).

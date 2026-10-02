@@ -112,7 +112,8 @@ def install():
         'std_msgs.msg': types.SimpleNamespace(Header=header, String=msg('String', data=str), Empty=msg('Empty')),
         'xbot_mqtt': types.ModuleType('xbot_mqtt'),
         'xbot_mqtt.msg': types.SimpleNamespace(RpcRequest=msg('RpcRequest', method=str, params=str, id=str),
-                                               RpcResponse=msg('RpcResponse', result=str, id=str), RpcError=rpc_error),
+                                               RpcResponse=msg('RpcResponse', result=str, id=str), RpcError=rpc_error,
+                                               MqttPublish=msg('MqttPublish', topic=str, payload=str, retain=bool)),
         'xbot_mqtt.srv': types.SimpleNamespace(RegisterMethodsSrv=object),
         'geometry_msgs': types.ModuleType('geometry_msgs'),
         'geometry_msgs.msg': types.SimpleNamespace(Point=point, Point32=point32, Pose=pose, PoseStamped=pose_stamped,
@@ -578,7 +579,7 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.plan', 'planner.settings', 'planner.settings.set']
+    methods = ['planner.angle.reset', 'planner.plan', 'planner.settings', 'planner.settings.set']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -772,3 +773,35 @@ def test_plan_ahead(planner, monkeypatch):
     again.plans.clear()
     again.rpc_plan({'area_id': 'a'})
     assert calls == [1, 1, 1]
+
+
+def event(kind):
+    rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
+        topic='events/json', payload=json.dumps({'id': 'x', 't': 1.0, 'type': kind})))
+
+
+def test_angle_increment(planner):
+    """Every angle_increment_every finished mows (JOB_COMPLETE) the lanes turn angle_increment further, the steps kept
+    over a restart, for mower_logic's plans and planner.plan alike, back to none with planner.angle.reset. Nothing is
+    counted while nothing turns, nor for JOB_RESET."""
+    send_map(the_map())
+    event('JOB_COMPLETE')
+    assert rpc('planner.settings')[0]['angle_steps'] == 0
+    rpc('planner.settings.set', {'angle_increment': math.radians(10), 'angle_increment_every': 2})
+    for kind in ('JOB_COMPLETE', 'JOB_RESET', 'JOB_COMPLETE', 'JOB_COMPLETE'):
+        event(kind)
+    result = rpc('planner.settings')[0]
+    assert (result['angle_steps'], result['angle_mows']) == (1, 1)
+    assert result['angle_turned'] == pytest.approx(math.radians(10))
+    planner.handle(request(angle=0.3))
+    assert lane_angle() == pytest.approx(math.degrees(0.3) + 10, abs=0.05)
+    turned = rpc('planner.plan', {'area_id': 'a'})[0]['angle']
+    result, error = rpc('planner.angle.reset', {})
+    assert error is None and (result['angle_steps'], result['angle_mows']) == (0, 0)
+    assert rpc('planner.plan', {'area_id': 'a'})[0]['angle'] == pytest.approx(turned - math.radians(10))
+    planner.handle(request(angle=0.3))
+    assert lane_angle() == pytest.approx(math.degrees(0.3), abs=0.05)
+    # kept over a restart
+    event('JOB_COMPLETE')
+    event('JOB_COMPLETE')
+    assert node_module.MowbitePlannerRos1().angle == {'steps': 1, 'mows': 0}

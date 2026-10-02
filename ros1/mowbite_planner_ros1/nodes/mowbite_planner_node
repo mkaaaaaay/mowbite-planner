@@ -41,6 +41,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
+  planner.angle.reset   back to no steps of angle_increment turned (answers like planner.settings, which says
+                        angle_steps, angle_mows: the finished mows towards the next step, angle_turned in rad)
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
@@ -48,6 +50,10 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
 
 PLAN_AHEAD_DELAY s after the map or the settings last changed every active mowing area is planned ahead like
 planner.plan plans it, so the app's preview and the next mow find their plan at once.
+
+angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
+turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
+angle_min..angle_max. mower_logic's own mow_angle_increment is best left at 0, both add up.
 """
 
 import collections
@@ -66,7 +72,7 @@ from nav_msgs.msg import Path
 from slic3r_coverage_planner.msg import Path as PlannerPath
 from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
 from std_msgs.msg import Empty, Header, String
-from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
+from xbot_mqtt.msg import MqttPublish, RpcError, RpcRequest, RpcResponse
 from xbot_mqtt.srv import RegisterMethodsSrv
 
 import mowbite_planner
@@ -77,7 +83,8 @@ from mowbite_planner.mapfile import area_job, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
-FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic'}
+FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
+         'angle_steps': 'finished mows (planner.angle.reset)'}
 # come with every request of mower_logic (from its parameters, or the area's), unless set here (settings, stored)
 MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
                'perimeter_passes': '/mower_logic/outline_count',
@@ -89,13 +96,13 @@ CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIM
            'lane_spacing_mode': limits.LANE_SPACING_MODES}
 # the value that means "the planner works it out"
 AUTO_VALUES = {'perimeter_passes': -1}
-RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
+RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle', 'angle_increment')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
 SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
-          'min_turn_radius': (0.0, limits.MAX_TURN_RADIUS),
+          'min_turn_radius': (0.0, limits.MAX_TURN_RADIUS), 'angle_increment_every': (1, None),
           'perimeter_passes': (-1, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
@@ -108,6 +115,8 @@ DISK_PLANS = 64
 # s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
 # mow and the app's preview find it
 PLAN_AHEAD_DELAY = 5.0
+# mower_logic's events (xbot_mqtt.publishEvent): a finished mow turns the lanes on (angle_increment)
+EVENTS_TOPIC = 'events/json'
 # OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
 # backing up leg would hold the mower until it times out): allow_reverse counts only then
 BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
@@ -190,15 +199,21 @@ class MowbitePlannerRos1:
         self.code = code_version()
         self.ahead = None
         self.ahead_lock = threading.Lock()
+        # the finished mows counted for angle_increment: steps so far, mows since the last one (next to settings_file)
+        self.angle_file = os.path.join(os.path.dirname(self.file), 'mowbite_planner_angle.json') if self.file else ''
+        self.angle_lock = threading.Lock()
+        self.angle = self.read_angle()
         self.local = threading.local()  # whether the last plan of this thread was kept from before
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
+        rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
         if rospy.get_param('~rpc', True):
             self.rpc = XbotRpc('mowbite_planner', {'planner.settings': self.rpc_settings,
                                                    'planner.settings.set': self.rpc_settings_set,
-                                                   'planner.plan': self.rpc_plan})
+                                                   'planner.plan': self.rpc_plan,
+                                                   'planner.angle.reset': self.rpc_angle_reset})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
 
     @property
@@ -281,8 +296,68 @@ class MowbitePlannerRos1:
                     entry['max'] = hi
             out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
         # whether allow_reverse counts: OpenMower's FTC controller backs up where the plan does
+        # angle_increment: the steps turned so far and the finished mows towards the next one
+        steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
-                'can_back_up': bool(rospy.get_param(BACK_UP_PARAM, False))}
+                'can_back_up': bool(rospy.get_param(BACK_UP_PARAM, False)), 'angle_steps': steps, 'angle_mows': mows,
+                'angle_turned': steps * current.base.angle_increment}
+
+    def rpc_angle_reset(self, params=None):
+        """Back to no steps turned (angle_increment)."""
+        with self.angle_lock:
+            self.angle = {'steps': 0, 'mows': 0}
+            self.write_angle()
+        rospy.loginfo('MowBite Planner: angle steps reset')
+        self.plan_ahead_later()
+        return self.rpc_settings()
+
+    def read_angle(self):
+        try:
+            with open(self.angle_file) as f:
+                data = json.load(f)
+            return {'steps': max(0, int(data['steps'])), 'mows': max(0, int(data['mows']))}
+        except (OSError, ValueError, KeyError, TypeError):
+            return {'steps': 0, 'mows': 0}
+
+    def write_angle(self):
+        if not self.angle_file:
+            return
+        try:
+            with open(self.angle_file + '.tmp', 'w') as f:
+                json.dump(self.angle, f)
+            os.replace(self.angle_file + '.tmp', self.angle_file)
+        except OSError as e:
+            rospy.logwarn('MowBite Planner: angle steps not kept (%s): %s', self.angle_file, e)
+
+    def on_publish(self, msg):
+        """mower_logic's events: every angle_increment_every finished mows (JOB_COMPLETE, not JOB_RESET) one step more,
+        while angle_increment turns the lanes (for all areas or one's own)."""
+        if msg.topic != EVENTS_TOPIC:
+            return
+        try:
+            event = json.loads(msg.payload)
+        except ValueError:
+            return
+        if not isinstance(event, dict) or event.get('type') != 'JOB_COMPLETE':
+            return
+        base = self.current.base
+        with self.lock:
+            data = self.map
+        turning = base.angle_increment != 0 or any(
+            ((a.get('properties') or {}).get('planner') or {}).get('angle_increment')
+            for a in (data or {}).get('areas', []))
+        if not turning:
+            return
+        if rospy.get_param('/mower_logic/mow_angle_increment', 0):
+            rospy.logwarn('MowBite Planner: mower_logic turns the lanes too (mow_angle_increment), both add up')
+        with self.angle_lock:
+            self.angle['mows'] += 1
+            if self.angle['mows'] >= base.angle_increment_every:
+                self.angle = {'steps': self.angle['steps'] + 1, 'mows': 0}
+            self.write_angle()
+            steps = self.angle['steps']
+        rospy.loginfo('MowBite Planner: mow finished, angle steps %d', steps)
+        self.plan_ahead_later()
 
     def rpc_settings_set(self, params):
         fixed = sorted(set(params) & set(FIXED))
@@ -309,7 +384,8 @@ class MowbitePlannerRos1:
         current = self.current
         with self.lock:
             data = self.map
-        service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width}),
+        service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width,
+                                                              'angle_steps': self.angle['steps']}),
                                  current.own_angle)
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
@@ -399,7 +475,7 @@ class MowbitePlannerRos1:
             cfg = cfg.with_overrides(job.planner)
         if cfg.lane_spacing_mode == 'auto':  # the blade, the spacing is the planner's
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
-        return cfg
+        return cfg.with_overrides({'angle_steps': self.angle['steps']})
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's

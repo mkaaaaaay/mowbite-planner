@@ -945,6 +945,21 @@ def test_turn_radius_at_least_min_turn_radius():
     assert low.config.turn_radius == 0.3
 
 
+def test_angle_increment():
+    """angle_steps of angle_increment turn the lanes like angle_offset does, bouncing back in angle_min..angle_max;
+    the counts are whole numbers."""
+    base = dict(MOWER, angle=0.3)
+    steps = plan_coverage(rect(0, 0, 8, 5), [], PlannerConfig(**dict(base, angle_increment=0.1, angle_steps=3)))
+    offset = plan_coverage(rect(0, 0, 8, 5), [], PlannerConfig(**dict(base, angle_offset=0.3)))
+    assert steps.angle == pytest.approx(offset.angle) == pytest.approx(0.6)
+    bounced = plan_coverage(rect(0, 0, 8, 5), [], PlannerConfig(**dict(base, angle_increment=0.1, angle_steps=5,
+                                                                         angle_min=0.2, angle_max=0.6)))
+    assert bounced.angle == pytest.approx(0.4)  # 0.8 is 0.2 past 0.6: back to 0.4
+    for kw in (dict(angle_increment_every=0), dict(angle_steps=-1), dict(angle_steps=1.5)):
+        with pytest.raises(PlanningError, match='whole number'):
+            PlannerConfig(**kw).validate()
+
+
 def test_rounded_where_min_turn_radius_doesnt_fit():
     """Lanes 0.27 m apart with a least radius of 0.3: a U-turn as wide as fits (half the way across) before turning
     on the spot, which comes only where that doesn't fit either; without pivots allowed nothing."""
