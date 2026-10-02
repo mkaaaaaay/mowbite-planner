@@ -1338,8 +1338,14 @@ class _Route:
         length = math.hypot(b[0] - a[0], b[1] - a[1])
         ux, uy = math.cos(yaw), math.sin(yaw)
         r, quarter = self.cfg.turn_radius, 0.5 * math.pi
+        known: Dict[float, bool] = {}
 
         def fits(t: float) -> bool:
+            if t not in known:
+                known[t] = fits_at(t)
+            return known[t]
+
+        def fits_at(t: float) -> bool:
             x, y = a[0] + t * ux, a[1] + t * uy
             if not self.footprint.fits_pose(x, y, yaw):
                 return False

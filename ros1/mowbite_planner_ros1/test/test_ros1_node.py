@@ -237,10 +237,26 @@ def test_answers_like_slic3r(planner):
         assert abs(math.remainder(travel - yaw, 2.0 * math.pi)) < math.pi / 2
 
 
-def test_same_request_same_plan(planner):
+def test_same_request_same_plan(planner, monkeypatch):
     a = [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
+    planner.plans.clear()  # planned again, not the kept one
     b = [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
     assert a == b
+    # kept: the same request again (mowing.plan, planner.plan of the area, the mow) isn't planned again, another is
+    calls, real = [], node_module.plan_coverage
+    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
+    planner.handle(request())
+    assert not calls
+    send_map(the_map())
+    result, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and result['paths'] and calls == [1]
+    planner.handle(request(angle=0.3))
+    rpc('planner.settings.set', {'turn_radius': 0.4})
+    planner.handle(request(angle=0.3))
+    assert calls == [1, 1, 1]
+    for angle in range(node_module.CACHED_PLANS + 2):
+        planner.handle(request(angle=0.1 * angle))
+    assert len(planner.plans) == node_module.CACHED_PLANS
 
 
 def test_area_settings_and_dock_from_the_map(planner):

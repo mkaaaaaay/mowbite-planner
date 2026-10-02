@@ -83,6 +83,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET)}
+# plans kept: the same request again (a preview, then the mow; mowing.plan, then planner.plan) gets the plan at once
+CACHED_PLANS = 8
 
 
 class XbotRpc:
@@ -155,6 +157,8 @@ class MowbitePlannerRos1:
         self.map = None
         self.lock = threading.Lock()
         self.set_lock = threading.Lock()
+        self.plans = collections.OrderedDict()
+        self.plans_lock = threading.Lock()
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
@@ -267,6 +271,7 @@ class MowbitePlannerRos1:
                                  current.own_angle)
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
+        service.planner = self.plan_coverage
         return service.plan(params)
 
     def on_map(self, msg):
@@ -302,6 +307,22 @@ class MowbitePlannerRos1:
         cfg = current.base.with_overrides(asked)
         return cfg.with_overrides(job.planner) if job else cfg
 
+    def plan_coverage(self, *args, **kwargs):
+        """plan_coverage(), the last CACHED_PLANS kept: the plan only depends on what it's given, the same again
+        (to the last bit) is the same plan."""
+        key = repr((args, sorted(kwargs.items())))
+        with self.plans_lock:
+            plan = self.plans.get(key)
+            if plan is not None:
+                self.plans.move_to_end(key)
+                return plan
+        plan = plan_coverage(*args, **kwargs)
+        with self.plans_lock:
+            self.plans[key] = plan
+            while len(self.plans) > CACHED_PLANS:
+                self.plans.popitem(last=False)
+        return plan
+
     def handle(self, req):
         res = PlanPathResponse()
         boundary = [(p.x, p.y) for p in req.outline.points]
@@ -319,8 +340,8 @@ class MowbitePlannerRos1:
             cfg = self.settings(req, job)
             if job is not None and cfg.nested_areas:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
-            plan = plan_coverage(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
-                                 keep_out=keep_out)
+            plan = self.plan_coverage(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
+                                      keep_out=keep_out)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res

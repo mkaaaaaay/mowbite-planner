@@ -49,13 +49,14 @@ class Footprint:
             return False
         if contains_xy is not None:
             return bool(contains_xy(self._safe, x, y))
-        # (shapely 1.7 makes a geometry of every point: most are in a square already known to be safe)
+        # (shapely 1.7 makes a geometry of every point: most are in a square already known to be all safe or not
+        # safe at all)
         key = (math.floor(x / CELL), math.floor(y / CELL))
         safe = self._cells.get(key)
-        if safe is None:
-            safe = self._cells[key] = self._safe.covers(box(key[0] * CELL, key[1] * CELL, (key[0] + 1) * CELL,
-                                                            (key[1] + 1) * CELL))
-        return safe or self._safe.covers(Point(x, y))
+        if safe is None:  # 1 all safe, 0 none of it, -1 some
+            square = box(key[0] * CELL, key[1] * CELL, (key[0] + 1) * CELL, (key[1] + 1) * CELL)
+            safe = self._cells[key] = 1 if self._safe.covers(square) else 0 if self._safe.disjoint(square) else -1
+        return safe == 1 if safe >= 0 else self._safe.covers(Point(x, y))
 
     def fits_pose(self, x: float, y: float, yaw: float) -> bool:
         return self._safe_at(x, y) or self._space.covers(self.body(x, y, yaw))

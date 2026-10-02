@@ -142,6 +142,7 @@ class PlannerService:
         self.own_angle = own_angle
         self.map: Optional[Mapping[str, Any]] = None
         self.params: Optional[Mapping[str, Any]] = None
+        self.planner: Optional[Callable[..., Any]] = None  # in place of plan_coverage (the ROS 1 node's, cached)
         self.methods: Dict[str, Callable[[Mapping[str, Any]], Any]] = {
             'ext.mowbite_planner.plan': self.plan, 'ext.planner.plan': self.studio_plan,
             'ext.mowbite_planner.info': self.info}
@@ -202,7 +203,7 @@ class PlannerService:
         start = _pose(p['start'], 'start') if p.get('start') is not None else start
         end = _pose(p['end'], 'end') if p.get('end') is not None else end
         obstacles = job.obstacles + job.nested if cfg.nested_areas else job.obstacles
-        plan = plan_coverage(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out)
+        plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out)
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))
