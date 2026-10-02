@@ -744,7 +744,8 @@ def test_body_in_the_garden():
         cfg = PlannerConfig(**dict(MOWER, **NX60I, edges=edges))
         plan = plan_coverage(GARDEN, obstacles, cfg, start=(1, 1, 0.0), end=(1, 1))
         check_invariants(plan, cfg, obstacles)
-        assert plan.stats['turns_fallback'] == 0 and plan.stats['turns_pivot'] <= 2
+        # (where a lane end is far from the last one's, a drive rather than a turn leaving half the lane out)
+        assert plan.stats['turns_fallback'] + plan.stats['turns_pivot'] <= 3
         report = check_plan(plan)
         assert {'x', 'y', 'yaw', 'kind'} == set(report['body_out'][0])
         assert any('body sticks out' in h for h in report['hard'])

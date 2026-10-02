@@ -1265,8 +1265,10 @@ class _Route:
                 ux, uy = math.cos(yaw), math.sin(yaw)
                 level = (self.pos[0] - a[0]) * ux + (self.pos[1] - a[1]) * uy
                 rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
+                # (not by more than a turn reaches: what it leaves of the lane would stay unmowed)
+                most = min(rest, self.footprint.reach + self.cfg.turn_radius) if self.footprint is not None else 0.0
                 turn = None
-                if self.footprint is not None and 1e-6 < level < rest:
+                if self.footprint is not None and 1e-6 < level < most:
                     gentle = tuple(t for t in self.cfg.allowed_turns if t not in ('detour', 'pivot'))
                     turn = turn_to(a, gentle)
                     if turn is None:
