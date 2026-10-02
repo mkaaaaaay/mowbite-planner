@@ -17,7 +17,6 @@ Copies kept alongside, not built from here:
   launch file, `mower_map` keeping unknown area properties). The planner goes into `src/lib/mowbite` (`ros1/` and
   `ros2/` of this repository), the submodules (`xbot_framework`, `xbot_driver_gps`, `ros_ntrip_client`,
   `slic3r_coverage_planner`) come from upstream.
-- [`mowbite/`](mowbite/): the MowBite app as of its dev branch.
 
 The tests need only shapely and pytest:
 
