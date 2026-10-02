@@ -94,9 +94,9 @@ PARAMETERS = {
                             lambda v: v in PERIMETER_DIRECTIONS, 'must be auto, ccw or cw'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),
-    'fill_pattern': ('lanes', 'inside the loops: lanes, crosshatch (lanes, then lanes across them), '
-                     'concentric (loops further and further in) or auto (lanes or loops, whichever turns on the spot '
-                     'least)', lambda v: v in FILL_PATTERNS, 'must be lanes, crosshatch, concentric or auto'),
+    'fill_pattern': ('lanes', 'inside the loops: lanes, crosshatch (lanes, then lanes across them) or '
+                     'concentric (loops further and further in)', lambda v: v in FILL_PATTERNS,
+                     'must be lanes, crosshatch or concentric'),
     'crosshatch_angle_deg': (90.0, "direction of crosshatch's second lanes to the first [deg]", math.isfinite,
                              'must be a number'),
     'angle_strategy': ('longest_edge', 'lane direction: longest_edge (along the longest edge of the '

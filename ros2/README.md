@@ -185,7 +185,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `perimeter_order` | `first` | loops `first` or `last` (last mows over the marks the turns leave) |
 | `perimeter_direction` | `auto` | `ccw`, `cw` or `auto` (the way the mower faces) |
 | `lane_overlap_passes` | 0 | lanes reach this many loops further out (OpenMower's `outline_overlap_count`), 0..255 |
-| `fill_pattern` | `lanes` | `lanes`, `crosshatch`, `concentric` or `auto`: the planner plans lanes and concentric loops and keeps the one that costs least (its length, 10 m more for every full turn tighter than `min_turn_radius` or on the spot, measured over 20 cm of path at a time, 100 m more for every m2 it leaves unmowed); `stats.chosen.fill_pattern` says which |
+| `fill_pattern` | `lanes` | `lanes`, `crosshatch` or `concentric` |
 | `crosshatch_angle_deg` | 90.0 | direction of crosshatch's second lanes to the first |
 | `angle_strategy` | `longest_edge` | `longest_edge`, `min_width` (across the narrowest width), `optimal` (fewest lanes and cells, tried `angle_step_deg` apart) or `fixed` (`fixed_angle_deg`) |
 | `fixed_angle_deg` | 0.0 | lane direction for `fixed`, 0 = +x, counter-clockwise |
@@ -208,7 +208,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `lane_spacing_min`, `lane_spacing_max` | none | m, the range `auto` tries, none: 50 % and 95 % of `mower_width` |
 | `perimeter_passes` -1 | | as many loops as the turns of the lanes need: they mow the strip along the edges the lanes don't get to (a lane ends where its turn keeps the body in what `edges` allow, the blade `blade_ahead` further in), worked out from `turn_radius`, the body and `blade_ahead`; set for the planner it beats `mower_logic`'s `outline_count` (an area's own still beats it) |
 | `smooth_spins` | true | where the path would turn on the spot by more than 60° (a sharp corner of a loop, a drive arriving across a lane, a pivot), a loop out instead (an omega of `turn_radius`, down to 35 % of it) where it fits; the loops round their right turns too |
-| `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan. With `fill_pattern` `concentric` (or `auto`), `loops` drives all the loops that way: a part in one go, no drives from loop to loop |
+| `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan. With `fill_pattern` `concentric`, `loops` drives all the loops that way: a part in one go, no drives from loop to loop |
 | `robot_width` | -1.0 | width of the mower's body [m], negative = not set |
 | `robot_front` | -1.0 | how far the body reaches ahead of the mower's centre (base_link) [m], negative = not set |
 | `robot_rear` | -1.0 | how far it reaches behind the centre [m], negative = not set. With all three the turns, lane ends, loops and drives keep the body in (see `edges`): lane ends move back until the turn's arcs fit, loop corners get larger arcs; `report` lists the poses where it still sticks out (`body_out`) |

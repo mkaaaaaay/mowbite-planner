@@ -22,7 +22,7 @@ from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, omega, 
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
                                      SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
-                                     plan_footprint, scan_lanes, split_cells, tight_turns)
+                                     plan_footprint, scan_lanes, split_cells)
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
@@ -860,42 +860,6 @@ def test_lane_spacing_auto():
                       (dict(lane_spacing_max=0.5), 'lane_spacing_max')):
         with pytest.raises(PlanningError, match=match):
             PlannerConfig(**dict(MOWER, **kw)).validate()
-
-
-@pytest.mark.parametrize('spacing', ['fixed', 'auto'])
-def test_fill_pattern_auto(spacing):
-    """fill_pattern auto: lanes and loops planned, the one that costs least kept (its length, TIGHT_COST for every
-    full turn tighter than min_turn_radius, LEFT_COST for every m2 left), exactly as that pattern plans it;
-    stats['chosen'] says which."""
-    base = dict(MOWER, **NX60I, min_turn_radius=0.25, lane_spacing_mode=spacing)
-    plan = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, fill_pattern='auto')), start=(1, 1, 0.0))
-    check_invariants(plan, plan.config)
-    costs = {}
-    for pattern in ('lanes', 'concentric'):
-        alone = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, fill_pattern=pattern)), start=(1, 1, 0.0))
-        costs[pattern] = (alone.stats['path_length'] + 10.0 * tight_turns(alone.poses, 0.25) +
-                          100.0 * check_plan(alone)['left_m2'], [(p.x, p.y, p.yaw) for p in alone.poses])
-    chosen = plan.stats['chosen']['fill_pattern']
-    assert chosen == min(costs, key=lambda k: costs[k][0])
-    assert [(p.x, p.y, p.yaw) for p in plan.poses] == costs[chosen][1]
-    assert plan.stats['chosen']['mode'] == spacing
-
-
-def test_tight_turns():
-    """Turning tighter than a radius, in full turns: an arc of it isn't, a tighter arc, a corner and turning on the spot
-    are; straight on and wide arcs aren't."""
-    def arc(r, deg, step=0.05):
-        n = int(math.radians(deg) * r / step)
-        return [Pose2D(r * math.sin(k * step / r), r - r * math.cos(k * step / r), k * step / r) for k in range(n + 1)]
-    assert tight_turns(arc(0.25, 180), 0.25) == 0.0 and tight_turns(arc(1.0, 360), 0.25) == 0.0
-    tight = arc(0.1, 180)
-    assert tight_turns(tight, 0.25) == pytest.approx(tight[-1].yaw / (2.0 * math.pi))
-    corner = [Pose2D(0.05 * k, 0.0, 0.0) for k in range(20)] + \
-        [Pose2D(0.95, 0.05 * k, math.pi / 2) for k in range(1, 20)]
-    assert tight_turns(corner, 0.25) == pytest.approx(0.25, abs=1e-9)
-    spin = [Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, math.pi)]
-    assert tight_turns(spin, 0.05) == pytest.approx(0.5)
-    assert tight_turns([Pose2D(0.1 * k, 0.0, 0.0) for k in range(30)], 0.25) == 0.0
 
 
 def test_omega():
