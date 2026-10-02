@@ -26,14 +26,19 @@ QUAD_SEGS = 9
 
 
 def polygons(geom) -> Iterator[Polygon]:
-    """The polygons in any geometry (Polygon, MultiPolygon, GeometryCollection), empty ones skipped."""
+    """The polygons in any geometry (Polygon, MultiPolygon, GeometryCollection), empty ones skipped, by their lower
+    left corner (minx, miny): the same order whatever order GEOS gives them in."""
+    return iter(sorted(_polygons(geom), key=lambda p: p.bounds[:2]))
+
+
+def _polygons(geom) -> Iterator[Polygon]:
     if geom is None or geom.is_empty:
         return
     if isinstance(geom, Polygon):
         yield geom
     elif hasattr(geom, 'geoms'):
         for g in geom.geoms:
-            yield from polygons(g)
+            yield from _polygons(g)
 
 
 def polygonal(geom):
@@ -90,11 +95,12 @@ def inset(geom, distance: float):
 
 
 def rings(geom) -> List[Tuple[str, List[XY]]]:
-    """('outline' | 'hole', closed point list without the repeated end) of every ring, outlines ccw, holes cw."""
+    """('outline' | 'hole', closed point list without the repeated end) of every ring, outlines ccw, holes cw. The
+    polygons as polygons() gives them, the holes of each by their lower left corner."""
     out = []
     for poly in polygons(geom):
         poly = orient(poly, 1.0)
         out.append(('outline', list(poly.exterior.coords)[:-1]))
-        for hole in poly.interiors:
+        for hole in sorted(poly.interiors, key=lambda h: h.bounds[:2]):
             out.append(('hole', list(hole.coords)[:-1]))
     return out
