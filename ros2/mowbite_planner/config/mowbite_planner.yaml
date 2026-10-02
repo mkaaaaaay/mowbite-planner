@@ -49,6 +49,9 @@
     # (the outline and obstacles are where the centre drove) up to half its width past them, on hard ones
     # (walls) not past them, the centre keeps robot_width / 2 off them. blade_offset: the blade's centre this far
     # left of the mower's (negative: right), the loops then go round with the blade on their outer side
+    # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds): lanes
+    # anyway, or loops further in there, the pieces they come apart into driven on the way round
+    narrow_parts: lanes
     robot_width: -1.0
     robot_front: -1.0
     robot_rear: -1.0

@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import nearest_points
 
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
@@ -51,6 +52,8 @@ LANE_ORDERS = ('snake', 'skip')
 # lanes: parallel lanes; crosshatch: lanes, then lanes across them; concentric: loops further and further in
 FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
 PERIMETER_ORDERS = ('first', 'last')
+# where the lane region is narrower than a U-turn: 'lanes' anyway, or 'loops' further in instead
+NARROW_PARTS = ('lanes', 'loops')
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
 TURN_TYPES = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
@@ -115,6 +118,11 @@ class PlannerConfig:
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
+    # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds: 2 turn radii,
+    # with lane_order skip 4, for lanes far enough apart for U-turns): 'lanes' anyway, 'loops': the loops go on in
+    # there instead, until it's mowed, every part from the outside in before the next (not loop by loop round the
+    # whole area)
+    narrow_parts: str = 'lanes'
     route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
@@ -269,7 +277,7 @@ class PlannerConfig:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
                               ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
-                              ('edges', EDGES)):
+                              ('edges', EDGES), ('narrow_parts', NARROW_PARTS)):
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
@@ -1027,11 +1035,14 @@ class _Route:
                             parent='narrow')
 
     def concentric(self, levels: List[object], middles: List[object], perimeter: int, last: bool,
-                   spacing: float) -> None:
+                   spacing: float, finish: bool = True, spliced: bool = False) -> None:
         """Every loop of every level (and the loops halfway in where a part ends, middles[k] after level k).
         A loop is only mowed after the loops further out next to it (with last: further in), and the closest
         of the ready ones is next: so each part is mowed as a spiral, in (or out with last), before the mower
-        moves on. Loops of the first `perimeter` levels count as perimeter loops, the rest as lanes."""
+        moves on. Loops of the first `perimeter` levels count as perimeter loops, the rest as lanes. finish: they
+        end the plan (else the one closest to the end point isn't kept for last). spliced: every loop further in is
+        driven from the loop closest to it on the way round (in, round, back out where it left), so a part
+        of loops is one drive without trips between them (the loops in a narrow part lie scattered along it)."""
         loops = []  # (depth, hole, ring, line), depth k for level k, k + 0.5 for middles[k]
         for depth, geom in [(k, g) for k, g in enumerate(levels)] + [(k + 0.5, g) for k, g in enumerate(middles)]:
             for kind, ring in self.centre_rings(geom):
@@ -1042,6 +1053,22 @@ class _Route:
                 if not skip:
                     loops.append((depth, kind == 'hole', ring, LineString(ring + [ring[0]])))
         loops.sort(key=lambda loop: loop[0])
+        if spliced:
+            # from the innermost out, each loop into the closest loop further out (of those about as close the one
+            # furthest in: not across the loops between), not into the outermost ones: going in and out there
+            # would be at the very edge
+            items = [[depth, hole, list(ring), line] for depth, hole, ring, line in loops]
+            for item in sorted(items, key=lambda it: -it[0]):
+                outer = [o for o in items if 0 < o[0] < item[0] and o[2] is not None]
+                if not outer:
+                    continue
+                gaps = [o[3].distance(item[3]) for o in outer]
+                closest = min(gaps)
+                parent = max((o for o, g in zip(outer, gaps) if g <= closest + 0.5 * spacing), key=lambda o: o[0])
+                parent[2] = _splice(parent[2], item[2])
+                parent[3] = LineString(parent[2] + parent[2][:1])
+                item[2] = None
+            loops = [tuple(it) for it in items if it[2] is not None]
         near = 1.5 * self.cfg.lane_spacing
         waits = []
         for depth, _, _, line in loops:
@@ -1051,7 +1078,7 @@ class _Route:
         # with an end point, of the loops nothing waits for (going out the outermost ones, going in the
         # innermost ones) the one closest to it comes last
         reserved = None
-        if self.end is not None:
+        if self.end is not None and finish:
             end, waited = Point(self.end), set().union(*waits)
             reserved = min((j for j in range(len(loops)) if j not in waited), default=None,
                            key=lambda j: (loops[j][3].distance(end), j))
@@ -1062,17 +1089,19 @@ class _Route:
                 ready = [i for i in range(len(loops)) if i not in done and i != reserved] or [reserved]
             i = min(ready, key=lambda j: (self._ring_distance(loops[j][2]), j))
             done.add(i)
-            depth, hole, ring, _ = loops[i]
-            final = len(done) == len(loops) and self.end is not None
-            # a middle loop (depth k + 0.5) is half a spacing further in, rounded like the next level's
-            level, gap = int(math.ceil(depth)), spacing
-            parent = f'level-{depth}' if depth == level else f'middle-{int(depth)}'
-            if depth < perimeter:
-                self.drive_ring(ring, hole, target=self.end if final else None, level=level, spacing=gap,
-                                parent=parent)
-            else:
-                self.drive_ring(ring, hole, LANE, 'ring', target=self.end if final else None, level=level,
-                                spacing=gap, parent=parent)
+            self._ring(loops[i], perimeter, spacing, len(done) == len(loops) and self.end is not None)
+
+    def _ring(self, loop, perimeter: int, spacing: float, final: bool) -> None:
+        depth, hole, ring, _ = loop
+        # a middle loop (depth k + 0.5) is half a spacing further in, rounded like the next level's
+        level = int(math.ceil(depth))
+        parent = f'level-{depth}' if depth == level else f'middle-{int(depth)}'
+        if depth < perimeter:
+            self.drive_ring(ring, hole, target=self.end if final else None, level=level, spacing=spacing,
+                            parent=parent)
+        else:
+            self.drive_ring(ring, hole, LANE, 'ring', target=self.end if final else None, level=level,
+                            spacing=spacing, parent=parent)
 
     # lanes
 
@@ -1362,6 +1391,16 @@ class _Route:
         self._count('bends')
 
 
+def _splice(ring: List[XY], other: List[XY]) -> List[XY]:
+    """ring with a trip round other from the closest point between them: there, over to other, round it and
+    back, on along ring."""
+    closed, round_ = ring + ring[:1], other + other[:1]
+    p, q = nearest_points(LineString(closed), LineString(round_))
+    i, p, _ = closest_on_polyline(closed, (p.x, p.y))
+    j, q, _ = closest_on_polyline(round_, (q.x, q.y))
+    return ring[:i + 1] + [p, q] + round_[j + 1:] + round_[1:j + 1] + [q, p] + ring[i + 1:]
+
+
 def _clear_of_corners(closed: List[XY], i: int, entry: XY, keep: float) -> XY:
     """Moves a loop's start/end point on segment i away from a corner next to it: the loop starts and ends
     there, so a corner right at it couldn't be rounded."""
@@ -1539,6 +1578,27 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     # loop of its own, halfway between the last loop there and the next one in (or where the lanes would be)
     narrow = Polygon() if concentric or cfg.skip_lanes else polygonal(union(
         middle(k, inner, spacing) for k, inner in enumerate((levels[:lane_passes] + [lane_region])[1:])))
+    # the loops go on in where the lane region is narrower than a U-turn, the lanes only where it's wider: all the
+    # loops are driven part by part like concentric's
+    ringed = concentric
+    if cfg.narrow_parts == 'loops' and not concentric and not cfg.skip_lanes and cfg.turn_radius > 0 and \
+            len(levels) == count:
+        r = cfg.turn_radius * (2.0 if cfg.lane_order == 'skip' else 1.0)
+        opened = Polygon() if lane_region.is_empty else lane_region.buffer(-r, QUAD_SEGS).buffer(r, QUAD_SEGS)
+        # what that takes away: narrow parts, and the tips of corners (smaller than r * r), which keep their lanes
+        cut = [p for p in polygons(lane_region.difference(opened)) if p.area >= r * r]
+        wide = polygonal(subtract(lane_region, cut)) if cut else lane_region
+        keep_off = None if wide.is_empty else wide.buffer(half, QUAD_SEGS)  # the lanes mow that far round it
+        while len(levels) < MAX_ROWS:
+            level = inset(free, first + len(levels) * spacing)
+            if keep_off is not None and not level.is_empty:
+                level = polygonal(union(p for p in polygons(level.difference(keep_off)) if p.area >= half * half))
+            if level.is_empty:
+                break
+            levels.append(level)
+        middles = [middle(k, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
+                   for k, inner in enumerate(levels[1:] + [Polygon()])]
+        lane_region, narrow, ringed = wide, Polygon(), True
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 
@@ -1679,15 +1739,15 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         # the end point counts for what's mowed last: the loops with last, else the lanes, else the strips too
         # narrow for lanes, else the loops
         skip = {'outline': cfg.skip_outline_loops, 'hole': cfg.skip_obstacle_loops}
-        loops_here = not concentric and any(not skip[kind] for g in w['levels'].values() for kind, _ in rings(g))
+        loops_here = not ringed and any(not skip[kind] for g in w['levels'].values() for kind, _ in rings(g))
         loops_end = loops_here and (last or not any(w['cells']) and w['narrow'] is None)
         last_pass = max((i for i, cells in enumerate(w['cells']) if cells), default=None)
 
         def loops():
-            if concentric:
+            if ringed:
                 route.concentric([w['levels'].get(i, empty) for i in range(len(levels))],
                                  [w['middles'].get(i, empty) for i in range(len(middles))], count, last,
-                                 loop_spacing)
+                                 loop_spacing, last or not any(w['cells']), not concentric)
             else:
                 route.perimeter([w['levels'].get(i, empty) for i in range(len(perimeter_levels))], holes, last,
                                 loops_end)

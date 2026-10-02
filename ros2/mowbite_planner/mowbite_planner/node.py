@@ -40,7 +40,7 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, PERIMETER,
+from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, NARROW_PARTS, PERIMETER,
                       PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan,
                       PlannerConfig, PlanningError, plan_coverage)
 
@@ -73,6 +73,9 @@ PARAMETERS = {
                     math.isfinite, 'must be a number'),
     'robot_rear': (-1.0, "how far the mower's body reaches behind its centre [m], negative: not set", math.isfinite,
                    'must be a number'),
+    'narrow_parts': ('lanes', 'where the lanes would lie in a part narrower than their turns need (a path): lanes '
+                     'anyway, or loops further in, the pieces they come apart into driven on the way round',
+                     lambda v: v in NARROW_PARTS, 'must be lanes or loops'),
     'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may reach half '
               'its width past them. hard: walls, the centre keeps robot_width / 2 off them',
               lambda v: v in EDGES, 'must be recorded or hard'),

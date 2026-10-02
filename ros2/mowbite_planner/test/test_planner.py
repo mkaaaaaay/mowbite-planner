@@ -765,6 +765,26 @@ def test_body_bent_lanes():
     assert not [o for o in check_plan(plan)['body_out'] if o['kind'] in ('turn', 'lane_end')]
 
 
+def test_narrow_parts_loops():
+    """A winding path 0.5 to 0.8 m wide: narrower than the U-turns need, loops go on in there instead of lanes, the
+    pieces they come apart into driven on the way round: shorter, as well mowed, hardly any drives between."""
+    left = [(0.4 * math.sin(0.125 * i), 0.25 * i) for i in range(49)]
+    path = left + [(x + 0.65 + 0.15 * math.sin(1.3 * y), y) for x, y in left][::-1]
+    kw = dict(MOWER, **NX60I, angle=math.pi / 2, perimeter_passes=3)
+    lanes = plan_coverage(path, [], PlannerConfig(**kw))
+    cfg = PlannerConfig(**dict(kw, narrow_parts='loops'))
+    loops = plan_coverage(path, [], cfg)
+    check_invariants(loops, cfg)
+    assert coverage(loops, cfg) > 0.99
+    assert loops.stats['path_length'] < 0.85 * lanes.stats['path_length']
+    assert loops.stats['transit_length'] < 2.0 and loops.stats['lanes'] == 0
+    # a wide area keeps its lanes
+    wide = plan_coverage(rect(0, 0, 10, 6), [], cfg)
+    assert wide.stats['lanes'] > 10
+    with pytest.raises(PlanningError, match='narrow_parts'):
+        PlannerConfig(narrow_parts='strips').validate()
+
+
 def test_body_corner_rounding():
     """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
     with a larger one."""
