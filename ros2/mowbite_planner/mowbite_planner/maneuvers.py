@@ -14,6 +14,8 @@ keep moving while turning, on arcs of a minimum radius:
   would leave the free space because the edge isn't square to the lanes.
 - Pivot: turn on the spot by 90 degrees, cross over, turn on the spot by 90 degrees again. The last
   resort, still half the twist of a 180 degree spin.
+- Dubins' ways (dubins()): arc, straight, arc or three arcs, the shortest forwards with a radius. Where the lanes
+  end at a slant a U-turn that way (arc, diagonal, arc), else a loop into the next lane.
 
 Poses face the way the mower drives: on straight bits each one points at the next (OpenMower's planner
 does the same), on arcs along the arc. No two poses share a position: OpenMower's FTC controller skips
@@ -349,6 +351,68 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
         if len(pts) > 2:
             break
     return join(leave, drive_polyline(pts, step, radius, fits, body=body), arrive)
+
+
+def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool = True) -> List[Maneuver]:
+    """Dubins' ways from exit_pose to entry, forwards on arcs of r and straight lines: arc, straight, arc (the two the
+    same way round or not) and three arcs (the middle one the other way round), shortest first. 'u_turn' where they
+    turn half round at most (a U-turn, at a slant where the lanes end at one), 'bulb' where they loop. loops False:
+    only the U-turn, both arcs towards entry."""
+
+    def centre(p: Pose2D, s: float) -> XY:
+        return p.x - s * r * math.sin(p.yaw), p.y + s * r * math.cos(p.yaw)
+
+    def turn(h0: float, h1: float, s: float) -> float:
+        return s * ((s * (h1 - h0)) % (2.0 * math.pi))  # from heading h0 to h1 turning s (1 left, -1 right) round
+
+    toward = 1.0 if (entry.y - exit_pose.y) * math.cos(exit_pose.yaw) >= \
+        (entry.x - exit_pose.x) * math.sin(exit_pose.yaw) else -1.0
+    ways = []  # (arc or 0, straight or 0) one after the other
+    for s1 in (1.0, -1.0) if loops else (toward,):
+        c1 = centre(exit_pose, s1)
+        for s2 in (1.0, -1.0) if loops else (s1,):
+            c2 = centre(entry, s2)
+            vx, vy = c2[0] - c1[0], c2[1] - c1[1]
+            dist = math.hypot(vx, vy)
+            if s1 == s2:
+                h, length = math.atan2(vy, vx), dist
+            elif dist >= 2.0 * r:
+                h, length = math.atan2(vy, vx) + math.asin(2.0 * s1 * r / dist), math.sqrt(dist * dist - 4.0 * r * r)
+            else:
+                continue
+            ways.append([(turn(exit_pose.yaw, h, s1), 0.0), (0.0, length), (turn(h, entry.yaw, s2), 0.0)])
+        c2 = centre(entry, s1)
+        vx, vy = c2[0] - c1[0], c2[1] - c1[1]
+        dist = math.hypot(vx, vy)
+        if loops and 1e-9 < dist <= 4.0 * r:
+            # the middle arc's centre 2 r from both, the arcs meet halfway between the centres
+            off = math.sqrt(max(0.0, 4.0 * r * r - 0.25 * dist * dist)) / dist
+            for side in (1.0, -1.0):
+                c3 = (0.5 * (c1[0] + c2[0]) - side * off * vy, 0.5 * (c1[1] + c2[1]) + side * off * vx)
+                h1 = math.atan2(s1 * (c3[0] - c1[0]), -s1 * (c3[1] - c1[1]))
+                h2 = math.atan2(s1 * (c3[0] - c2[0]), -s1 * (c3[1] - c2[1]))
+                ways.append([(turn(exit_pose.yaw, h1, s1), 0.0), (turn(h1, h2, -s1), 0.0),
+                             (turn(h2, entry.yaw, s1), 0.0)])
+    out = []
+    for way in ways:
+        poses = [exit_pose]
+        for arc, length in way:
+            p = poses[-1]
+            if abs(arc) > _EPS:
+                poses = join(poses, sample_arc(p.x, p.y, p.yaw, r, arc, step))
+            elif length > _EPS:
+                poses = join(poses, sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw),
+                                                    p.y + length * math.sin(p.yaw), p.yaw, step))
+        end = poses[-1]
+        if len(poses) < 2 or math.hypot(end.x - entry.x, end.y - entry.y) > 1e-3 or \
+                abs(normalize_angle(end.yaw - entry.yaw)) > 1e-3:
+            continue  # (where rounding makes a way miss)
+        poses[0], poses[-1] = exit_pose, entry
+        if sum(abs(arc) for arc, _ in way) <= math.pi + 1e-6:
+            out.append(Maneuver('u_turn', r, [Piece(poses)]))
+        elif loops:
+            out.append(Maneuver('bulb', r, [Piece(poses)]))
+    return sorted(out, key=lambda m: path_length(m.pieces[0].poses))
 
 
 def max_heading_jump(poses: Sequence[Pose2D]) -> float:

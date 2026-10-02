@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_angle,  # noqa: E402
                              plan_coverage, quaternion_to_yaw, swept_area, yaw_to_quaternion)
-from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, omega, plan_turn, u_turn  # noqa: E402
+from mowbite_planner.maneuvers import (bulb_turn, drive_polyline, dubins, k_turn, omega, path_length,  # noqa: E402
+                                       plan_turn, sample_straight, u_turn)
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
                                      SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
@@ -972,6 +973,65 @@ def test_rounded_where_min_turn_radius_doesnt_fit():
     assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3).name == 'pivot'
     assert plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn',), least=0.3) is None
 
+
+
+def test_dubins():
+    """Dubins' ways end on the entry facing its way, no arc tighter than the radius. Between lanes square to the edge
+    the shortest is the U-turn, where the next lane starts further on a U-turn at a slant, shorter than carrying on
+    straight first; loops only with loops."""
+    exit_pose = Pose2D(0.0, 0.0, 0.0)
+    ways = dubins(exit_pose, Pose2D(0.0, 0.6, math.pi), 0.25, 0.05)
+    assert ways[0].name == 'u_turn' and path_length(ways[0].pieces[0].poses) == pytest.approx(0.25 * math.pi + 0.1,
+                                                                                               abs=1e-3)
+    slant = dubins(exit_pose, Pose2D(0.5, 0.8, math.pi), 0.25, 0.05, loops=False)
+    assert [m.name for m in slant] == ['u_turn']
+    poses = slant[0].pieces[0].poses
+    assert any(p.yaw == pytest.approx(math.atan2(0.3, 0.5)) for p in poses)  # the diagonal
+    assert path_length(poses) < path_length(u_turn(0.8, 0.5, 0.25, 0.05).pieces[0].poses) - 0.1
+    rng = random.Random(3)
+    for _ in range(200):
+        a = Pose2D(rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-math.pi, math.pi))
+        b = Pose2D(rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-math.pi, math.pi))
+        ways = dubins(a, b, 0.25, 0.05)
+        assert len(ways) >= 2
+        for m in ways:
+            ps = m.pieces[0].poses
+            assert ps[0] == a and ps[-1] == b
+            for p, q in zip(ps, ps[1:]):
+                d = math.hypot(q.x - p.x, q.y - p.y)
+                assert 1e-7 < d <= 0.05 + 1e-6 and angle_diff(p.yaw, q.yaw) <= 2.0 * math.asin(d / 0.5) + 1e-6
+
+
+def test_earlier_only_where_mowed():
+    """A turn that ends the lanes earlier, the one just mowed too, only where what that leaves of them gets mowed: the
+    lane just mowed doesn't mow its own end."""
+    space = TransitPlanner(Polygon(rect(0, 0, 9.23, 4)))  # a wall 3 cm past the lane's end
+    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25, turn_types=('u_turn', 'pivot')))
+
+    def route(loop_from):
+        r = _Route(cfg, space, space, (1.0, 1.0), 0.0, None)
+        r.add(PERIMETER, sample_straight(9.2, loop_from, 9.2, 3.0, math.pi / 2, 0.05))  # along the wall
+        r.add(LANE, sample_straight(1.0, 1.0, 9.2, 1.0, 0.0, 0.05))
+        r.lanes.append(((1.0, 1.0), (9.2, 1.0)))
+        return r
+
+    assert route(1.3).round_earlier((9.2, 1.6), math.pi, 5.0) is None  # the loop mows only the next lane's start
+    turn, entry = route(0.2).round_earlier((9.2, 1.6), math.pi, 5.0)
+    assert turn.name == 'u_turn' and entry[0] < 9.2 - 0.05
+
+
+def test_turns_where_lanes_end_at_a_slant():
+    """With min_turn_radius, where the lanes end at a slant the turns between them are U-turns that way, the lanes
+    ending a little earlier only where that leaves nothing, else loops into the next lane: hardly a drive in place of a
+    turn, none on the spot, as well mowed."""
+    kite = [(0, 0), (7, 1.5), (9, 6), (1, 7)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', min_turn_radius=0.25, perimeter_passes=3,
+                               lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.0))
+    plan = plan_coverage(kite, [], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg)
+    st = plan.stats
+    assert st['turns_fallback'] <= 1 and st['turns_pivot'] == 0 and st['turns_bulb'] > 0
+    assert check_plan(plan)['left_m2'] < 0.2
 
 def test_body_corner_rounding():
     """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
