@@ -88,6 +88,8 @@ SMOOTH_RADII = (1.0, 0.75, 0.5, 0.35)
 LEFT_TUFT = 0.01
 LEFT_PIECE = 0.05
 LEFT_TOTAL = 0.1
+# m2, a narrower spacing has to leave this much less unmowed to be taken
+LEFT_GAIN = 0.05
 # m, a blade further off the mower's centre is a mistake
 MAX_BLADE_OFFSET = 1.0
 # m, lane ends are pulled back to this when the body doesn't fit at them
@@ -104,8 +106,8 @@ class PlannerConfig:
     overlap: float = 0.15  # 0..<1, share of the cutting width neighbouring lanes overlap
     # 'fixed': the lane spacing follows from overlap. 'auto': the planner tries up to SPACING_CANDIDATES spacings from
     # lane_spacing_max down to lane_spacing_min (m, None: 85 % and 50 % of mower_width) and keeps the widest that
-    # leaves nothing unmowed (no piece of LEFT_PIECE, not LEFT_TOTAL together): the fewest lanes and turns. None does:
-    # the one that leaves least (the angle stays as it is)
+    # leaves nothing unmowed (no piece of LEFT_PIECE, not LEFT_TOTAL together): the fewest lanes and turns. Where one
+    # leaves something, the next narrower only if it leaves LEFT_GAIN less (the angle stays as it is)
     lane_spacing_mode: str = 'fixed'
     lane_spacing_min: Optional[float] = None
     lane_spacing_max: Optional[float] = None
@@ -1641,12 +1643,10 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
             continue
         pieces = [p.area for p in polygons(plan.free_space.difference(swept_area(plan, cfg.mower_width)))
                   if p.area >= LEFT_TUFT]
-        if best is None or sum(pieces) < best_left - 1e-9:
-            best, best_left = plan, sum(pieces)
-        if max(pieces, default=0.0) < LEFT_PIECE and sum(pieces) < LEFT_TOTAL:
-            best = plan
-            break
-        if hi - lo < 1e-9:
+        if best is not None and sum(pieces) > best_left - LEFT_GAIN:
+            break  # narrower doesn't leave less (what's left is at corners, not between the lanes): the wider one
+        best, best_left = plan, sum(pieces)
+        if max(pieces, default=0.0) < LEFT_PIECE and sum(pieces) < LEFT_TOTAL or hi - lo < 1e-9:
             break
     if best is None:
         raise error or PlanningError('no lane spacing fits')
