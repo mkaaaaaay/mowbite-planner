@@ -1129,7 +1129,7 @@ class _Route:
                 gaps = [o[3].distance(item[3]) for o in outer]
                 closest = min(gaps)
                 parent = max((o for o, g in zip(outer, gaps) if g <= closest + 0.5 * spacing), key=lambda o: o[0])
-                parent[2] = _splice(parent[2], item[2])
+                parent[2] = _splice(parent[2], item[2], spacing)
                 parent[3] = LineString(parent[2] + parent[2][:1])
                 item[2] = None
             loops = [tuple(it) for it in items if it[2] is not None]
@@ -1538,14 +1538,34 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
         route.segments[i].poses[j:j] = loop
 
 
-def _splice(ring: List[XY], other: List[XY]) -> List[XY]:
-    """ring with a trip round other from the closest point between them: there, over to other, round it and
-    back, on along ring."""
+def _splice(ring: List[XY], other: List[XY], lead: float = 0.0) -> List[XY]:
+    """ring with a trip round other from the closest point between them: over to other, round it and back, on
+    along ring. lead: it leaves ring that far before that point and gets back that far after it, and goes round other
+    from that far after to that far before its point: the hops over go at a slant, not at right angles."""
     closed, round_ = ring + ring[:1], other + other[:1]
     p, q = nearest_points(LineString(closed), LineString(round_))
-    i, p, _ = closest_on_polyline(closed, (p.x, p.y))
-    j, q, _ = closest_on_polyline(round_, (q.x, q.y))
-    return ring[:i + 1] + [p, q] + round_[j + 1:] + round_[1:j + 1] + [q, p] + ring[i + 1:]
+
+    def from_to(pts: List[XY], near) -> List[XY]:
+        # pts (closed) from `lead` after the point closest to near round to `lead` before it, by the way along them
+        i, at, _ = closest_on_polyline(pts, (near.x, near.y))
+        cum = [0.0]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            cum.append(cum[-1] + math.hypot(bx - ax, by - ay))
+        n = cum[-1]
+        d = min(lead, 0.25 * n)
+        t0 = cum[i] + math.hypot(at[0] - pts[i][0], at[1] - pts[i][1]) + d
+
+        def point(t: float) -> XY:
+            t %= n
+            k = min(bisect.bisect_right(cum, t) - 1, len(pts) - 2)
+            f = (t - cum[k]) / max(cum[k + 1] - cum[k], 1e-12)
+            return pts[k][0] + f * (pts[k + 1][0] - pts[k][0]), pts[k][1] + f * (pts[k + 1][1] - pts[k][1])
+
+        span = n - 2.0 * d
+        inner = sorted(((cum[k] - t0) % n, pts[k]) for k in range(len(pts) - 1))
+        return [point(t0)] + [pt for t, pt in inner if 1e-9 < t < span - 1e-9] + [point(t0 + span)]
+
+    return from_to(closed, p) + from_to(round_, q)
 
 
 def _clear_of_corners(closed: List[XY], i: int, entry: XY, keep: float) -> XY:
