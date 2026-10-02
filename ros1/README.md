@@ -240,6 +240,12 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
   (both may be negative).
+- `mode` (also per area in its `planner` property): `gentle`, `lines`, `crosshatch`, `rings` set the pattern and
+  how it turns (see the settings of the ROS 2 package), `slic3r` hands `mower_logic`'s request as it came to
+  OpenMower's slic3r planner, which the launch file starts next to the node as `slic3r_classic` (service
+  `/slic3r_classic/plan_path`, parameter `classic_service`): the plan of before the MowBite Planner. `planner.plan`
+  asks it like `mower_logic` would (OpenMower's settings and the area's, none of the node's), its paths each a
+  section of their own.
 - `lane_spacing_mode: auto` (on and off again with `fixed`, also per area in its `planner` property) lets the
   planner pick the lane spacing, `perimeter_passes: -1` the loops (`planner.settings` reports `auto_value: -1`);
   what it picked is in `stats.chosen` of every plan.

@@ -1,6 +1,7 @@
 <!-- The MowBite Planner in place of OpenMower's slic3r planner: the same service name
      (/slic3r_coverage_planner/plan_path), so mower_logic and the mowing.plan RPC use it as they are.
-     Start it instead of the slic3r_coverage_planner node, not next to it. -->
+     Start it instead of the slic3r_coverage_planner node, not next to it (the slic3r planner below runs under a
+     name of its own). -->
 <launch>
   <node pkg="mowbite_planner_ros1" type="mowbite_planner_node" name="slic3r_coverage_planner" output="screen"
         respawn="true" respawn_delay="10">
@@ -14,5 +15,11 @@
     <rosparam param="settings">{turn_radius: 0.25, narrow_parts: loops}</rosparam>
     <!-- the settings changed with the planner.settings.set RPC, on top of the ones above. Empty: until the next start -->
     <param name="settings_file" value="$(optenv ROS_HOME ~/.ros)/mowbite_planner_settings.json"/>
+  </node>
+  <!-- OpenMower's slic3r planner for mode slic3r: the MowBite Planner hands it mower_logic's request as it came -->
+  <node pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_classic" output="screen"
+        respawn="true" respawn_delay="10">
+    <remap from="slic3r_coverage_planner/plan_path" to="slic3r_classic/plan_path"/>
+    <param name="visualize_plan" value="false"/>
   </node>
 </launch>

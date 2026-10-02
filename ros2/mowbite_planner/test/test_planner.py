@@ -22,7 +22,7 @@ from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, omega, 
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
                                      SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
-                                     scan_lanes, split_cells)
+                                     plan_footprint, scan_lanes, split_cells, tight_turns)
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
@@ -371,7 +371,8 @@ def test_obstacles_over_the_edge_or_outside():
 
 def test_no_way_over_keep_out_areas():
     """The way around the wall through the other lawn, but not over an inactive area or one not to mow in it: the
-    centre keeps off it like off an obstacle, nor does the body reach in."""
+    centre keeps off it like off an obstacle, nor does the body reach in (further than body_tolerance, like past a
+    wall)."""
     wall = rect(4.9, -1, 5.1, 7)
     keep = rect(3, 6.5, 7, 8)  # across the lawn's near half
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
@@ -382,7 +383,26 @@ def test_no_way_over_keep_out_areas():
     assert plan.section_starts == [0] and max(p.y for p in plan.poses) > 8.0  # round it, further out
     away = Polygon(keep).buffer(cfg.centre_offset - 1e-6)
     assert not any(away.contains(Point(p.x, p.y)) for p in plan.poses)
-    assert plan.body_space.intersection(Polygon(keep)).area < 1e-6
+    assert plan.body_space.intersection(Polygon(keep).buffer(-cfg.body_tolerance, join_style=2)).area < 1e-6
+
+
+@pytest.mark.parametrize('edges', ['recorded', 'hard'])
+def test_keep_out_areas_are_walls(edges):
+    """Next to an area to keep out of, the body stays out of it on the loops as well: the edge there is a wall, for
+    recorded edges too, the strip that leaves along it is reported. (Turning at a corner in front of it, the front
+    swings out a little, as in front of any wall.)"""
+    keep = rect(0, 6, 10, 9)  # the next lawn, inactive, right along the outline
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges=edges))
+    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, keep_out=[keep])
+    check_invariants(plan, cfg, [])
+    inside = Polygon(keep).buffer(-cfg.body_tolerance, join_style=2)
+    body = plan_footprint(plan).body
+    assert all(body(p.x, p.y, p.yaw).intersection(inside).area < 1e-9 for p in plan.poses if 1.0 < p.x < 9.0)
+    assert max(p.y for p in plan.poses) <= 6.0 - 0.5 * cfg.robot_width + cfg.body_tolerance + 1e-6
+    walled = [w for w in plan.warnings if 'along areas to keep out of' in w]
+    assert bool(walled) == (edges == 'recorded')  # hard edges keep the body that far off any edge anyway
+    other = plan_coverage(rect(0, 0, 10, 6), [], cfg)
+    assert max(p.y for p in other.poses) > max(p.y for p in plan.poses) - 1e-9
 
 
 @pytest.mark.parametrize('corridor', [False, True])
@@ -533,6 +553,20 @@ def test_concentric(boundary, obstacles):
     assert any(s.maneuver == 'ring' for s in plan.segments)
     assert coverage(plan, cfg) > 0.99
     assert not plan.warnings
+
+
+@pytest.mark.parametrize('boundary, obstacles', [(rect(0, 0, 10, 6), []), (GARDEN, [TREE, BED])])
+def test_concentric_with_narrow_loops_in_one_go(boundary, obstacles):
+    """concentric with narrow_parts loops: every loop is driven on the way round of the one next to it further out,
+    a part in one go, no drives from loop to loop (but into that from the outermost), mowed as much."""
+    cfg = PlannerConfig(fill_pattern='concentric', narrow_parts='loops')
+    plan = plan_coverage(boundary, obstacles, cfg)
+    check_invariants(plan, cfg, obstacles)
+    apart = plan_coverage(boundary, obstacles, PlannerConfig(fill_pattern='concentric'))
+    drives = [sum(1 for s in p.segments if s.kind == TRANSIT) for p in (plan, apart)]
+    assert drives[0] <= 1 + 2 * len(obstacles) and drives[0] < drives[1]
+    assert plan.stats['path_length'] < apart.stats['path_length']
+    assert coverage(plan, cfg) > 0.99 and not plan.warnings
 
 
 # perimeter order and direction -----------------------------------------------------------------------------
@@ -828,6 +862,58 @@ def test_lane_spacing_auto():
             PlannerConfig(**dict(MOWER, **kw)).validate()
 
 
+@pytest.mark.parametrize('spacing', ['fixed', 'auto'])
+def test_fill_pattern_auto(spacing):
+    """fill_pattern auto: lanes and loops planned, the one that costs least kept (its length, TIGHT_COST for every
+    full turn tighter than min_turn_radius, LEFT_COST for every m2 left), exactly as that pattern plans it;
+    stats['chosen'] says which."""
+    base = dict(MOWER, **NX60I, min_turn_radius=0.25, lane_spacing_mode=spacing)
+    plan = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, fill_pattern='auto')), start=(1, 1, 0.0))
+    check_invariants(plan, plan.config)
+    costs = {}
+    for pattern in ('lanes', 'concentric'):
+        alone = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, fill_pattern=pattern)), start=(1, 1, 0.0))
+        costs[pattern] = (alone.stats['path_length'] + 10.0 * tight_turns(alone.poses, 0.25) +
+                          100.0 * check_plan(alone)['left_m2'], [(p.x, p.y, p.yaw) for p in alone.poses])
+    chosen = plan.stats['chosen']['fill_pattern']
+    assert chosen == min(costs, key=lambda k: costs[k][0])
+    assert [(p.x, p.y, p.yaw) for p in plan.poses] == costs[chosen][1]
+    assert plan.stats['chosen']['mode'] == spacing
+
+
+def test_tight_turns():
+    """Turning tighter than a radius, in full turns: an arc of it isn't, a tighter arc, a corner and turning on the spot
+    are; straight on and wide arcs aren't."""
+    def arc(r, deg, step=0.05):
+        n = int(math.radians(deg) * r / step)
+        return [Pose2D(r * math.sin(k * step / r), r - r * math.cos(k * step / r), k * step / r) for k in range(n + 1)]
+    assert tight_turns(arc(0.25, 180), 0.25) == 0.0 and tight_turns(arc(1.0, 360), 0.25) == 0.0
+    tight = arc(0.1, 180)
+    assert tight_turns(tight, 0.25) == pytest.approx(tight[-1].yaw / (2.0 * math.pi))
+    corner = [Pose2D(0.05 * k, 0.0, 0.0) for k in range(20)] + [Pose2D(0.95, 0.05 * k, math.pi / 2) for k in range(1, 20)]
+    assert tight_turns(corner, 0.25) == pytest.approx(0.25, abs=1e-9)
+    spin = [Pose2D(0.0, 0.0, 0.0), Pose2D(0.0, 0.0, math.pi)]
+    assert tight_turns(spin, 0.05) == pytest.approx(0.5)
+    assert tight_turns([Pose2D(0.1 * k, 0.0, 0.0) for k in range(30)], 0.25) == 0.0
+
+
+@pytest.mark.parametrize('mode, settings', [
+    ('gentle', dict(fill_pattern='auto', smooth_spins=True, narrow_parts='loops')),
+    ('lines', dict(fill_pattern='lanes', smooth_spins=False, narrow_parts='lanes')),
+    ('crosshatch', dict(fill_pattern='crosshatch', smooth_spins=False, narrow_parts='lanes')),
+    ('rings', dict(fill_pattern='concentric', smooth_spins=False, narrow_parts='loops'))])
+def test_modes(mode, settings):
+    """A mode plans as its settings would, whatever those are set to; a mode it doesn't know is an error."""
+    other = dict(fill_pattern='crosshatch' if mode != 'crosshatch' else 'lanes', smooth_spins=not settings['smooth_spins'],
+                 narrow_parts='lanes' if settings['narrow_parts'] == 'loops' else 'loops')
+    plan = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, **other, mode=mode)))
+    same = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, **settings)))
+    assert [(p.x, p.y, p.yaw) for p in plan.poses] == [(p.x, p.y, p.yaw) for p in same.poses]
+    assert plan.config.mode == 'custom' and plan.config.fill_pattern == same.config.fill_pattern
+    with pytest.raises(PlanningError, match='mode'):
+        PlannerConfig(mode='pretty').validate()
+
+
 def test_omega():
     for deg in (60, 90, 150, -120, 180):
         loop = omega(Pose2D(1.0, 2.0, 0.3), math.radians(deg), 0.25, 0.05)
@@ -868,7 +954,8 @@ def test_smooth_spins():
 
 
 def test_min_turn_radius():
-    """No turn, drive, loop out or K-turn tighter than min_turn_radius: turning on the spot instead."""
+    """No turn, drive, loop out or K-turn tighter than min_turn_radius: turning on the spot instead, but for a U-turn
+    between lanes where none of it fits, which is rounded as wide as fits (lanes ending earlier for it)."""
     def arcs(plan):
         # radii of the runs of turning poses that turn 45 degrees at least (not counting turns on the spot)
         out, i, P = [], 1, plan.poses
@@ -894,10 +981,24 @@ def test_min_turn_radius():
     # the loops' corners keep their rounding, so count only what the turns and loops out make
     turns = [s for s in plan.segments if s.kind in (TURN, TRANSIT) or s.maneuver == 'k_point']
     assert turns and min(arcs(loose)) < 0.15
-    assert all(r > 0.2 - 0.02 for s in turns
-               for r in arcs(dataclasses.replace(plan, poses=plan.poses[s.start:s.end + 1])))
+    tight = [s for s in turns if any(r <= 0.2 - 0.02 for r in arcs(
+        dataclasses.replace(plan, poses=plan.poses[s.start:s.end + 1])))]
+    assert all(s.maneuver == 'u_turn' for s in tight)
     with pytest.raises(PlanningError, match='min_turn_radius'):
         PlannerConfig(min_turn_radius=-0.1).validate()
+
+
+def test_rounded_where_min_turn_radius_doesnt_fit():
+    """Lanes 0.27 m apart with a least radius of 0.3: a U-turn as wide as fits (half the way across) before turning
+    on the spot, which comes only where that doesn't fit either; without pivots allowed nothing."""
+    exit_pose, entry = Pose2D(0.0, 0.0, 0.0), (0.0, 0.27)
+    free = lambda pts: True  # noqa: E731
+    turn = plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn', 'pivot'), least=0.3)
+    assert turn.name == 'u_turn'
+    assert max(p.x for p in turn.pieces[0].poses) == pytest.approx(0.135, abs=0.01)
+    room = lambda pts: all(x <= 0.05 for x, _ in pts)  # noqa: E731 - a wall 5 cm ahead
+    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3).name == 'pivot'
+    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn',), least=0.3) is None
 
 
 def test_body_corner_rounding():

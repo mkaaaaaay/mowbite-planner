@@ -362,8 +362,8 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
     detours. types: the kinds allowed, preferred first; larger radii always come before smaller ones,
-    detours and pivots after all radii. body: the turn's poses have to pass it too. least: no arc tighter than that.
-    None if nothing allowed fits."""
+    detours and pivots after all radii. body: the turn's poses have to pass it too. least: no arc tighter than that,
+    but for a U-turn where none fits, as wide as fits, before a pivot. None if nothing allowed fits."""
 
     def ok(m: Maneuver) -> bool:
         return fits(m.points()) and (body is None or body([exit_pose] + [p for pc in m.pieces for p in pc.poses]))
@@ -395,6 +395,13 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
             if m is not None:
                 return m
         elif name == 'pivot':
+            # where nothing of least fits, a U-turn as wide as fits (tighter than least) before turning on the spot
+            for r in turn_radii(radius, d):
+                local = u_turn(d, dx, r, step) if r < least - 1e-9 and d >= 2.0 * r - 1e-9 else None
+                if local is not None:
+                    m = _to_map(local, exit_pose, side)
+                    if ok(m):
+                        return m
             m = _to_map(pivot_turn(d, dx, step), exit_pose, side)
             if ok(m):
                 return m

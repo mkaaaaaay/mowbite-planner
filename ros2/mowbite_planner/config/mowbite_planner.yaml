@@ -16,7 +16,11 @@
     perimeter_direction: auto
     # lanes reach this many loops further out (OpenMower's outline_overlap_count)
     lane_overlap_passes: 0
-    # inside the loops: lanes, crosshatch (lanes, then lanes at crosshatch_angle_deg to them) or concentric
+    # custom (the settings as they are), gentle (as little and as wide turning as it can) or lines, crosshatch, rings
+    # (that pattern kept clean): beats fill_pattern, smooth_spins and narrow_parts
+    mode: custom
+    # inside the loops: lanes, crosshatch (lanes, then lanes at crosshatch_angle_deg to them), concentric or auto
+    # (lanes or concentric, whichever turns least tightly)
     fill_pattern: lanes
     crosshatch_angle_deg: 90.0
     # lane direction: longest_edge, min_width, optimal (fewest lanes, tried angle_step_deg apart) or fixed
@@ -53,7 +57,8 @@
     # (walls) not past them, the centre keeps robot_width / 2 off them. blade_offset: the blade's centre this far
     # left of the mower's (negative: right), the loops then go round with the blade on their outer side
     # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds): lanes
-    # anyway, or loops further in there, the pieces they come apart into driven on the way round
+    # anyway, or loops further in there, the pieces they come apart into driven on the way round (with
+    # fill_pattern concentric all the loops, a part in one go)
     narrow_parts: lanes
     robot_width: -1.0
     robot_front: -1.0

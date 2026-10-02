@@ -49,8 +49,30 @@ ROUTE_ORDERS = ('nearest', 'optimized')
 # orders route_order 'optimized' tries at most for one set of cells, so it doesn't take long with many
 ORDER_BUDGET = 4000
 LANE_ORDERS = ('snake', 'skip')
-# lanes: parallel lanes; crosshatch: lanes, then lanes across them; concentric: loops further and further in
-FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
+# lanes: parallel lanes; crosshatch: lanes, then lanes across them; concentric: loops further and further in;
+# auto: the planner picks (see plan_coverage)
+FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric', 'auto')
+# fill_pattern 'auto' plans these and keeps the one that costs least: the metres of its path, TIGHT_COST more for every
+# full turn tighter than min_turn_radius (at least TIGHT_FLOOR: on the spot), LEFT_COST more for every m2 it leaves
+# unmowed (pieces from LEFT_TUFT). Turning is measured over TIGHT_WINDOW of path at a time: a sharp corner of a loop
+# counts like turning on the spot
+AUTO_PATTERNS = ('lanes', 'concentric')
+TIGHT_COST = 10.0  # m per 360 degrees
+TIGHT_FLOOR = 0.05  # m
+TIGHT_WINDOW = 0.2  # m
+LEFT_COST = 100.0  # m per m2
+# what a mode sets, beating those settings ('custom': the settings as they are). gentle: turning as little and as wide
+# as it can; lines, crosshatch, rings: that pattern kept clean (no loops out in it, turning on the spot instead, lanes
+# in narrow parts, the rings of a part in one go). slic3r: OpenMower's slic3r planner plans it as before the MowBite
+# Planner, with OpenMower's settings (the ROS 1 node hands it the request, plan_coverage can't)
+MODES = {
+    'custom': {},
+    'slic3r': {},
+    'gentle': {'fill_pattern': 'auto', 'smooth_spins': True, 'narrow_parts': 'loops'},
+    'lines': {'fill_pattern': 'lanes', 'smooth_spins': False, 'narrow_parts': 'lanes'},
+    'crosshatch': {'fill_pattern': 'crosshatch', 'smooth_spins': False, 'narrow_parts': 'lanes'},
+    'rings': {'fill_pattern': 'concentric', 'smooth_spins': False, 'narrow_parts': 'loops'},
+}
 PERIMETER_ORDERS = ('first', 'last')
 # where the lane region is narrower than a U-turn: 'lanes' anyway, or 'loops' further in instead
 NARROW_PARTS = ('lanes', 'loops')
@@ -94,6 +116,10 @@ LEFT_GAIN = 0.05
 MAX_BLADE_OFFSET = 1.0
 # m, lane ends are pulled back to this when the body doesn't fit at them
 BODY_STEP = 0.01
+# m, where the only turn between two lanes is on the spot, both end this much earlier at a time for a rounded one
+# (_Route.round_earlier), m2 of what they leave its blade may not mow
+ROUND_STEP = 0.05
+EARLIER_LEFT = 1e-3
 
 
 class PlanningError(ValueError):
@@ -113,7 +139,11 @@ class PlannerConfig:
     lane_spacing_max: Optional[float] = None
     # loops along the outline and around every obstacle, -1: as many as the lanes' turns need (see passes)
     perimeter_passes: int = 2
-    fill_pattern: str = 'lanes'  # 'lanes', 'crosshatch' or 'concentric'
+    # 'custom', 'gentle', 'lines', 'crosshatch', 'rings' (they set fill_pattern, smooth_spins and narrow_parts) or
+    # 'slic3r' (OpenMower's planner plans it): see MODES
+    mode: str = 'custom'
+    # 'lanes', 'crosshatch', 'concentric' or 'auto': lanes or loops, whichever turns least tightly (AUTO_PATTERNS)
+    fill_pattern: str = 'lanes'
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
     perimeter_direction: str = 'auto'  # 'ccw', 'cw' around every loop, 'auto': the way the mower faces
@@ -133,9 +163,10 @@ class PlannerConfig:
     # m, radius of the turns between lanes. Tighter ones (down to half the lane spacing, then turning on
     # the spot) only where the headland is too small
     turn_radius: float = 0.25
-    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (where the inner wheel stands or turns
-    # backwards, about half the track of the drive wheels, it scuffs the lawn more than turning on the spot once):
-    # turning on the spot instead. 0: any (the corners of loops are rounded as before)
+    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this: drives, loops out and K-turns turn on the
+    # spot instead, a turn between lanes where none of it fits is rounded as wide as fits (the lanes ending a little
+    # earlier for it where that's what it takes, see _Route.round_earlier), on the spot only where nothing does.
+    # 0: any (the corners of loops are rounded as before)
     min_turn_radius: float = 0.0
     allow_reverse: bool = True  # K-turns, which back up a little
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
@@ -148,7 +179,8 @@ class PlannerConfig:
     # where the lanes would lie in a part narrower than a U-turn (2 * turn_radius: a path, a strip between beds, and
     # what's left between such parts too small for more than a few lanes): 'lanes' anyway, 'loops': the loops go on
     # in there instead until it's mowed, the pieces they come apart into driven on the way round (in from the loop
-    # next to them and back out), so no trips along a path from piece to piece
+    # next to them and back out), so no trips along a path from piece to piece. With fill_pattern concentric 'loops'
+    # drives all the loops that way, a part of the area in one go
     narrow_parts: str = 'lanes'
     # where the path would turn on the spot by more than SPIN_LIMIT, a loop out (an omega) in its place where it fits
     smooth_spins: bool = True
@@ -339,7 +371,8 @@ class PlannerConfig:
             raise PlanningError(f'route_order must be one of {", ".join(ROUTE_ORDERS)}, got {self.route_order!r}')
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
-        for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
+        for name, allowed in (('mode', tuple(MODES)), ('angle_strategy', ANGLE_STRATEGIES),
+                              ('fill_pattern', FILL_PATTERNS),
                               ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
                               ('edges', EDGES), ('narrow_parts', NARROW_PARTS),
                               ('lane_spacing_mode', LANE_SPACING_MODES)):
@@ -1413,6 +1446,11 @@ class _Route:
                             self._count('lanes_body')
                 if turn is None:
                     turn = turn_to(a, self.cfg.allowed_turns)
+                if turn is not None and turn.name == 'pivot' and self.cfg.min_turn_radius > 0:
+                    earlier = self.round_earlier(a, yaw, rest)
+                    if earlier is not None:
+                        turn, a = earlier
+                        self._count('lanes_earlier')
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, piece.reverse, turn.name)
@@ -1430,6 +1468,59 @@ class _Route:
             self.lanes.append((a, b))
             direction = -direction
             driven += 1
+        return None
+
+    def round_earlier(self, a: XY, yaw: float, rest: float) -> Optional[Tuple[Maneuver, XY]]:
+        """In place of turning on the spot from the lane just mowed into the next (from a, facing yaw, rest m to
+        spare): a rounded turn with the one ending and the other starting a little earlier, by ROUND_STEP at a time
+        up to turn_radius, where the turn or what's mowed already (the loops next to them) mows what they leave (but
+        EARLIER_LEFT). The lane just mowed is shortened then. None where that doesn't help."""
+        last = self.segments[-1] if self.segments else None
+        if last is None or last.kind != LANE or last.maneuver or len(last.poses) < 2:
+            return None
+        first, end = last.poses[0], last.poses[-1]
+        h = end.yaw
+        if any(angle_diff(p.yaw, h) > 1e-6 for p in last.poses):
+            return None  # a bent lane
+        length = math.hypot(end.x - first.x, end.y - first.y)
+        most = min(self.cfg.turn_radius, length - self.cfg.min_lane_length, rest)
+        types = tuple(t for t in self.cfg.allowed_turns if t not in ('detour', 'pivot')) + ('pivot',)
+        half, ahead, off = 0.5 * self.cfg.mower_width, self.cfg.blade_ahead, self.cfg.blade_offset
+
+        def blade(ps: Sequence[Pose2D]):
+            return LineString([(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
+                                p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in ps]).buffer(half, 4)
+
+        # what's mowed already near the lane end
+        reach = most + self.cfg.turn_radius + self.cfg.mower_width + abs(ahead) + abs(off)
+        runs: List[List[Pose2D]] = []
+        for seg in self.segments:
+            run: List[Pose2D] = []
+            for p in seg.poses:
+                if abs(p.x - end.x) <= reach and abs(p.y - end.y) <= reach:
+                    run.append(p)
+                elif run:
+                    runs.append(run)
+                    run = []
+            runs.append(run)
+        mowed = union(blade(run) for run in runs if len(run) >= 2)
+        hx, hy, ux, uy = math.cos(h), math.sin(h), math.cos(yaw), math.sin(yaw)
+        for k in range(1, int(most / ROUND_STEP + 1e-9) + 1):
+            d = k * ROUND_STEP
+            exit_pose = Pose2D(end.x - d * hx, end.y - d * hy, h)
+            entry = (a[0] + d * ux, a[1] + d * uy)
+            turn = plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
+                             self.area.is_free, self.transit.path, types, self.body, self.cfg.min_turn_radius)
+            if turn is None or turn.name == 'pivot':
+                continue
+            left = union([blade([exit_pose, end]), blade([Pose2D(a[0], a[1], yaw), Pose2D(entry[0], entry[1], yaw)])])
+            if subtract(left, [blade([p for piece in turn.pieces for p in piece.poses]), mowed]).area > EARLIER_LEFT:
+                continue
+            last.poses[:] = [p for p in last.poses
+                             if (p.x - first.x) * hx + (p.y - first.y) * hy < length - d - 1e-9] + [exit_pose]
+            self.pos, self.heading = (exit_pose.x, exit_pose.y), h
+            self.lanes[-1] = (self.lanes[-1][0], (exit_pose.x, exit_pose.y))
+            return turn, entry
         return None
 
     def body_ends(self, a: XY, b: XY, yaw: float, arrive: float, leave: float) -> Optional[Tuple[XY, XY]]:
@@ -1537,6 +1628,24 @@ def _spins(poses: Sequence[Pose2D], heading_in: Optional[float], heading_out: Op
     yaws = ([heading_in] if heading_in is not None else []) + [p.yaw for p in poses] + \
         ([heading_out] if heading_out is not None else [])
     return sum(1 for a, b in zip(yaws, yaws[1:]) if angle_diff(a, b) > SPIN_LIMIT)
+
+
+def tight_turns(poses: Sequence[Pose2D], radius: float) -> float:
+    """How much the path turns tighter than radius (on the spot too), in full turns: the turning over TIGHT_WINDOW of
+    path at a time, where that path is shorter than an arc of radius would be (3 % off: the poses of an arc are a
+    little closer than it is long)."""
+    total, i, n = 0.0, 0, len(poses)
+    while i < n - 1:
+        turn = length = 0.0
+        j = i
+        while j < n - 1 and length < TIGHT_WINDOW:
+            turn += angle_diff(poses[j].yaw, poses[j + 1].yaw)
+            length += math.hypot(poses[j + 1].x - poses[j].x, poses[j + 1].y - poses[j].y)
+            j += 1
+        if turn > 0.0 and length < 0.97 * radius * turn:
+            total += turn
+        i = j
+    return total / (2.0 * math.pi)
 
 
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
@@ -1732,10 +1841,36 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   drivable: Sequence[Sequence[Sequence[float]]] = (),
                   keep_out: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
     """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
-    SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
-    lane spacing and loops it was planned with."""
+    SPACING_CANDIDATES lane spacings (see PlannerConfig), with fill_pattern 'auto' the one of AUTO_PATTERNS that costs
+    least (the first of equal ones), the same input always picks the same. stats['chosen']: the lane spacing, loops and
+    fill pattern it was planned with."""
     cfg = config or PlannerConfig()
     cfg.validate()
+    if cfg.mode == 'slic3r':
+        raise PlanningError("mode slic3r: OpenMower's slic3r planner plans that (through the ROS 1 node)")
+    if cfg.mode != 'custom':
+        cfg = dataclasses.replace(cfg, mode='custom', **MODES[cfg.mode])
+    if cfg.fill_pattern == 'auto':
+        t0 = time.perf_counter()
+        best, best_cost, error = None, math.inf, None
+        for pattern in AUTO_PATTERNS:
+            try:
+                plan = plan_coverage(boundary, obstacles, dataclasses.replace(cfg, fill_pattern=pattern), start, end,
+                                     drivable, keep_out)
+            except PlanningError as e:
+                error = error or e
+                continue
+            left = sum(p.area for p in polygons(plan.free_space.difference(swept_area(plan, cfg.mower_width, 0.01)))
+                       if p.area >= LEFT_TUFT)
+            tight = tight_turns(plan.poses, max(cfg.min_turn_radius, TIGHT_FLOOR))
+            cost = plan.stats['path_length'] + TIGHT_COST * tight + LEFT_COST * left
+            if cost < best_cost:
+                best, best_cost = plan, cost
+        if best is None:
+            raise error or PlanningError('no fill pattern fits')
+        best.stats['planning_time'] = time.perf_counter() - t0
+        best.stats['chosen']['fill_pattern'] = best.config.fill_pattern
+        return best
     if cfg.lane_spacing_mode != 'auto':
         return _plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out)
     t0 = time.perf_counter()
@@ -1828,8 +1963,19 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             free = polygonal(simple)
     if free.is_empty:
         raise PlanningError('the obstacles cover the whole area')
+    # an area to keep out of is a wall, recorded edges or not: the first loop keeps the body off it (robot_width / 2,
+    # as with edges 'hard'), what that leaves along it isn't mowed
+    walled = 0.0
+    if cfg.body and keep_out:
+        wall = 0.5 * cfg.robot_width - off - first
+        away = union(clean_polygon(k) for k in keep_out)
+        before = free.area
+        free = polygonal(free.difference(away.buffer(wall, QUAD_SEGS) if wall > 0 else away))
+        walled = before - free.area
     # slivers smaller than the blade (where a noisy outline crosses itself) aren't parts of their own
     free = polygonal(union(p for p in polygons(free) if p.area >= half * half))
+    if free.is_empty:
+        raise PlanningError('the areas to keep out of cover the whole area')
     robot_space = inset(free, centre)
     if robot_space.is_empty:
         raise PlanningError(f'the area is too narrow for a first loop {centre} m inside the outline')
@@ -1995,7 +2141,9 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             lawn.append(_driven(lawn, 0.5 * cfg.robot_width, max(cfg.robot_front, cfg.robot_rear)))
         body_space = union(lawn).buffer(cfg.body_tolerance, QUAD_SEGS, join_style=2)
         if keep_out:
-            body_space = body_space.difference(union(clean_polygon(k) for k in keep_out))
+            # (an area to keep out of is recorded as well: the body may reach body_tolerance into it, as past a wall)
+            body_space = body_space.difference(union(clean_polygon(k) for k in keep_out).buffer(
+                -cfg.body_tolerance, QUAD_SEGS, join_style=2))
         footprint = Footprint(body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
     route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
@@ -2073,7 +2221,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             if ringed:
                 route.concentric([w['levels'].get(i, empty) for i in range(len(levels))],
                                  [w['middles'].get(i, empty) for i in range(len(middles))], count, last,
-                                 loop_spacing, last or not any(w['cells']), not concentric)
+                                 loop_spacing, last or not any(w['cells']),
+                                 not concentric or cfg.narrow_parts == 'loops')
             else:
                 route.perimeter([w['levels'].get(i, empty) for i in range(len(perimeter_levels))], holes, last,
                                 loops_end)
@@ -2108,6 +2257,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if len(section_starts) > 1:
         route.warnings.append(f'the area has {len(section_starts)} parts with no way between them: the path '
                               'jumps from one to the next')
+    if walled > 1e-3:
+        route.warnings.append(f'{walled:.2f} m2 along areas to keep out of left: the body stays out of them')
 
     lengths: Dict[str, float] = {PERIMETER: 0.0, LANE: 0.0, TURN: 0.0, TRANSIT: 0.0}
     for seg in segments:
