@@ -365,6 +365,22 @@ def test_obstacles_over_the_edge_or_outside():
     assert coverage(plan, cfg) > 0.99
 
 
+def test_no_way_over_keep_out_areas():
+    """The way around the wall through the other lawn, but not over an inactive area or one not to mow in it: the
+    centre keeps off it like off an obstacle, nor does the body reach in."""
+    wall = rect(4.9, -1, 5.1, 7)
+    keep = rect(3, 6.5, 7, 8)  # across the lawn's near half
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    free = plan_coverage(rect(0, 0, 10, 6), [wall], cfg, drivable=[rect(1, 4, 9, 11)])
+    assert free.section_starts == [0] and any(6.5 < p.y < 8 and 3 < p.x < 7 for p in free.poses)
+    plan = plan_coverage(rect(0, 0, 10, 6), [wall], cfg, drivable=[rect(1, 4, 9, 11)], keep_out=[keep])
+    check_invariants(plan, cfg, [wall])
+    assert plan.section_starts == [0] and max(p.y for p in plan.poses) > 8.0  # round it, further out
+    away = Polygon(keep).buffer(cfg.centre_offset - 1e-6)
+    assert not any(away.contains(Point(p.x, p.y)) for p in plan.poses)
+    assert plan.body_space.intersection(Polygon(keep)).area < 1e-6
+
+
 @pytest.mark.parametrize('corridor', [False, True])
 def test_obstacle_wall_splits_the_area(corridor):
     cfg = PlannerConfig()

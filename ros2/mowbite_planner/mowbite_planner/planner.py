@@ -1432,14 +1432,16 @@ def _check_coordinates(what: str, points: Sequence[Sequence[float]]) -> None:
 def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
                   config: Optional[PlannerConfig] = None, start: Optional[Sequence[float]] = None,
                   end: Optional[Sequence[float]] = None,
-                  drivable: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
+                  drivable: Sequence[Sequence[Sequence[float]]] = (),
+                  keep_out: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
     """Plans the coverage path of one area.
 
     boundary: [(x, y), ...] of the outline, obstacles: a list of those for no-go zones, all in metres in
     one flat frame (map). start: (x, y) or (x, y, yaw) of the mower, the path starts on the loop (or
     lane) closest to it (default: the outline's first point). end: (x, y) to finish close to, e.g. the
     docking station. drivable: areas the mower may drive through between the parts of this one but doesn't
-    mow (navigation areas, other lawns). Raises PlanningError when there's nothing to plan, or a setting or
+    mow (navigation areas, other lawns). keep_out: where nothing goes on the way through those (inactive areas, ones
+    not to mow), nor the body. Raises PlanningError when there's nothing to plan, or a setting or
     point is out of range (every coordinate within MAX_COORDINATE of the origin).
     """
     t0 = time.perf_counter()
@@ -1450,6 +1452,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         _check_coordinates('an obstacle', o)
     for d in drivable:
         _check_coordinates('a drivable area', d)
+    for k in keep_out:
+        _check_coordinates('a keep out area', k)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
     half = 0.5 * cfg.mower_width
     # the blade's first loop, the mower's centre is `off` further in (blade_offset, the loops go round with the
@@ -1588,8 +1592,9 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     extra_space = union(clean_polygon(d) for d in drivable)
     if not extra_space.is_empty:
         # drivable areas are recorded like outlines, the mower's centre may go anywhere in them, but not
-        # closer to an obstacle than in the mowing area
-        keep_off = blocked.buffer(max(centre, half), QUAD_SEGS) if not blocked.is_empty else None
+        # closer to an obstacle (or an area to keep out of) than in the mowing area
+        away = union([blocked] + [clean_polygon(k) for k in keep_out]) if keep_out else blocked
+        keep_off = away.buffer(max(centre, half), QUAD_SEGS) if not away.is_empty else None
         if keep_off is not None:
             extra_space = extra_space.difference(keep_off)
         transit_space = polygonal(union([robot_space, extra_space]))
@@ -1601,6 +1606,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         reach = (0.5 * cfg.robot_width if cfg.edges == 'recorded' else 0.0) + BODY_TOLERANCE
         # (square corners: driving along both edges into a corner it reached that far past each)
         body_space = union([free, union(clean_polygon(d) for d in drivable)]).buffer(reach, QUAD_SEGS, join_style=2)
+        if keep_out:
+            body_space = body_space.difference(union(clean_polygon(k) for k in keep_out))
         footprint = Footprint(body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
     route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)

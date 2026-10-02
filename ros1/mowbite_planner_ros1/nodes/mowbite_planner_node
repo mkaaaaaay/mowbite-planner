@@ -308,15 +308,15 @@ class MowbitePlannerRos1:
         with self.lock:
             data = self.map
         index = match_area(data, boundary) if data else None
-        job, drivable, dock = None, [], None
+        job, drivable, keep_out, dock = None, [], [], None
         try:
             if index is not None:
                 job = area_job(data, index)
                 # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
                 obstacles += job.mow_around
-                drivable, dock = job.drivable, job.dock
+                drivable, keep_out, dock = job.drivable, job.keep_out, job.dock
             plan = plan_coverage(boundary, obstacles, self.settings(req, job), start=dock, end=dock,
-                                 drivable=drivable)
+                                 drivable=drivable, keep_out=keep_out)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res

@@ -201,7 +201,7 @@ class PlannerService:
         cfg = settings_for(self.base, self.params, job, settings, self.own_angle)
         start = _pose(p['start'], 'start') if p.get('start') is not None else start
         end = _pose(p['end'], 'end') if p.get('end') is not None else end
-        plan = plan_coverage(job.boundary, job.obstacles, cfg, start, end, job.drivable)
+        plan = plan_coverage(job.boundary, job.obstacles, cfg, start, end, job.drivable, job.keep_out)
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))

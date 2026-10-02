@@ -77,7 +77,7 @@ def service():
 
 @pytest.fixture
 def planned(monkeypatch):
-    """What plan_coverage() got: (boundary, obstacles, config, start, end, drivable) of every call."""
+    """What plan_coverage() got: (boundary, obstacles, config, start, end, drivable, keep_out) of every call."""
     calls, real = [], mqtt_service.plan_coverage
 
     def spy(*args):
@@ -165,7 +165,8 @@ def test_plan_with_report_and_trace():
 def test_plan_area_of_the_map(service, planned):
     res = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
     assert res['area_id'] == 'front'
-    _, obstacles, _, start, end, drivable = planned[0]
+    _, obstacles, _, start, end, drivable, keep_out = planned[0]
+    assert keep_out == []
     assert start == (-3.0, 1.0, math.pi) and end == (-3.0, 1.0)  # from the dock and back
     # the bed; the other lawn, not the path: the mower mows a path from start to end
     assert obstacles == [[tuple(p) for p in rect(4, 2, 5, 3)]] and drivable == [[tuple(p) for p in rect(0, 8, 6, 12)]]
