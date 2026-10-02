@@ -769,7 +769,7 @@ def scan_lanes(region, angle: float, spacing: float, min_length: float, target=N
                 longer.extend(_intersect([(lo - pad, hi + pad)], free[j]) if pad > 0.0 else [(lo, hi)])
             intervals = _union(longer, [])
         y = base + j * step
-        out.append([Lane(j, lo, hi, y) for lo, hi in intervals if hi - lo >= min_length])
+        out.append([Lane(j, lo, hi, y) for lo, hi in intervals if hi - lo >= min_length - 1e-9])
     # the outer rows only if something was stretched into them
     if not out[0]:
         out = out[1:]
@@ -1430,7 +1430,7 @@ class _Route:
                             self._count('lanes_body')
                 if turn is None:
                     turn = turn_to(a, self.cfg.allowed_turns)
-                if turn is not None and turn.name == 'pivot' and self.cfg.min_turn_radius > 0:
+                if (turn is None or turn.name == 'pivot') and self.cfg.min_turn_radius > 0:
                     earlier = self.round_earlier(a, yaw, rest)
                     if earlier is not None:
                         turn, a = earlier
@@ -1455,10 +1455,10 @@ class _Route:
         return None
 
     def round_earlier(self, a: XY, yaw: float, rest: float) -> Optional[Tuple[Maneuver, XY]]:
-        """In place of turning on the spot from the lane just mowed into the next (from a, facing yaw, rest m to
-        spare): a rounded turn with the one ending and the other starting a little earlier, by ROUND_STEP at a time
-        up to turn_radius, where the turn or what's mowed already (the loops next to them) mows what they leave (but
-        EARLIER_LEFT). The lane just mowed is shortened then. None where that doesn't help."""
+        """In place of turning on the spot (or a drive) from the lane just mowed into the next (from a, facing yaw,
+        rest m to spare): a rounded turn with the one ending and the other starting a little earlier, by ROUND_STEP at a
+        time up to turn_radius, where the turn or what's mowed already (the loops next to them) mows what they leave
+        (but EARLIER_LEFT). The lane just mowed is shortened then. None where that doesn't help."""
         last = self.segments[-1] if self.segments else None
         if last is None or last.kind != LANE or last.maneuver or len(last.poses) < 2:
             return None

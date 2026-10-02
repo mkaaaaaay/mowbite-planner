@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -195,6 +196,9 @@ def planner():
         os.remove(os.path.join(os.environ['ROS_HOME'], 'mowbite_planner_settings.json'))
     except FileNotFoundError:
         pass
+    # no plans kept from other tests, none planned ahead in the background (test_plan_ahead does that itself)
+    shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
+    node_module.PLAN_AHEAD_DELAY = 1e6
     return node_module.MowbitePlannerRos1()
 
 
@@ -741,3 +745,30 @@ def test_rpc_internal_error_and_others(planner, monkeypatch):
     assert rpc('mowing.plan', {}) == (None, None)
     assert rpc('planner.settings.set', {'turn_radius': 0.5}, rid='') == (None, None)
     assert planner.base.turn_radius == 0.5
+
+
+def test_plan_ahead(planner, monkeypatch):
+    """After a new map (or settings) every active mowing area is planned ahead: planner.plan finds it, so does the next
+    start of the node (kept on disk, for this planner code only), whichever way the same inputs come."""
+    calls, real = [], node_module.plan_coverage
+    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
+    data = the_map(areas=[area('off', [(30, 0), (40, 0), (40, 8), (30, 8)], type='mow', active=False)])
+    send_map(data)
+    planner.plan_ahead()
+    assert calls == [1] and any('1 areas planned ahead' in line for _, line in rospy.log)
+    result, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and result['paths'] and calls == [1] and result['kept'] is True
+    again = node_module.MowbitePlannerRos1()
+    send_map(data)
+    assert again.rpc_plan({'area_id': 'a'})['paths'] and calls == [1]
+    # the same inputs as keywords or in another order of the obstacles: the same plan
+    cfg = planner.current.base
+    one = planner.plan_coverage(GARDEN, [BED, [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)]], cfg, None, None, [], [])
+    two = planner.plan_coverage(GARDEN, [[(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)], BED], cfg, start=None, end=None,
+                                drivable=(), keep_out=())
+    assert one is two and calls == [1, 1]
+    # another planner code: planned again
+    monkeypatch.setattr(again, 'code', 'other')
+    again.plans.clear()
+    again.rpc_plan({'area_id': 'a'})
+    assert calls == [1, 1, 1]

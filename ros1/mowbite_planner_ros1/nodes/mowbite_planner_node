@@ -23,7 +23,8 @@ digest of it to resume an interrupted mow).
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
 allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
-until the next start only), max_path_poses (at least 4), frame_id, service, map_topic, use_map, rpc. The request
+until the next start only), plans_dir (where the plans are kept, default $ROS_HOME/mowbite_plans, empty: in memory
+only), max_path_poses (at least 4), frame_id, service, map_topic, use_map, rpc. The request
 always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
 lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an area's own
 outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless settings has
@@ -42,14 +43,22 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         like planner.settings
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
-                        Not in it: the increment mower_logic adds to the angle after every finished job
+                        Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
+                        plan was there already (planned ahead or asked for before)
+
+PLAN_AHEAD_DELAY s after the map or the settings last changed every active mowing area is planned ahead like
+planner.plan plans it, so the app's preview and the next mow find their plan at once.
 """
 
 import collections
+import glob
+import hashlib
 import json
 import math
 import os
+import pickle
 import threading
+import time
 
 import rospy
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
@@ -60,6 +69,7 @@ from std_msgs.msg import Empty, Header, String
 from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
 from xbot_mqtt.srv import RegisterMethodsSrv
 
+import mowbite_planner
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
 from mowbite_planner import planner as limits
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
@@ -91,8 +101,13 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET)}
-# plans kept: the same request again (a preview, then the mow; mowing.plan, then planner.plan) gets the plan at once
-CACHED_PLANS = 8
+# plans kept, in memory and on disk (in plans_dir): the same request again (a preview, then the mow; mowing.plan, then
+# planner.plan) gets the plan at once
+CACHED_PLANS = 16
+DISK_PLANS = 64
+# s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
+# mow and the app's preview find it
+PLAN_AHEAD_DELAY = 5.0
 # OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
 # backing up leg would hold the mower until it times out): allow_reverse counts only then
 BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
@@ -170,6 +185,12 @@ class MowbitePlannerRos1:
         self.set_lock = threading.Lock()
         self.plans = collections.OrderedDict()
         self.plans_lock = threading.Lock()
+        self.plans_dir = os.path.expanduser(rospy.get_param('~plans_dir', os.path.join(
+            os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
+        self.code = code_version()
+        self.ahead = None
+        self.ahead_lock = threading.Lock()
+        self.local = threading.local()  # whether the last plan of this thread was kept from before
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
@@ -281,6 +302,7 @@ class MowbitePlannerRos1:
             self.write_stored(current.stored)
             self.current = current
         rospy.loginfo('MowBite Planner: settings %s', json.dumps(current.stored, sort_keys=True))
+        self.plan_ahead_later()
         return self.rpc_settings()
 
     def rpc_plan(self, params):
@@ -293,7 +315,10 @@ class MowbitePlannerRos1:
         service.params = rospy.get_param('/mower_logic', {})
         service.planner = self.plan_coverage
         service.own = current.own
-        return service.plan(params)
+        self.local.kept = False
+        result = service.plan(params)
+        result['kept'] = self.local.kept  # planned before (ahead, or the same asked for already)
+        return result
 
     def on_map(self, msg):
         try:
@@ -302,7 +327,45 @@ class MowbitePlannerRos1:
             rospy.logwarn('MowBite Planner: map not readable: %s', e)
             return
         with self.lock:
-            self.map = data
+            changed, self.map = data != self.map, data
+        if changed:
+            self.plan_ahead_later()
+
+    def plan_ahead_later(self):
+        """Every active mowing area planned ahead PLAN_AHEAD_DELAY s from now (from then on, after another change)."""
+        with self.ahead_lock:
+            if self.ahead is not None:
+                self.ahead.cancel()
+            self.ahead = threading.Timer(PLAN_AHEAD_DELAY, self.plan_ahead)
+            self.ahead.daemon = True
+            self.ahead.start()
+
+    def plan_ahead(self):
+        """Every active mowing area of the map planned like planner.plan would (the app's preview), kept for it."""
+        with self.lock:
+            data = self.map
+        areas = []
+        for area in (data or {}).get('areas', []):
+            props = area.get('properties') or {}
+            if props.get('type') == 'mow' and props.get('active') is not False and props.get('mowable') is not False \
+                    and area.get('id'):
+                areas.append(area)
+        t0, done = time.perf_counter(), 0
+        for area in areas:
+            if self.ahead_plan(area['id']):
+                done += 1
+        if areas:
+            rospy.loginfo('MowBite Planner: %d areas planned ahead in %.1f s', done, time.perf_counter() - t0)
+
+    def ahead_plan(self, area_id):
+        try:
+            self.rpc_plan({'area_id': area_id})
+            return True
+        except PlanningError as e:
+            rospy.logwarn('MowBite Planner: area %s not planned ahead: %s', area_id, e)
+        except Exception as e:  # noqa: BLE001 - planning ahead must not take the planner down
+            rospy.logerr('MowBite Planner: planning area %s ahead failed: %s: %s', area_id, type(e).__name__, e)
+        return False
 
     def settings(self, req, job):
         """The node's settings, then what mower_logic asks for, then the area's own (planner property and
@@ -338,26 +401,65 @@ class MowbitePlannerRos1:
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
         return cfg
 
-    def plan_coverage(self, *args, **kwargs):
-        """plan_coverage(), the last CACHED_PLANS kept: the plan only depends on what it's given, the same again
-        (to the last bit) is the same plan. allow_reverse only where the FTC controller backs up (BACK_UP_PARAM)."""
-        cfg = args[2]
+    def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=()):
+        """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
+        given and the planner's code, the same again (to the last bit) is the same plan. allow_reverse only where the
+        FTC controller backs up (BACK_UP_PARAM)."""
+        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out)[0]
+
+    def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=()):
+        """(plan, whether it was kept from before), see plan_coverage."""
         if cfg.allow_reverse and not rospy.get_param(BACK_UP_PARAM, False):
             rospy.logwarn_throttle(600, 'MowBite Planner: allow_reverse left out, OpenMower\'s FTC controller doesn\'t '
                                    'back up (%s is not true)' % BACK_UP_PARAM)
-            args = args[:2] + (cfg.with_overrides({'allow_reverse': False}),) + args[3:]
-        key = repr((args, sorted(kwargs.items())))
+            cfg = cfg.with_overrides({'allow_reverse': False})
+        # the obstacles in one order, every way there (the request, the map) gives the same
+        obstacles = sorted(canon(obstacles))
+        args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out))
+        key = hashlib.sha1((self.code + repr(args)).encode()).hexdigest()
         with self.plans_lock:
             plan = self.plans.get(key)
             if plan is not None:
                 self.plans.move_to_end(key)
-                return plan
-        plan = plan_coverage(*args, **kwargs)
+                self.local.kept = True
+                return plan, True
+        plan = self.read_plan(key)
+        kept = self.local.kept = plan is not None
+        if plan is None:
+            plan = plan_coverage(*args)
+            self.write_plan(key, plan)
         with self.plans_lock:
             self.plans[key] = plan
             while len(self.plans) > CACHED_PLANS:
                 self.plans.popitem(last=False)
-        return plan
+        return plan, kept
+
+    def read_plan(self, key):
+        if not self.plans_dir:
+            return None
+        try:
+            with open(os.path.join(self.plans_dir, key + '.pkl'), 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            return None
+        except Exception as e:  # noqa: BLE001 - a broken or old file is planned again
+            rospy.logwarn('MowBite Planner: kept plan %s not readable: %s', key, e)
+            return None
+
+    def write_plan(self, key, plan):
+        if not self.plans_dir:
+            return
+        try:
+            os.makedirs(self.plans_dir, exist_ok=True)
+            path = os.path.join(self.plans_dir, key + '.pkl')
+            with open(path + '.tmp', 'wb') as f:
+                pickle.dump(plan, f, protocol=4)
+            os.replace(path + '.tmp', path)
+            files = sorted(glob.glob(os.path.join(self.plans_dir, '*.pkl')), key=os.path.getmtime)
+            for old in files[:-DISK_PLANS]:
+                os.remove(old)
+        except (OSError, pickle.PicklingError) as e:
+            rospy.logwarn('MowBite Planner: plan not kept in %s: %s', self.plans_dir, e)
 
     def handle(self, req):
         res = PlanPathResponse()
@@ -376,8 +478,8 @@ class MowbitePlannerRos1:
             cfg = self.settings(req, job)
             if job is not None and cfg.nested_areas:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
-            plan = self.plan_coverage(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
-                                      keep_out=keep_out)
+            plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
+                                        keep_out=keep_out)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res
@@ -389,9 +491,10 @@ class MowbitePlannerRos1:
             res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
                                          path=self.to_path(plan.poses[first:last + 1], stamp)))
         st = plan.stats
-        rospy.loginfo('MowBite Planner: %s%d paths, %d poses, %.0f m, lanes at %.1f deg, %.0f ms%s',
+        rospy.loginfo('MowBite Planner: %s%d paths, %d poses, %.0f m, lanes at %.1f deg, %s%s',
                       'area %s, ' % job.area_id if job else '', len(res.paths), len(plan.poses),
-                      st['path_length'], math.degrees(plan.angle), 1000 * st['planning_time'],
+                      st['path_length'], math.degrees(plan.angle),
+                      'kept from before' if kept else '%.0f ms' % (1000 * st['planning_time']),
                       '. ' + '; '.join(plan.warnings) if plan.warnings else '')
         return res
 
@@ -403,6 +506,26 @@ class MowbitePlannerRos1:
             path.poses.append(PoseStamped(header=header, pose=Pose(position=Point(x=p.x, y=p.y, z=0.0),
                                                                    orientation=Quaternion(x=x, y=y, z=z, w=w))))
         return path
+
+
+def canon(value):
+    """Points, lists of them and so on as tuples of floats: the same whichever way they came."""
+    if isinstance(value, (list, tuple)):
+        return tuple(canon(v) for v in value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return value
+
+
+def code_version():
+    """A digest of the planner's code: a plan kept on disk counts for that code only."""
+    root = os.path.dirname(mowbite_planner.__file__)
+    digest = hashlib.sha1()
+    for name in sorted(os.listdir(root)):
+        if name.endswith('.py'):
+            with open(os.path.join(root, name), 'rb') as f:
+                digest.update(name.encode() + b'\0' + f.read())
+    return digest.hexdigest()
 
 
 def main():

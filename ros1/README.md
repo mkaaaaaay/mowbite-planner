@@ -240,6 +240,9 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
   (both may be negative).
+- Plans are kept, the last 64 in `$ROS_HOME/mowbite_plans` (`/data/ros` in the container, parameter `plans_dir`), for
+  this planner code only. 5 s after the map or the settings last changed every active mowing area is planned ahead
+  like `planner.plan` plans it: the app's preview and the next mow find it at once (`kept: true` in `planner.plan`).
 - `lane_spacing_mode: auto` (on and off again with `fixed`, also per area in its `planner` property) lets the
   planner pick the lane spacing, `perimeter_passes: -1` the loops (`planner.settings` reports `auto_value: -1`);
   what it picked is in `stats.chosen` of every plan.

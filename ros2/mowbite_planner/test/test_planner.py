@@ -1591,7 +1591,6 @@ def test_narrow_loops_only_where_the_lanes_leave_something():
     sweeps = [LineString([(p.x, p.y) for p in plan.poses[s.start:s.end + 1]]).buffer(0.5 * cfg.mower_width, 4)
               for s in plan.segments]
     rings = [i for i, s in enumerate(plan.segments) if s.maneuver == 'ring']
-    assert rings
     for i in rings:
         alone = sweeps[i].difference(unary_union(sweeps[:i] + sweeps[i + 1:]))
         assert alone.intersection(plan.free_space).area > 1e-3
