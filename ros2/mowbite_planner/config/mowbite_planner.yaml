@@ -33,6 +33,9 @@
     # allow_reverse: false and lane_order: skip (every turn a forward U-turn of turn_radius).
     # These and waypoint_spacing also apply to ~/plan_path, the rest comes with its request
     turn_radius: 0.25
+    # no arc of a turn, a drive, a loop out or a K-turn tighter than this [m] (about half the track of the drive
+    # wheels: tighter, the inner wheel stands or turns backwards and scuffs the lawn), turning on the spot instead
+    min_turn_radius: 0.0
     allow_reverse: true
     # the turns allowed, preferred first
     turn_types: [u_turn, bulb, k_turn, detour, pivot]

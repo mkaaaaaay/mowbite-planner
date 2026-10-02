@@ -1,5 +1,6 @@
 """Tests of the planner without ROS (python3 -m pytest test/ in the package folder, shapely is enough)."""
 
+import dataclasses
 import math
 import os
 import random
@@ -864,6 +865,39 @@ def test_smooth_spins():
     check_invariants(backing, cfg, [TREE, BED])
     assert spins(backing) == 0 and any(s.reverse and s.maneuver == 'k_point' for s in backing.segments)
     assert check_plan(backing)['left_m2'] == pytest.approx(left, abs=0.02)
+
+
+def test_min_turn_radius():
+    """No turn, drive, loop out or K-turn tighter than min_turn_radius: turning on the spot instead."""
+    def arcs(plan):
+        # radii of the runs of turning poses that turn 45 degrees at least (not counting turns on the spot)
+        out, i, P = [], 1, plan.poses
+        while i < len(P):
+            if 1e-3 < angle_diff(P[i - 1].yaw, P[i].yaw) <= math.radians(30):
+                j, turn, length = i, 0.0, 0.0
+                while j < len(P) and 1e-3 < angle_diff(P[j - 1].yaw, P[j].yaw) <= math.radians(30):
+                    turn += abs(normalize_angle(P[j].yaw - P[j - 1].yaw))
+                    length += math.hypot(P[j].x - P[j - 1].x, P[j].y - P[j - 1].y)
+                    j += 1
+                if turn > math.radians(45):
+                    out.append(length / turn)
+                i = j
+            else:
+                i += 1
+        return out
+
+    kw = dict(FORWARD, allow_reverse=True)
+    loose = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**kw), start=(1, 1, 0.0))
+    cfg = PlannerConfig(**dict(kw, min_turn_radius=0.2))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg, [TREE, BED])
+    # the loops' corners keep their rounding, so count only what the turns and loops out make
+    turns = [s for s in plan.segments if s.kind in (TURN, TRANSIT) or s.maneuver == 'k_point']
+    assert turns and min(arcs(loose)) < 0.15
+    assert all(r > 0.2 - 0.02 for s in turns
+               for r in arcs(dataclasses.replace(plan, poses=plan.poses[s.start:s.end + 1])))
+    with pytest.raises(PlanningError, match='min_turn_radius'):
+        PlannerConfig(min_turn_radius=-0.1).validate()
 
 
 def test_body_corner_rounding():

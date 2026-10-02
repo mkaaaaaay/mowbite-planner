@@ -193,6 +193,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `angle_min_deg`, `angle_max_deg` | `.nan` | the lane direction stays in this range, both or neither |
 | `angle_step_deg` | 5.0 | between the directions `optimal` tries, 0.5..90 |
 | `turn_radius` | 0.25 | radius of the turns [m], 0..5 |
+| `min_turn_radius` | 0.0 | no arc of a turn, a drive, a loop out (`smooth_spins`) or a K-turn tighter than this [m], turning on the spot instead: where the inner wheel stands or turns backwards (half the track of the drive wheels, OpenMower's `wheel_distance_m` / 2) it scuffs the lawn more than turning once. 0: any. The corners of the loops keep their rounding |
 | `allow_reverse` | true | backing up: K-turns between lanes, and a K-turn in place where it would turn on the spot and no loop out fits (`smooth_spins`) |
 | `turn_types` | all | `[u_turn, bulb, k_turn, detour, pivot]`, the ones allowed, preferred first |
 | `lane_order` | `snake` | `snake` or `skip` |

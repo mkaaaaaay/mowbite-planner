@@ -244,17 +244,17 @@ def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
     return Maneuver(m.name, m.radius, pieces)
 
 
-def turn_radii(radius: float, d: float) -> List[float]:
-    """The radii to try, largest first: the wanted one, smaller ones, and the half circle d / 2."""
+def turn_radii(radius: float, d: float, least: float = 0.0) -> List[float]:
+    """The radii to try, largest first: the wanted one, smaller ones, and the half circle d / 2, none below least."""
     out: List[float] = []
     for r in (radius, 0.75 * radius, 0.5 * radius, 0.5 * d):
-        if 1e-3 < r <= radius + 1e-9 and all(abs(r - o) > 1e-3 for o in out):
+        if max(1e-3, least - 1e-9) < r <= radius + 1e-9 and all(abs(r - o) > 1e-3 for o in out):
             out.append(r)
     return sorted(out, reverse=True)
 
 
 def detour_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float, fits: Fits,
-                route: Route, body: Body = None) -> Optional[Maneuver]:
+                route: Route, body: Body = None, least: float = 0.0) -> Optional[Maneuver]:
     """Quarter arc out of the lane towards the next one, route() between the arcs, quarter arc into the next
     lane. Only for lanes at least two radii apart, closer ones would need the middle to go backwards."""
     h = exit_pose.yaw
@@ -262,7 +262,7 @@ def detour_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float, fits: 
     lateral = -vx * math.sin(h) + vy * math.cos(h)
     side = 1.0 if lateral >= 0.0 else -1.0
     for r in (radius, 0.75 * radius, 0.5 * radius):
-        if r <= 1e-3 or abs(lateral) < 2.0 * r:
+        if r <= max(1e-3, least - 1e-9) or abs(lateral) < 2.0 * r:
             continue
         out_arc = sample_arc(exit_pose.x, exit_pose.y, h, r, side * math.pi / 2, step)
         # the arc into the next lane, worked out backwards from its start: facing the other way and turning
@@ -272,7 +272,7 @@ def detour_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float, fits: 
         if not fits([(p.x, p.y) for p in out_arc]) or not fits([(p.x, p.y) for p in in_arc]):
             continue
         a, b = out_arc[-1], in_arc[0]
-        middle = connect((a.x, a.y), a.yaw, (b.x, b.y), b.yaw, r, step, fits, route, body)
+        middle = connect((a.x, a.y), a.yaw, (b.x, b.y), b.yaw, r, step, fits, route, body, least)
         if middle is None:
             continue
         poses = join(out_arc, middle, in_arc)
@@ -299,7 +299,7 @@ def arc_towards(a: XY, heading: float, target: XY, radius: float, step: float) -
 
 
 def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float], radius: float, step: float,
-            fits: Fits, route: Route, body: Body = None) -> Optional[List[Pose2D]]:
+            fits: Fits, route: Route, body: Body = None, least: float = 0.0) -> Optional[List[Pose2D]]:
     """From a (facing heading_a) to b (arriving facing heading_b) the way route() finds. Where it fits it
     leaves on an arc that turns it towards the first bend and arrives on one from the last bend (a Dubins
     like start and end), the bends between are rounded: no turning on the spot at a and b. None if route()
@@ -313,7 +313,7 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
         # the widest arc that fits, from where it ends the way to `toward` has to be free too. back: an arc
         # worked out backwards from the end, the mower faces the other way on it
         for r in (radius, 0.75 * radius, 0.5 * radius):
-            poses = arc_towards(start, heading, toward, r, step) if r > 1e-3 else None
+            poses = arc_towards(start, heading, toward, r, step) if r > max(1e-3, least - 1e-9) else None
             if poses is not None and len(poses) > 2 and fits([(p.x, p.y) for p in poses]) and \
                     fits([(poses[-1].x, poses[-1].y), toward]) and \
                     (body is None or body([Pose2D(p.x, p.y, p.yaw + math.pi) for p in poses] if back else poses)):
@@ -358,12 +358,12 @@ def max_heading_jump(poses: Sequence[Pose2D]) -> float:
 def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, step: float,
               fits: Fits, route: Optional[Route] = None,
               types: Sequence[str] = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'),
-              body: Body = None) -> Optional[Maneuver]:
+              body: Body = None, least: float = 0.0) -> Optional[Maneuver]:
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
     detours. types: the kinds allowed, preferred first; larger radii always come before smaller ones,
-    detours and pivots after all radii. body: the turn's poses have to pass it too. None if nothing allowed
-    fits."""
+    detours and pivots after all radii. body: the turn's poses have to pass it too. least: no arc tighter than that.
+    None if nothing allowed fits."""
 
     def ok(m: Maneuver) -> bool:
         return fits(m.points()) and (body is None or body([exit_pose] + [p for pc in m.pieces for p in pc.poses]))
@@ -378,7 +378,7 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
         return None
     types = [t for t in types if t != 'k_turn' or allow_reverse]
     shapes = {'u_turn': u_turn, 'bulb': bulb_turn, 'k_turn': k_turn}
-    for r in turn_radii(radius, d):
+    for r in turn_radii(radius, d, least):
         # a U-turn where the lanes are two radii apart, a bulb or a K-turn where they're closer
         for name in types:
             if name not in shapes or (name == 'u_turn') != (d >= 2.0 * r - 1e-9):
@@ -391,7 +391,7 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
                 return m
     for name in types:
         if name == 'detour' and route is not None:
-            m = detour_turn(exit_pose, entry, radius, step, fits, route, body)
+            m = detour_turn(exit_pose, entry, radius, step, fits, route, body, least)
             if m is not None:
                 return m
         elif name == 'pivot':

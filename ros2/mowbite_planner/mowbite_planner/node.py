@@ -114,6 +114,9 @@ PARAMETERS = {
     'turn_radius': (0.25, 'radius of the turns between lanes [m]. Tighter ones (down to half the lane '
                     'spacing, then turning on the spot) only where the headland is too small',
                     lambda v: v >= 0.0, 'must be >= 0'),
+    'min_turn_radius': (0.0, 'no arc of a turn, a drive, a loop out or a K-turn tighter than this [m]: where the inner '
+                        'wheel stands or turns backwards (about half the track of the drive wheels) it scuffs the lawn '
+                        'more than turning on the spot once. 0: any', lambda v: v >= 0.0, 'must be >= 0'),
     'allow_reverse': (True, 'K-turns (forward arc, a short way back, forward arc) where a forward turn of '
                       'turn_radius does not fit. Off for controllers that only drive forwards (OpenMower FTC)',
                       None, ''),
@@ -152,6 +155,7 @@ RANGES = {
     'lane_overlap_passes': (0, MAX_PASSES),
     'angle_step_deg': (0.5, 90.0),
     'turn_radius': (0.0, 5.0),
+    'min_turn_radius': (0.0, 5.0),
     'robot_width': (-1.0, 5.0),
     'robot_front': (-1.0, 5.0),
     'body_tolerance': (0.0, 1.0),

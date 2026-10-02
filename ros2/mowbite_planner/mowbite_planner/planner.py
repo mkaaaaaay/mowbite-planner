@@ -133,6 +133,10 @@ class PlannerConfig:
     # m, radius of the turns between lanes. Tighter ones (down to half the lane spacing, then turning on
     # the spot) only where the headland is too small
     turn_radius: float = 0.25
+    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (where the inner wheel stands or turns
+    # backwards, about half the track of the drive wheels, it scuffs the lawn more than turning on the spot once):
+    # turning on the spot instead. 0: any (the corners of loops are rounded as before)
+    min_turn_radius: float = 0.0
     allow_reverse: bool = True  # K-turns, which back up a little
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
     # radii come first, the order counts between turns of the same radius
@@ -293,6 +297,7 @@ class PlannerConfig:
         finite('mower_width', 0.0, lo_open=True)
         finite('overlap', 0.0, 1.0, hi_open=True)
         finite('turn_radius', 0.0, MAX_TURN_RADIUS)
+        finite('min_turn_radius', 0.0, MAX_TURN_RADIUS)
         finite('perimeter_corner_radius', 0.0)
         finite('waypoint_spacing', 0.0)
         finite('transit_clearance', 0.0)
@@ -943,7 +948,7 @@ class _Route:
 
         def drive(b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
             return connect(self.pos, self.heading, b, h, r, self.step, self.transit.is_free, self.transit.careful_path,
-                           self.body)
+                           self.body, self.cfg.min_turn_radius)
 
         best = drive(target, heading)
         if best is None or heading is None or r <= 1e-3:
@@ -959,7 +964,8 @@ class _Route:
                 if not self.transit.is_free([x]):
                     continue
                 turn = plan_turn(Pose2D(x[0], x[1], back), target, r, False, self.step, self.transit.is_free, None,
-                                 tuple(t for t in self.cfg.allowed_turns if t in ('u_turn', 'bulb')), self.body)
+                                 tuple(t for t in self.cfg.allowed_turns if t in ('u_turn', 'bulb')), self.body,
+                                 self.cfg.min_turn_radius)
                 way = drive(x, back) if turn is not None else None
                 if way is None:
                     continue
@@ -1296,7 +1302,7 @@ class _Route:
             return False
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
-                         self.cfg.allowed_turns, self.body)
+                         self.cfg.allowed_turns, self.body, self.cfg.min_turn_radius)
         if turn is None:
             return False
         for piece in turn.pieces:
@@ -1384,7 +1390,8 @@ class _Route:
 
                 def turn_to(entry: XY, types) -> Optional[Maneuver]:
                     return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
-                                     self.area.is_free, self.transit.path, types, self.body)
+                                     self.area.is_free, self.transit.path, types, self.body,
+                                     self.cfg.min_turn_radius)
 
                 # the turn goes level with the lane end further out, where the body may not fit (body_ends only
                 # made room for a turn level with each end): this lane starts level with the last one's end then,
@@ -1561,7 +1568,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
         at = Pose2D(p.x, p.y, before.yaw)
         for share in SMOOTH_RADII:
             r = share * cfg.turn_radius
-            loop = omega(at, turn, r, route.step) if r >= 1e-3 else None
+            loop = omega(at, turn, r, route.step) if r >= max(1e-3, cfg.min_turn_radius - 1e-9) else None
             if loop and fits([(q.x, q.y) for q in loop]) and (route.body is None or route.body([before] + loop)):
                 inserts[(i, j)] = [(loop, False)]
                 route._count('spins_smoothed')
@@ -1575,7 +1582,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
         for share in SMOOTH_RADII + (0.2,):
             for back_first in (False, True):
                 r = share * cfg.turn_radius
-                if r < 1e-3:
+                if r < max(1e-3, cfg.min_turn_radius - 1e-9):
                     continue
                 m = k_point(at, turn, r, route.step, back_first)
                 poses = [q for piece in m.pieces for q in piece.poses]

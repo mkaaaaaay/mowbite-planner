@@ -85,6 +85,7 @@ SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
+          'min_turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'perimeter_passes': (-1, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
