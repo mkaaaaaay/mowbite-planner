@@ -118,10 +118,10 @@ class PlannerConfig:
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
-    # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds: 2 turn radii,
-    # with lane_order skip 4, for lanes far enough apart for U-turns): 'lanes' anyway, 'loops': the loops go on in
-    # there instead, until it's mowed, every part from the outside in before the next (not loop by loop round the
-    # whole area)
+    # where the lanes would lie in a part narrower than a U-turn (2 * turn_radius: a path, a strip between beds, and
+    # what's left between such parts too small for more than a few lanes): 'lanes' anyway, 'loops': the loops go on
+    # in there instead until it's mowed, the pieces they come apart into driven on the way round (in from the loop
+    # next to them and back out), so no trips along a path from piece to piece
     narrow_parts: str = 'lanes'
     route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
@@ -1582,23 +1582,26 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     # loops are driven part by part like concentric's
     ringed = concentric
     if cfg.narrow_parts == 'loops' and not concentric and not cfg.skip_lanes and cfg.turn_radius > 0 and \
-            len(levels) == count:
-        r = cfg.turn_radius * (2.0 if cfg.lane_order == 'skip' else 1.0)
-        opened = Polygon() if lane_region.is_empty else lane_region.buffer(-r, QUAD_SEGS).buffer(r, QUAD_SEGS)
+            len(levels) == count and not lane_region.is_empty:
+        r = cfg.turn_radius
+        opened = lane_region.buffer(-r, QUAD_SEGS).buffer(r, QUAD_SEGS)
         # what that takes away: narrow parts, and the tips of corners (smaller than r * r), which keep their lanes
         cut = [p for p in polygons(lane_region.difference(opened)) if p.area >= r * r]
-        wide = polygonal(subtract(lane_region, cut)) if cut else lane_region
-        keep_off = None if wide.is_empty else wide.buffer(half, QUAD_SEGS)  # the lanes mow that far round it
-        while len(levels) < MAX_ROWS:
-            level = inset(free, first + len(levels) * spacing)
-            if keep_off is not None and not level.is_empty:
-                level = polygonal(union(p for p in polygons(level.difference(keep_off)) if p.area >= half * half))
-            if level.is_empty:
-                break
-            levels.append(level)
-        middles = [middle(k, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
-                   for k, inner in enumerate(levels[1:] + [Polygon()])]
-        lane_region, narrow, ringed = wide, Polygon(), True
+        if cut:
+            wide = polygonal(subtract(lane_region, cut))
+            # bits left between narrow parts too small for more than a few lanes go to the loops as well
+            wide = polygonal(union(p for p in polygons(wide) if p.area >= (4.0 * r) ** 2))
+            keep_off = None if wide.is_empty else wide.buffer(half, QUAD_SEGS)  # the lanes mow that far round it
+            while len(levels) < MAX_ROWS:
+                level = inset(free, first + len(levels) * spacing)
+                if keep_off is not None and not level.is_empty:
+                    level = polygonal(union(p for p in polygons(level.difference(keep_off)) if p.area >= half * half))
+                if level.is_empty:
+                    break
+                levels.append(level)
+            middles = [middle(k, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
+                       for k, inner in enumerate(levels[1:] + [Polygon()])]
+            lane_region, narrow, ringed = wide, Polygon(), True
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 

@@ -202,7 +202,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `transit_clearance` | 0.05 | how far transits stay from the outer loop and obstacle loops [m] |
 | `simplify_tolerance` | 0.01 | the boundary and obstacles are simplified this much first [m] |
 | `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
-| `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than their turns need (2 turn radii, 4 with `lane_order` skip: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round (good for paths, an area's `planner` property can set it) |
+| `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan |
 | `robot_width` | -1.0 | width of the mower's body [m], negative = not set |
 | `robot_front` | -1.0 | how far the body reaches ahead of the mower's centre (base_link) [m], negative = not set |
 | `robot_rear` | -1.0 | how far it reaches behind the centre [m], negative = not set. With all three the turns, lane ends, loops and drives keep the body in (see `edges`): lane ends move back until the turn's arcs fit, loop corners get larger arcs; `report` lists the poses where it still sticks out (`body_out`) |
