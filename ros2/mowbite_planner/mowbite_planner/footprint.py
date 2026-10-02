@@ -20,6 +20,9 @@ except ImportError:  # shapely 1.7 (ROS Noetic)
 SPIN = math.radians(30.0)
 # rad, a turn on the spot is checked with the body this far apart (its corners pass < 2 mm outside of them)
 TURN_STEP = math.radians(10.0)
+# outside(): at most about this many bodies along the poses, turning on the spot one every this many rad
+OUTSIDE_BODIES = 12
+OUTSIDE_TURN = math.radians(20.0)
 # m, squares of the map this big are looked up once whether all of them lies where the body fits whatever way it faces
 CELL = 0.1
 
@@ -87,17 +90,22 @@ class Footprint:
         return list(self._bad(poses))
 
     def outside(self, poses: Sequence) -> float:
-        """m2, how much of the body sticks out at the poses all together, turning on the spot where the heading jumps
-        by more than SPIN."""
+        """m2, about how much of the body sticks out at the poses all together, turning on the spot where the heading
+        jumps by more than SPIN (OUTSIDE_BODIES bodies at most and every OUTSIDE_TURN turning: to compare ways)."""
         bodies = []
+        every = max(1, int(math.ceil(len(poses) / OUTSIDE_BODIES)))
         for i, p in enumerate(poses):
             if self.spins(poses, i):
                 turn = normalize_angle(p.yaw - poses[i - 1].yaw)
-                n = max(1, int(math.ceil(abs(turn) / TURN_STEP)))
+                n = max(1, int(math.ceil(abs(turn) / OUTSIDE_TURN)))
                 bodies += [self.body(p.x, p.y, poses[i - 1].yaw + turn * k / n) for k in range(n + 1)]
-            elif not self._safe_at(p.x, p.y):
+            elif (i % every == 0 or i == len(poses) - 1) and not self._safe_at(p.x, p.y):
                 bodies.append(self.body(p.x, p.y, p.yaw))
-        return unary_union(bodies).difference(self.space).area if bodies else 0.0
+        if not bodies:
+            return 0.0
+        swept = unary_union(bodies)
+        # (only the space around them: the whole of it can be a big polygon)
+        return swept.difference(self.space.intersection(box(*swept.bounds))).area
 
     def poses_fit(self, poses: Sequence) -> bool:
         # all of them where the body fits whatever way it faces: one check for the lot

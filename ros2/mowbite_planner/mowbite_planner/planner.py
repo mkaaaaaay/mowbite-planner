@@ -1570,7 +1570,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
             return
         # where the body sticks out turning on the spot, one that sticks out no more is better still
         fp = route.footprint
-        spin = fp.outside([before, at, p]) if fp is not None else 0.0
+        spin: Optional[float] = None
         best = None
         for share in SMOOTH_RADII + (0.2,):
             for back_first in (False, True):
@@ -1581,12 +1581,16 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
                 poses = [q for piece in m.pieces for q in piece.poses]
                 if not fits([(q.x, q.y) for q in poses]):
                     continue
-                out = 0.0 if fp is None or fp.poses_fit([before] + poses) else fp.outside([before] + poses)
-                if out <= 1e-9 or out <= spin + 1e-9 and (best is None or out < best[0] - 1e-9):
-                    best = (out, m)
-                if out <= 1e-9:
+                if fp is None or fp.poses_fit([before] + poses):
+                    out = 0.0
+                else:
+                    if spin is None:
+                        spin = fp.outside([before, at, p])
+                    out = fp.outside([before] + poses) if spin > 0 else math.inf
+                if out <= 1e-9 or out <= spin + 1e-9:
+                    best = (out, m)  # the widest that fits (or sticks out no more), back up as little as that
                     break
-            if best is not None and best[0] <= 1e-9:
+            if best is not None:
                 break
         if best is not None:
             inserts[(i, j)] = [(piece.poses, piece.reverse) for piece in best[1].pieces]
@@ -1739,18 +1743,35 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         except PlanningError as e:  # this spacing doesn't fit (too many poses), a narrower one may not either
             error = error or e
             continue
-        pieces = [p.area for p in polygons(plan.free_space.difference(swept_area(plan, cfg.mower_width)))
-                  if p.area >= LEFT_TUFT]
+        left = [p for p in polygons(plan.free_space.difference(swept_area(plan, cfg.mower_width, 0.01)))
+                if p.area >= LEFT_TUFT]
+        pieces = [p.area for p in left]
         if best is not None and sum(pieces) > best_left - LEFT_GAIN:
             break  # narrower doesn't leave less (what's left is at corners, not between the lanes): the wider one
         best, best_left = plan, sum(pieces)
         if max(pieces, default=0.0) < LEFT_PIECE and sum(pieces) < LEFT_TOTAL or hi - lo < 1e-9:
+            break
+        # narrower lanes only mow what's left between lanes: strips along them (not what's at corners, the loops, the
+        # ends of lanes and turns)
+        if not any(_strip_between_lanes(p, plan.angles) for p in left):
             break
     if best is None:
         raise error or PlanningError('no lane spacing fits')
     best.stats['planning_time'] = time.perf_counter() - t0
     best.stats['chosen']['mode'] = 'auto'
     return best
+
+
+def _strip_between_lanes(piece, angles: Sequence[float]) -> bool:
+    """Whether a piece left unmowed is a strip along the lanes (of one of the angles): three times as long as wide."""
+    for a in angles:
+        c, s = math.cos(a), math.sin(a)
+        pts = list(piece.exterior.coords)
+        along = [x * c + y * s for x, y in pts]
+        across = [-x * s + y * c for x, y in pts]
+        if max(along) - min(along) > 3.0 * (max(across) - min(across)):
+            return True
+    return False
 
 
 def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
@@ -2147,10 +2168,13 @@ def blade_points(plan: CoveragePlan, start: int, end: int) -> List[XY]:
              p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in plan.poses[start:end + 1]]
 
 
-def swept_area(plan: CoveragePlan, mower_width: float):
-    """What the blade covers along the whole path (a disk of mower_width), for checks and plots."""
+def swept_area(plan: CoveragePlan, mower_width: float, simplify: float = 0.0):
+    """What the blade covers along the whole path (a disk of mower_width), for checks and plots. simplify: the
+    blade's way that much simpler first (quicker, for comparing plans)."""
     ends = list(plan.section_starts[1:]) + [len(plan.poses)]
     lines = [LineString(blade_points(plan, a, b - 1)) for a, b in zip(plan.section_starts, ends) if b - a >= 2]
+    if simplify > 0:
+        lines = [line.simplify(simplify) for line in lines]
     if not lines:
         return Polygon()
     return union(line.buffer(0.5 * mower_width, 4) for line in lines)
