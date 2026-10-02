@@ -12,6 +12,9 @@ What comes on top, without touching `mower_logic`:
   turn a forward U-turn of `turn_radius`. A group of fewer than about 2k lanes gets bulb turns, also
   forwards only. Where the edge leaves no room it uses a smaller arc, a detour along the edge, or a pivot
   as the last resort.
+- **Areas in areas.** A mowing area lying in another (90 % of it at least) is left out of that one and mowed
+  round like an obstacle, it gets its own plan with its own settings (`nested_areas`, on by default). Areas
+  next to each other with an edge in common don't count.
 - **Narrow parts.** Where the lanes would lie in a part narrower than a U-turn (a path, a strip between
   beds), the loops go on in instead, and the pieces they come apart into are driven on the way round
   (`narrow_parts: loops` in the launch file's settings, `lanes` plans lanes there too). Areas without such

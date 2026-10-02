@@ -355,6 +355,17 @@ def test_obstacles_come_with_the_request(planner):
     assert inside(planner.handle(request(holes=[])), BED)
 
 
+def test_area_in_the_area_mowed_on_its_own(planner):
+    # a zone in the garden with an angle of its own: the garden mows round it, unless nested_areas is off
+    zone = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
+    send_map(the_map(areas=[area('zone', zone, type='mow', angle=1.2)]))
+    res = planner.handle(request(holes=[]))
+    check(res)
+    assert not inside(res, zone)
+    rpc('planner.settings.set', {'nested_areas': False})
+    assert inside(planner.handle(request(holes=[])), zone)
+
+
 def test_no_way_over_navigation_areas(planner):
     # a hedge across the garden and a drive along its top. mower_logic mows a path from start to end, so each
     # side gets paths of its own and mower_logic drives from one to the other

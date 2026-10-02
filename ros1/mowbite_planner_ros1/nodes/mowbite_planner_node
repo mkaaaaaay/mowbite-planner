@@ -12,7 +12,8 @@ with it the one that's active and mowable):
     and its angle_min/angle_max. With angle or angle_strategy in it the lanes go that way instead of
     mower_logic's angle. Stock mower_map drops properties it doesn't know, see openmower.patch.
   - its own angle: with one, mower_logic's angle counts even with angle or angle_strategy in settings.
-  - the areas to mow around (mow_around) in it, on top of the obstacles mower_logic sends.
+  - the areas to mow around (mow_around) in it, on top of the obstacles mower_logic sends, and with
+    nested_areas the other mowing areas lying in it (they get their own plan).
   - the other lawns: the shortest way between parts of the area may go through them. Not the navigation
     areas: mower_logic mows a path from start to end, a part only reachable over them gets paths of its own.
   - the docking station: plans start on the loop next to it and end close to it.
@@ -315,8 +316,11 @@ class MowbitePlannerRos1:
                 # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
                 obstacles += job.mow_around
                 drivable, keep_out, dock = job.drivable, job.keep_out, job.dock
-            plan = plan_coverage(boundary, obstacles, self.settings(req, job), start=dock, end=dock,
-                                 drivable=drivable, keep_out=keep_out)
+            cfg = self.settings(req, job)
+            if job is not None and cfg.nested_areas:
+                obstacles += job.nested  # the mowing areas in this one, mowed on their own
+            plan = plan_coverage(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
+                                 keep_out=keep_out)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res

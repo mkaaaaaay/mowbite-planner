@@ -80,6 +80,19 @@ def test_area_job():
     assert not job.drivable and job.keep_out == [rect(0, 8, 6, 12)]
 
 
+def test_nested_areas():
+    """A mowing area in another (most of it) is nested in it, not one next to it with an edge in common, not the
+    other way round, not an inactive one or one not to mow."""
+    data = {'areas': [area('lawn', 'mow', rect(0, 0, 10, 8)), area('zone', 'mow', rect(2, 2, 5, 5)),
+                      area('edge', 'mow', rect(9.5, 3, 12, 6)),  # mostly outside
+                      area('next', 'mow', rect(10, 0, 14, 8)),  # an edge in common
+                      area('off', 'mow', rect(6, 1, 8, 3), active=False),
+                      area('meadow', 'mow', rect(6, 5, 8, 7), mowable=False)]}
+    assert area_job(data, 'lawn').nested == [rect(2, 2, 5, 5)]
+    assert area_job(data, 'zone').nested == [] and area_job(data, 'next').nested == []
+    assert rect(2, 2, 5, 5) in area_job(data, 'lawn').drivable  # still a way through
+
+
 def test_match_area():
     # the index among the mowing areas, for area_job: ids may be missing or twice
     a, b = area('x', 'mow', rect(0, 0, 10, 6)), area('x', 'mow', rect(20, 0, 30, 6))

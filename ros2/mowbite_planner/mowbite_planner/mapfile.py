@@ -14,6 +14,8 @@ from .geometry import clean_polygon
 from .planner import PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
+# a mowing area lies in another (is nested) with this share of it in there at least
+NESTED_SHARE = 0.9
 
 
 @dataclass
@@ -30,6 +32,8 @@ class AreaJob:
     # where the mower mustn't go on the way through the drivable areas: inactive mowing and navigation areas, mowing
     # areas not to mow
     keep_out: List[List[XY]] = field(default_factory=list)
+    # the other active mowing areas lying in this one (NESTED_SHARE of them at least): left out with nested_areas
+    nested: List[List[XY]] = field(default_factory=list)
     overrides: Dict[str, Any] = field(default_factory=dict)  # planner settings from the area's properties
     planner: Dict[str, Any] = field(default_factory=dict)  # MowBite's own of them: angle range, planner object
     dock: Optional[Tuple[float, float, float]] = None  # x, y, heading of the first docking station
@@ -212,7 +216,8 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     from one part of this area to another. Not the navigation areas and the mowing areas not to mow (nav):
     OpenMower mows a path from start to end, a part only reachable over them is a section of its own. keep_out:
     the mowing areas not to mow and the inactive mowing and navigation areas, nothing goes over them on the way
-    (an inactive obstacle is gone, the mower may go there).
+    (an inactive obstacle is gone, the mower may go there). nested: the other active mowing areas lying in this
+    one, which it leaves out with nested_areas (see NESTED_SHARE).
     Other areas with a broken outline are left out, a broken area to plan is a PlanningError."""
     found = find_area(data, which)
     area = dict(found, properties=dict(_props(found), **properties)) if properties else found
@@ -226,7 +231,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     except ValueError as e:  # PlanningError too
         raise PlanningError(f'area {area.get("id")!r}: {e}') from None
     shape = clean_polygon(boundary)
-    obstacles, mow_around, drivable, nav, keep_out = [], [], [], [], []
+    obstacles, mow_around, drivable, nav, keep_out, nested = [], [], [], [], [], []
     for other in _areas(data):
         p = _props(other)
         if other is found:
@@ -248,6 +253,11 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
             obstacles.append(pts)
         elif kind == 'mow' and p.get('mowable') is not False:
             drivable.append(pts)
+            inner = clean_polygon(pts)
+            # in it, not next to it with an edge in common, and smaller (two areas the same aren't in each other)
+            if not inner.is_empty and inner.area < shape.area and \
+                    inner.intersection(shape).area >= NESTED_SHARE * inner.area:
+                nested.append(pts)
         elif kind == 'mow' and p.get('mow_around') is True:
             # one that covers this whole area doesn't count, the area is what's left of it
             if not clean_polygon(pts).buffer(1e-6).contains(shape):
@@ -257,7 +267,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
             nav.append(pts)
     return AreaJob(area_id=str(area.get('id')), name=str(_props(area).get('name') or area.get('id')),
                    boundary=boundary, obstacles=obstacles, mow_around=mow_around, drivable=drivable, nav=nav,
-                   overrides=overrides, planner=own, dock=_dock(data), keep_out=keep_out)
+                   overrides=overrides, planner=own, dock=_dock(data), keep_out=keep_out, nested=nested)
 
 
 def openmower_angle(boundary: List[XY]) -> float:

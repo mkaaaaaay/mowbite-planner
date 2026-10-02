@@ -162,6 +162,21 @@ def test_plan_with_report_and_trace():
     assert 'report' not in plain and 'lineage' not in plain and plain['fingerprint'] == res['fingerprint']
 
 
+def test_nested_area_mowed_on_its_own(service, planned):
+    """A zone in the front lawn with an angle of its own: the lawn mows round it, the zone its own lanes. With
+    nested_areas off the lawn mows over it as before."""
+    zone = rect(6, 1, 9, 5)
+    service.on_map(json.dumps(dict(MAP, areas=MAP['areas'] + [area('zone', 'mow', zone, angle=1.4)])).encode())
+    lawn = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
+    assert not poses_in(lawn, rect(6.3, 1.3, 8.7, 4.7))
+    assert [tuple(p) for p in zone] in [[tuple(q) for q in o] for o in planned[-1][1]]
+    own = result(service, 'ext.mowbite_planner.plan', {'area_id': 'zone', 'poses': True})
+    assert own['angle'] == pytest.approx(1.4) and poses_in(own, rect(6.3, 1.3, 8.7, 4.7))
+    over = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True,
+                                                         'settings': {'nested_areas': False}})
+    assert poses_in(over, rect(6.3, 1.3, 8.7, 4.7))
+
+
 def test_plan_area_of_the_map(service, planned):
     res = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
     assert res['area_id'] == 'front'

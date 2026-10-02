@@ -202,6 +202,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `transit_clearance` | 0.05 | how far transits stay from the outer loop and obstacle loops [m] |
 | `simplify_tolerance` | 0.01 | the boundary and obstacles are simplified this much first [m] |
 | `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
+| `nested_areas` | true | a mowing area lying in the one planned (90 % of it at least, an area of its own with another angle or pattern) is left out and mowed round, it gets its own plan; for the map's areas (MQTT service, ROS 1 node) |
 | `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan |
 | `robot_width` | -1.0 | width of the mower's body [m], negative = not set |
 | `robot_front` | -1.0 | how far the body reaches ahead of the mower's centre (base_link) [m], negative = not set |

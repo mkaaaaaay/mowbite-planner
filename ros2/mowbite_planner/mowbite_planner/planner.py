@@ -118,6 +118,9 @@ class PlannerConfig:
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
+    # mowing areas of the map lying in the one planned (an area of its own with another angle or pattern): left out
+    # and mowed round like an obstacle, they get their own plan. For the map's areas (mapfile.area_job), not here
+    nested_areas: bool = True
     # where the lanes would lie in a part narrower than a U-turn (2 * turn_radius: a path, a strip between beds, and
     # what's left between such parts too small for more than a few lanes): 'lanes' anyway, 'loops': the loops go on
     # in there instead until it's mowed, the pieces they come apart into driven on the way round (in from the loop
@@ -283,7 +286,7 @@ class PlannerConfig:
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
-        for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes'):
+        for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 
