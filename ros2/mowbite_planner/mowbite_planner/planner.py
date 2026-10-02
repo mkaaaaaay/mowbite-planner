@@ -54,6 +54,10 @@ FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
 PERIMETER_ORDERS = ('first', 'last')
 # where the lane region is narrower than a U-turn: 'lanes' anyway, or 'loops' further in instead
 NARROW_PARTS = ('lanes', 'loops')
+# 'fixed': overlap gives the lane spacing, 'auto': the planner picks it (see plan_coverage)
+LANE_SPACING_MODES = ('fixed', 'auto')
+# lane spacings lane_spacing_mode 'auto' tries, from lane_spacing_max down to lane_spacing_min
+SPACING_CANDIDATES = 5
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
 TURN_TYPES = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
@@ -76,6 +80,11 @@ MAX_PASSES = 255
 MAX_TURN_RADIUS = 10.0
 # m, coordinates further out are a mistake (or the wrong frame), not a lawn
 MAX_COORDINATE = 1e7
+# m2, lane_spacing_mode 'auto': a plan leaves nothing unmowed with no piece this big and not LEFT_TOTAL together of
+# pieces from LEFT_TUFT on (tufts at corners), like the report
+LEFT_TUFT = 0.01
+LEFT_PIECE = 0.05
+LEFT_TOTAL = 0.1
 # m, a blade further off the mower's centre is a mistake
 MAX_BLADE_OFFSET = 1.0
 # m, lane ends are pulled back to this when the body doesn't fit at them
@@ -90,7 +99,15 @@ class PlanningError(ValueError):
 class PlannerConfig:
     mower_width: float = 0.22  # m, cutting width
     overlap: float = 0.15  # 0..<1, share of the cutting width neighbouring lanes overlap
-    perimeter_passes: int = 2  # loops along the outline and around every obstacle
+    # 'fixed': the lane spacing follows from overlap. 'auto': the planner tries up to SPACING_CANDIDATES spacings from
+    # lane_spacing_max down to lane_spacing_min (m, None: 85 % and 50 % of mower_width) and keeps the widest that
+    # leaves nothing unmowed (no piece of LEFT_PIECE, not LEFT_TOTAL together): the fewest lanes and turns. None does:
+    # the one that leaves least (the angle stays as it is)
+    lane_spacing_mode: str = 'fixed'
+    lane_spacing_min: Optional[float] = None
+    lane_spacing_max: Optional[float] = None
+    # loops along the outline and around every obstacle, -1: as many as the lanes' turns need (see passes)
+    perimeter_passes: int = 2
     fill_pattern: str = 'lanes'  # 'lanes', 'crosshatch' or 'concentric'
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
@@ -169,6 +186,29 @@ class PlannerConfig:
     # base_link between the drive wheels; negative: behind it). The lanes start and end that much earlier, so the
     # blade mows them where they are
     blade_ahead: float = 0.0
+
+    @property
+    def passes(self) -> int:
+        """The loops, perimeter_passes -1 worked out: as many as mow the strip along the edges the lanes don't get to.
+        A lane ends where its turn (a quarter arc of turn_radius, the body round it) stays in what the edges allow,
+        the next one starts there too (the turn goes level with it), and the blade there is blade_ahead further in."""
+        if self.perimeter_passes >= 0:
+            return int(self.perimeter_passes)
+        half = 0.5 * self.mower_width
+        if self.body:
+            out = math.hypot(self.turn_radius + 0.5 * self.robot_width, max(self.robot_front, self.robot_rear))
+            allowed = (0.5 * self.robot_width if self.edges == 'recorded' else 0.0) + self.body_tolerance
+            end = max(self.centre_offset, out - allowed)
+        else:
+            end = self.centre_offset + self.turn_radius
+        strip = end + abs(self.blade_ahead) - half  # from the edge in, what the lanes leave
+        return max(1, int(math.ceil((strip - half - self.blade_loop_offset) / self.lane_spacing - 1e-9)) + 1)
+
+    @property
+    def spacing_range(self) -> Tuple[float, float]:
+        lo = 0.5 * self.mower_width if self.lane_spacing_min is None else self.lane_spacing_min
+        hi = 0.85 * self.mower_width if self.lane_spacing_max is None else self.lane_spacing_max
+        return lo, hi
 
     @property
     def lane_spacing(self) -> float:
@@ -270,20 +310,27 @@ class PlannerConfig:
             if getattr(self, name) is not None:
                 finite(name, 0.0)
         finite('body_tolerance', 0.0, MAX_BLADE_OFFSET)
+        for name in ('lane_spacing_min', 'lane_spacing_max'):
+            if getattr(self, name) is not None:
+                finite(name, 0.0, self.mower_width, lo_open=True)
+        lo, hi = self.spacing_range
+        if lo > hi:
+            raise PlanningError(f'lane_spacing_min must be <= lane_spacing_max, got {lo} > {hi}')
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         finite('blade_ahead', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
-        for name in ('perimeter_passes', 'lane_overlap_passes'):
+        for name, lo in (('perimeter_passes', -1), ('lane_overlap_passes', 0)):
             v = getattr(self, name)
             whole = isinstance(v, int) or isinstance(v, float) and math.isfinite(v) and v == int(v)
-            if isinstance(v, bool) or not whole or not 0 <= v <= MAX_PASSES:
-                raise PlanningError(f'{name} must be a whole number 0..{MAX_PASSES}, got {v!r}')
+            if isinstance(v, bool) or not whole or not lo <= v <= MAX_PASSES:
+                raise PlanningError(f'{name} must be a whole number {lo}..{MAX_PASSES}, got {v!r}')
         if self.route_order not in ROUTE_ORDERS:
             raise PlanningError(f'route_order must be one of {", ".join(ROUTE_ORDERS)}, got {self.route_order!r}')
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
                               ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
-                              ('edges', EDGES), ('narrow_parts', NARROW_PARTS)):
+                              ('edges', EDGES), ('narrow_parts', NARROW_PARTS),
+                              ('lane_spacing_mode', LANE_SPACING_MODES)):
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
@@ -295,7 +342,8 @@ class PlannerConfig:
 
 
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
-_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear')
+_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear',
+             'lane_spacing_min', 'lane_spacing_max')
 _FLOATS = tuple(f.name for f in dataclasses.fields(PlannerConfig) if isinstance(f.default, float)) + _OPTIONAL
 
 
@@ -1517,6 +1565,46 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   end: Optional[Sequence[float]] = None,
                   drivable: Sequence[Sequence[Sequence[float]]] = (),
                   keep_out: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
+    """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
+    SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
+    lane spacing and loops it was planned with."""
+    cfg = config or PlannerConfig()
+    cfg.validate()
+    if cfg.lane_spacing_mode != 'auto':
+        return _plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out)
+    t0 = time.perf_counter()
+    lo, hi = cfg.spacing_range
+    best, best_left, error = None, None, None
+    for i in range(SPACING_CANDIDATES):
+        spacing = hi - (hi - lo) * i / max(1, SPACING_CANDIDATES - 1)
+        try:
+            plan = _plan_coverage(boundary, obstacles, dataclasses.replace(
+                cfg, lane_spacing_mode='fixed', overlap=1.0 - spacing / cfg.mower_width), start, end, drivable,
+                keep_out)
+        except PlanningError as e:  # this spacing doesn't fit (too many poses), a narrower one may not either
+            error = error or e
+            continue
+        pieces = [p.area for p in polygons(plan.free_space.difference(swept_area(plan, cfg.mower_width)))
+                  if p.area >= LEFT_TUFT]
+        if best is None or sum(pieces) < best_left - 1e-9:
+            best, best_left = plan, sum(pieces)
+        if max(pieces, default=0.0) < LEFT_PIECE and sum(pieces) < LEFT_TOTAL:
+            best = plan
+            break
+        if hi - lo < 1e-9:
+            break
+    if best is None:
+        raise error or PlanningError('no lane spacing fits')
+    best.stats['planning_time'] = time.perf_counter() - t0
+    best.stats['chosen']['mode'] = 'auto'
+    return best
+
+
+def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
+                   config: Optional[PlannerConfig] = None, start: Optional[Sequence[float]] = None,
+                   end: Optional[Sequence[float]] = None,
+                   drivable: Sequence[Sequence[Sequence[float]]] = (),
+                   keep_out: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
     """Plans the coverage path of one area.
 
     boundary: [(x, y), ...] of the outline, obstacles: a list of those for no-go zones, all in metres in
@@ -1583,7 +1671,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
 
     # 1. perimeter loops, level 0 runs perimeter_offset inside the edges. concentric goes on until
     # nothing is left, the last bit (narrower than a lane spacing) gets one more loop halfway in
-    count = int(cfg.perimeter_passes)
+    count = cfg.passes
     # concentric loops meet at the corners: at a right angle the corners of two loops are spacing * sqrt(2)
     # apart, which the blade only covers up to mower_width / sqrt(2)
     loop_spacing = min(spacing, cfg.mower_width / math.sqrt(2.0)) if concentric else spacing
@@ -1845,6 +1933,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         'area': free.area,
         'planning_time': time.perf_counter() - t0,
         'timings': timings,
+        'chosen': {'lane_spacing': round(spacing, 4), 'perimeter_passes': count, 'mode': 'fixed'},
     }
     for key in ('turns_u_turn', 'turns_bulb', 'turns_k_turn', 'turns_detour', 'turns_pivot', 'turns_fallback'):
         stats[key] = route.counts.get(key, 0)

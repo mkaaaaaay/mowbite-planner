@@ -368,7 +368,7 @@ def test_plan_from_parameters(node):
 
 @pytest.mark.parametrize('name, value', [
     ('overlap', 1.0), ('mower_width', -0.1), ('lane_order', 'spiral'), ('angle_strategy', 'random'),
-    ('turn_radius', -1.0), ('frame_id', ''), ('perimeter_passes', -1), ('fill_pattern', 'spiral'),
+    ('turn_radius', -1.0), ('frame_id', ''), ('perimeter_passes', -2), ('fill_pattern', 'spiral'),
     ('crosshatch_angle_deg', math.nan), ('perimeter_order', 'middle'), ('perimeter_direction', 'up'),
     ('turn_types', ['u_turn', 'zigzag']), ('angle_min_deg', -math.inf), ('angle_max_deg', math.inf),
     ('angle_step_deg', 0.0), ('lane_overlap_passes', -1), ('max_path_poses', 3), ('perimeter_passes', 256),

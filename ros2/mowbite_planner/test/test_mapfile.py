@@ -285,6 +285,17 @@ def test_settings_for_layers():
         settings_for(base, {'outline_count': 300}, None)
 
 
+def test_settings_for_own_settings_beat_the_mowers():
+    params = {'/mower_logic/tool_width': 0.14, '/mower_logic/outline_count': 3}
+    base = PlannerConfig(mower_width=0.18, perimeter_passes=-1, overlap=0.1)
+    assert settings_for(base, params, None).perimeter_passes == 3
+    cfg = settings_for(base, params, None, own={'perimeter_passes', 'overlap'})
+    assert cfg.perimeter_passes == -1 and cfg.overlap == 0.1 and cfg.mower_width == 0.18
+    # the area's own outline_count still beats them
+    job = area_job({'areas': [area('lawn', 'mow', rect(0, 0, 10, 8), outline_count=2)]}, 'lawn')
+    assert settings_for(base, params, job, own={'perimeter_passes'}).perimeter_passes == 2
+
+
 def test_openmower_angle():
     # towards the first point more than 2 m from the first, not along the longest edge
     assert openmower_angle([(0, 4), (1, 2), (2, 0), (20, 0), (20, 12), (0, 12)]) == pytest.approx(math.atan2(-4, 2))

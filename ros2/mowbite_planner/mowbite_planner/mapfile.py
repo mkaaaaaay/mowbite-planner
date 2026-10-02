@@ -8,7 +8,7 @@ and a "planner" object with any MowBite Planner setting), then whatever a reques
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple, Union
 
 from .geometry import clean_polygon
 from .planner import PlannerConfig, PlanningError
@@ -279,13 +279,16 @@ def openmower_angle(boundary: List[XY]) -> float:
 
 
 def settings_for(base: PlannerConfig, params: Optional[Mapping[str, Any]], job: Optional[AreaJob],
-                 request: Optional[Mapping[str, Any]] = None, own_angle: bool = False) -> PlannerConfig:
+                 request: Optional[Mapping[str, Any]] = None, own_angle: bool = False,
+                 own: Collection[str] = ()) -> PlannerConfig:
     """The planner settings for a job like the ROS 1 node gets them: base < the mower's parameters < the
     area < the request. The lanes go the way mower_logic asks for: the area's angle (without one OpenMower's
     own, see openmower_angle) plus mow_angle_offset, with mow_angle_offset_is_absolute the offset alone.
     Not when the area's planner object has an angle or angle_strategy, nor when base has one (own_angle:
-    angle or angle_strategy in the settings for all areas) and the area has no angle of its own."""
-    mower = openmower_settings(params, base.mower_width)
+    angle or angle_strategy in the settings for all areas) and the area has no angle of its own. own: settings of
+    base that beat the mower's parameters (lane spacing as overlap, loops, offset set for the planner)."""
+    mower = {n: v for n, v in openmower_settings(params, base.mower_width).items()
+             if n not in own and not (n == 'mower_width' and 'overlap' in own)}
     overrides: Dict[str, Any] = {}
     if job is not None:
         absolute, offset = mower.pop('angle', None), mower.pop('angle_offset', 0.0)
@@ -298,5 +301,7 @@ def settings_for(base: PlannerConfig, params: Optional[Mapping[str, Any]], job: 
     cfg = base.with_overrides(mower).with_overrides(overrides)
     if request:
         cfg = cfg.with_overrides(request)
+    if cfg.lane_spacing_mode == 'auto':  # the blade, not widened to the mower's lane spacing
+        cfg = cfg.with_overrides({'mower_width': base.mower_width})
     cfg.validate()
     return cfg

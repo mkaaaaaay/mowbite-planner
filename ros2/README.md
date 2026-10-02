@@ -203,6 +203,9 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `simplify_tolerance` | 0.01 | the boundary and obstacles are simplified this much first [m] |
 | `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
 | `nested_areas` | true | a mowing area lying in the one planned (90 % of it at least, an area of its own with another angle or pattern) is left out and mowed round, it gets its own plan; for the map's areas (MQTT service, ROS 1 node) |
+| `lane_spacing_mode` | `fixed` | `fixed`: the lane spacing follows from `overlap` (OpenMower's `tool_width`). `auto`: the planner tries 5 spacings from `lane_spacing_max` down to `lane_spacing_min` at the given angle and keeps the plan that leaves least unmowed, then turns on the spot least, then is shortest; `stats.chosen` says which (`lane_spacing`, `perimeter_passes`, `mode`) |
+| `lane_spacing_min`, `lane_spacing_max` | none | m, the range `auto` tries, none: 50 % and 95 % of `mower_width` |
+| `perimeter_passes` -1 | | as many loops as the turns of the lanes need: they mow the strip along the edges the lanes don't get to (a lane ends where its turn keeps the body in what `edges` allow, the blade `blade_ahead` further in), worked out from `turn_radius`, the body and `blade_ahead`; set for the planner it beats `mower_logic`'s `outline_count` (an area's own still beats it) |
 | `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan |
 | `robot_width` | -1.0 | width of the mower's body [m], negative = not set |
 | `robot_front` | -1.0 | how far the body reaches ahead of the mower's centre (base_link) [m], negative = not set |

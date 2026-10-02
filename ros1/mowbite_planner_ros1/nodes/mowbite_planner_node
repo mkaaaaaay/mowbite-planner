@@ -62,24 +62,30 @@ from xbot_mqtt.srv import RegisterMethodsSrv
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
 from mowbite_planner import planner as limits
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
-from mowbite_planner.mapfile import area_job, match_area
+from mowbite_planner.mapfile import area_job, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
-FIXED = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
-         'perimeter_passes': '/mower_logic/outline_count', 'lane_overlap_passes': '/mower_logic/outline_overlap_count',
-         'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
+FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
          'allow_reverse': 'forwards only (FTC)'}
+# come with every request of mower_logic (from its parameters, or the area's), unless set here (settings, stored)
+MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
+               'perimeter_passes': '/mower_logic/outline_count',
+               'lane_overlap_passes': '/mower_logic/outline_overlap_count'}
 CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIMETER_ORDERS,
            'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
            'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS,
-           'edges': limits.EDGES, 'narrow_parts': limits.NARROW_PARTS}
+           'edges': limits.EDGES, 'narrow_parts': limits.NARROW_PARTS,
+           'lane_spacing_mode': limits.LANE_SPACING_MODES}
+# the value that means "the planner works it out"
+AUTO_VALUES = {'perimeter_passes': -1}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
 SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
-Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored')
+# own: the ones of MOWER_LOGIC set here, they beat mower_logic's
+Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
-          'perimeter_passes': (0, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
+          'perimeter_passes': (-1, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
@@ -191,7 +197,8 @@ class MowbitePlannerRos1:
         # as the planner took them: ints of a float setting as floats, turn_types as a list
         stored = {n: getattr(blade if n == 'mower_width' else base, n) for n in stored}
         return Setup(blade.mower_width, base, own_angle,
-                     {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()})
+                     {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()},
+                     frozenset(n for n in settings if n in MOWER_LOGIC))
 
     def read_stored(self):
         if not self.file or not os.path.exists(self.file):
@@ -229,10 +236,16 @@ class MowbitePlannerRos1:
                      'stored': name in current.stored, 'type': kind, 'settable': name not in FIXED}
             if name in FIXED:
                 entry['from'] = FIXED[name]
+            elif name in MOWER_LOGIC and name not in current.own:  # mower_logic's (an area's own still beats it)
+                entry['from'] = MOWER_LOGIC[name]
+                entry['value'] = openmower_settings(rospy.get_param('/mower_logic', {}), current.mower_width).get(
+                    name, entry['value'])
             if default is None:
                 entry['nullable'] = True
             if name in CHOICES:
                 entry['choices'] = CHOICES[name]
+            if name in AUTO_VALUES:
+                entry['auto_value'] = AUTO_VALUES[name]
             if kind == 'number':
                 entry['unit'] = 'rad' if name in RAD else '' if name in ('overlap', 'transit_edge_cost') else 'm'
                 if name not in SIGNED:
@@ -273,6 +286,7 @@ class MowbitePlannerRos1:
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
         service.planner = self.plan_coverage
+        service.own = current.own
         return service.plan(params)
 
     def on_map(self, msg):
@@ -305,8 +319,18 @@ class MowbitePlannerRos1:
             asked['angle'] = float(req.angle)
         if req.fill_type == PlanPathRequest.FILL_CONCENTRIC:
             asked['fill_pattern'] = 'concentric'
+        # set here, they beat mower_logic's, but not the area's own (its outline_count, ...)
+        for name in current.own:
+            asked.pop(name, None)
+        if 'overlap' in current.own:  # the blade, not widened to mower_logic's lane spacing
+            asked['mower_width'] = current.mower_width
         cfg = current.base.with_overrides(asked)
-        return cfg.with_overrides(job.planner) if job else cfg
+        if job is not None:
+            cfg = cfg.with_overrides({n: v for n, v in job.overrides.items() if n in current.own})
+            cfg = cfg.with_overrides(job.planner)
+        if cfg.lane_spacing_mode == 'auto':  # the blade, the spacing is the planner's
+            cfg = cfg.with_overrides({'mower_width': current.mower_width})
+        return cfg
 
     def plan_coverage(self, *args, **kwargs):
         """plan_coverage(), the last CACHED_PLANS kept: the plan only depends on what it's given, the same again

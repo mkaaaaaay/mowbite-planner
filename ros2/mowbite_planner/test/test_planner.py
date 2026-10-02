@@ -431,7 +431,7 @@ def test_figure_eight_boundary_is_planned_in_both_loops():
     (rect(0, 0, 5, 5), [], dict(overlap=1.0)),
     (rect(0, 0, 5, 5), [], dict(mower_width=0.0)),
     (rect(0, 0, 5, 5), [], dict(mower_width=float('nan'))),
-    (rect(0, 0, 5, 5), [], dict(perimeter_passes=-1)),
+    (rect(0, 0, 5, 5), [], dict(perimeter_passes=-2)),
     (rect(0, 0, 5, 5), [], dict(lane_order='spiral')),
     (rect(0, 0, 5, 5), [], dict(angle_strategy='random')),
     ([(0, 0), (1, 0), (float('inf'), 1)], [], {}),
@@ -783,6 +783,41 @@ def test_narrow_parts_loops():
     assert wide.stats['lanes'] > 10
     with pytest.raises(PlanningError, match='narrow_parts'):
         PlannerConfig(narrow_parts='strips').validate()
+
+
+def test_passes_worked_out():
+    """perimeter_passes -1: as many loops as the lanes' turns need, the strip along the edges they leave mowed."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1))
+    assert cfg.passes == 4  # a U-turn of 0.25 reaches 0.62 past the lane end, 0.25 past the edge may be the body's
+    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_radius=0.4)).passes == 5
+    assert PlannerConfig(**dict(MOWER, perimeter_passes=-1)).passes == 3  # no body: the turn's radius
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    assert plan.stats['perimeter_loops'] >= 4 and check_plan(plan)['left_m2'] < 0.5
+    with pytest.raises(PlanningError, match='perimeter_passes'):
+        PlannerConfig(perimeter_passes=-2).validate()
+
+
+def test_lane_spacing_auto():
+    """lane_spacing_mode auto: the widest spacing that leaves nothing unmowed, the same every time, off again with
+    fixed; stats['chosen'] says what it planned with."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, lane_spacing_mode='auto'))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, plan.config)
+    chosen = plan.stats['chosen']
+    assert chosen['mode'] == 'auto' and chosen['lane_spacing'] == pytest.approx(0.85 * 0.18)
+    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 0.1
+    again = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    assert [(p.x, p.y) for p in again.poses] == [(p.x, p.y) for p in plan.poses]
+    fixed = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I)), start=(1, 1, 0.0), end=(1, 1))
+    assert fixed.stats['chosen'] == {'lane_spacing': 0.13, 'perimeter_passes': 4, 'mode': 'fixed'}
+    # a range of one spacing plans that one
+    one = PlannerConfig(**dict(MOWER, lane_spacing_mode='auto', lane_spacing_min=0.12, lane_spacing_max=0.12))
+    assert plan_coverage(rect(0, 0, 6, 4), [], one).stats['chosen']['lane_spacing'] == pytest.approx(0.12)
+    for kw, match in ((dict(lane_spacing_mode='free'), 'lane_spacing_mode'),
+                      (dict(lane_spacing_min=0.15, lane_spacing_max=0.1), 'lane_spacing_min'),
+                      (dict(lane_spacing_max=0.5), 'lane_spacing_max')):
+        with pytest.raises(PlanningError, match=match):
+            PlannerConfig(**dict(MOWER, **kw)).validate()
 
 
 def test_body_corner_rounding():

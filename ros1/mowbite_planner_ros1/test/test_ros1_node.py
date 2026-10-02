@@ -322,13 +322,21 @@ def test_settings_parameter(planner):
 
 
 def test_settings_parameter_angle(planner):
-    # an angle or angle_strategy in ~settings beats mower_logic's angle, the rest always comes with the request
+    # an angle or angle_strategy in ~settings beats mower_logic's angle; lane spacing (overlap), loops and offset
+    # set here beat mower_logic's, the skip flags always come with the request
     for settings, angle in (({}, 0.7), ({'angle': 0.3}, 0.3), ({'angle_strategy': 'longest_edge'}, None),
                             ({'angle': None}, None)):
         rospy.params = {'~settings': dict(settings, perimeter_passes=5, overlap=0.5, skip_lanes=True)}
         cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
-        assert cfg.angle == angle and cfg.perimeter_passes == 3 and cfg.lane_spacing == pytest.approx(0.13)
-        assert not cfg.skip_lanes
+        assert cfg.angle == angle and cfg.perimeter_passes == 5 and cfg.lane_spacing == pytest.approx(0.09)
+        assert not cfg.skip_lanes and cfg.lane_overlap_passes == request().outline_overlap_count
+        rospy.params = {'~settings': settings}
+        cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
+        assert cfg.perimeter_passes == 3 and cfg.lane_spacing == pytest.approx(0.13)
+    # an area's own outline_count still beats the one set here
+    rospy.params = {'~settings': {'perimeter_passes': 5}}
+    assert node_module.MowbitePlannerRos1().settings(request(), node_module.area_job(
+        the_map(outline_count=2), 0)).perimeter_passes == 2
     rospy.params = {'~settings': {'angle_strategy': 'longest_edge'}}
     node_module.MowbitePlannerRos1().handle(request(angle=0.7))
     assert lane_angle() == 0.0
@@ -570,9 +578,11 @@ def test_rpc_settings(planner):
     assert s['angle'] == {'value': None, 'default': None, 'stored': False, 'type': 'number', 'settable': True,
                           'nullable': True, 'unit': 'rad'}
     assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
-    for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes', 'skip_lanes',
-                 'allow_reverse'):
+    for name in ('skip_lanes', 'allow_reverse'):
         assert not s[name]['settable'] and s[name]['from'], name
+    # mower_logic's until set here
+    for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes'):
+        assert s[name]['settable'] and s[name]['from'].startswith('/mower_logic/'), name
     assert s['overlap']['from'] == '/mower_logic/tool_width'
     assert s['blade_offset'] == {'value': 0.0, 'default': 0.0, 'stored': False, 'type': 'number', 'settable': True,
                                  'unit': 'm', 'min': -1.0, 'max': 1.0}
@@ -582,6 +592,9 @@ def test_rpc_settings(planner):
     assert s['edges'] == {'value': 'recorded', 'default': 'recorded', 'stored': False, 'type': 'string',
                           'settable': True, 'choices': ['recorded', 'hard']}
     assert s['blade_ahead']['min'] == -1.0 and s['blade_offset']['min'] == -1.0
+    assert s['perimeter_passes']['auto_value'] == -1 and s['perimeter_passes']['min'] == -1
+    assert s['lane_spacing_mode']['choices'] == ['fixed', 'auto'] and s['lane_spacing_mode']['value'] == 'fixed'
+    assert s['lane_spacing_min']['nullable'] and s['lane_spacing_min']['unit'] == 'm'
     assert s['transit_edge_cost']['unit'] == ''
 
 
@@ -628,7 +641,6 @@ def test_rpc_settings_angle(planner):
     ({'turn_types': []}, 'turn_types must be some of'),
     ({'angle_min': 0.1}, 'angle_min and angle_max go together'),
     ({'mower_width': 0}, 'mower_width must be > 0.0'),
-    ({'overlap': 0.2}, 'not settable here: overlap (/mower_logic/tool_width)'),
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: allow_reverse'),
     ({'nope': 1}, 'unknown planner settings: nope'),
 ])
@@ -680,6 +692,9 @@ def test_rpc_plan(planner):
     assert error is None and isinstance(checked['report']['body_out'], list)
     assert all(set(o) == {'x', 'y', 'yaw', 'kind'} for o in checked['report']['body_out'])
     assert result['fingerprint'] != checked['fingerprint']
+    # the planner picks the lane spacing, chosen says which, without report too
+    auto, error = rpc('planner.plan', {'area_id': 'a', 'settings': {'lane_spacing_mode': 'auto'}})
+    assert error is None and auto['stats']['chosen']['mode'] == 'auto' and result['stats']['chosen']['mode'] == 'fixed'
 
 
 @pytest.mark.parametrize('method, params, code, message', [

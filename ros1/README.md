@@ -236,6 +236,12 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
   (both may be negative).
+- `lane_spacing_mode: auto` (on and off again with `fixed`, also per area in its `planner` property) lets the
+  planner pick the lane spacing, `perimeter_passes: -1` the loops (`planner.settings` reports `auto_value: -1`);
+  what it picked is in `stats.chosen` of every plan.
+- Lane spacing (`overlap`), loops (`perimeter_passes`, -1: as many as the lanes' turns need), `perimeter_offset`
+  and `lane_overlap_passes` come from `mower_logic`'s parameters (`from` says which) until set here, then the
+  planner's beat them (an area's own `outline_count`, ... still beat those).
 - `planner.settings.set` with `{"turn_radius": 0.3, "fill_pattern": "crosshatch"}`: checked as a whole, a bad
   value changes nothing and the error says why. `null` goes back to the default. Kept in
   `$ROS_HOME/mowbite_planner_settings.json` (`/data/ros` in the container, it outlives a new image) and used

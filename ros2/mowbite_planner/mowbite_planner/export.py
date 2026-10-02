@@ -224,7 +224,7 @@ def lineage(plan: CoveragePlan, tolerance: float = SIMPLIFY) -> Tuple[List[Dict[
     rest = _polygon_objects(plan.remaining, 'remaining', 'remaining', 'remaining', area_ids, remaining_op)
     region = _polygon_objects(plan.lane_region, 'remaining', 'lane_region', 'lane-region', area_ids,
                               op('inset', 'where the lanes lie', offset=round(
-                                  first + max(0, (cfg.perimeter_passes - cfg.lane_overlap_passes)) * spacing, 4)
+                                  first + max(0, (cfg.passes - cfg.lane_overlap_passes)) * spacing, 4)
                                  if cfg else None))
     narrow = _polygon_objects(plan.narrow, 'remaining', 'narrow', 'narrow', [o['id'] for o in levels],
                               op('middle', 'too narrow for lanes, a loop of its own')) \

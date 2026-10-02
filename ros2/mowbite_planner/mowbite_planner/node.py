@@ -60,8 +60,9 @@ PARAMETERS = {
     'mower_width': (0.22, 'cutting width [m]', lambda v: v > 0.0, 'must be > 0'),
     'overlap': (0.15, 'share of the cutting width neighbouring lanes overlap, 0.15 = 15 %. Lane spacing = '
                 'mower_width * (1 - overlap)', lambda v: 0.0 <= v < 1.0, 'must be 0 <= overlap < 1'),
-    'perimeter_passes': (2, 'loops along the outline and around every obstacle', lambda v: 0 <= v <= MAX_PASSES,
-                         f'must be 0..{MAX_PASSES}'),
+    'perimeter_passes': (2, 'loops along the outline and around every obstacle, -1: as many as the turns of the '
+                         'lanes need (from turn_radius, the body and blade_ahead)', lambda v: -1 <= v <= MAX_PASSES,
+                         f'must be -1..{MAX_PASSES}'),
     'perimeter_offset': (-1.0, 'distance of the first perimeter loop from the outline [m]. Negative: '
                          'mower_width / 2, the blade edge on the outline. 0 for outlines recorded by driving '
                          "the mower's centre along the edge (OpenMower's outline_offset)", math.isfinite,
@@ -147,7 +148,7 @@ PARAMETERS = {
 RANGES = {
     'mower_width': (0.01, 5.0),
     'overlap': (0.0, 0.95),
-    'perimeter_passes': (0, MAX_PASSES),
+    'perimeter_passes': (-1, MAX_PASSES),
     'lane_overlap_passes': (0, MAX_PASSES),
     'angle_step_deg': (0.5, 90.0),
     'turn_radius': (0.0, 5.0),
