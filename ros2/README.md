@@ -204,6 +204,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
 | `robot_width` | -1.0 | the mower's body [m]: its centre keeps half of it off the outline and the obstacles, negative = only `perimeter_offset` counts |
 | `blade_offset` | 0.0 | the blade's centre this far left of the mower's [m] (negative: right), the loops go round with the blade on their outer side, -1..1 |
+| `blade_ahead` | 0.0 | the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels) [m], negative = behind; the lanes start and end that much earlier, -1..1 |
 | `bend_max_gap` | 0.0 | a row split by an obstacle with at most this much between its pieces becomes one lane bending around it [m], 0 = split |
 | `bend_max_offset` | 0.5 | how far such a bend may leave its lane's line [m] |
 | `transit_edge_distance` | 0.0 | transits keep this far off the edges where that costs little more [m], 0 = the shortest way |

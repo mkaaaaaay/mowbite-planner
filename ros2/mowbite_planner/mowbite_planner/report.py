@@ -8,7 +8,7 @@ from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 
 from .geometry import inset, polygons, union
-from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, swept_area
+from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, blade_points, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
@@ -21,9 +21,6 @@ LEFT_SHARE = 5e-4
 TOLERANCE = 2e-3
 
 
-def _blade_line(plan: CoveragePlan, start: int, end: int) -> List[tuple]:
-    off = plan.config.blade_offset if plan.config else 0.0
-    return [(p.x - off * math.sin(p.yaw), p.y + off * math.cos(p.yaw)) for p in plan.poses[start:end + 1]]
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
@@ -85,7 +82,7 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
         # what each segment mows on its own, added up
         alone = 0.0
         for seg in plan.segments:
-            line = _blade_line(plan, seg.start, seg.end)
+            line = blade_points(plan, seg.start, seg.end)
             if len(line) >= 2:
                 alone += LineString(line).buffer(0.5 * width, 4).intersection(plan.free_space).area
         if mowed.area > 0:

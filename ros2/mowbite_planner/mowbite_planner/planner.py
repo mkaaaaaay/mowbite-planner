@@ -138,6 +138,10 @@ class PlannerConfig:
     # round with the blade on their outer side, so it mows up to perimeter_offset while the body stays further
     # in, the lanes move so the blade's lines stay a lane spacing apart
     blade_offset: float = 0.0
+    # m, how far the blade's centre sits ahead of the mower's centre (the point the path is for: OpenMower's
+    # base_link between the drive wheels; negative: behind it). The lanes start and end that much earlier, so the
+    # blade mows them where they are
+    blade_ahead: float = 0.0
 
     @property
     def lane_spacing(self) -> float:
@@ -233,6 +237,7 @@ class PlannerConfig:
         if self.robot_width is not None:
             finite('robot_width', 0.0)
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
+        finite('blade_ahead', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         for name in ('perimeter_passes', 'lane_overlap_passes'):
             v = getattr(self, name)
             whole = isinstance(v, int) or isinstance(v, float) and math.isfinite(v) and v == int(v)
@@ -1173,17 +1178,29 @@ class _Route:
         driven = 0
         for i, lane in enumerate(lanes):
             xa, xb = (lane.x0, lane.x1) if direction > 0 else (lane.x1, lane.x0)
-            # the blade on the lane, the centre blade_offset to its right (left of the lanes going +x is +y)
+            # the blade on the lane: the centre blade_offset to its right (left of the lanes going +x is +y) and
+            # blade_ahead behind it
             y = lane.y - self.cfg.blade_offset * direction
-            a, b = to_map(xa, y), to_map(xb, y)
-            if self.cfg.blade_offset != 0 and not self.area.is_free([a, b]):
-                # shifted towards an edge the lanes run along, with fewer loops than twice the offset in lane
-                # spacings: as much of it as the centre may drive
-                piece = self.area.clip(a, b, self.cfg.min_lane_length)
+            back = self.cfg.blade_ahead * direction
+            a, b = to_map(xa - back, y), to_map(xb - back, y)
+            if (self.cfg.blade_offset != 0 or back != 0) and not self.area.is_free([a] if lane.bends else [a, b]) \
+                    or lane.bends and not self.area.is_free([b]):
+                # shifted towards an edge, with fewer loops than the offset needs: as much of it as the centre may
+                # drive (of a lane bending around obstacles the pieces at its ends)
                 self._count('lanes_shortened')
-                if piece is None:
-                    continue
-                a, b = piece
+                if lane.bends:
+                    pieces = lane.pieces()
+                    first, last = pieces[0] if direction > 0 else pieces[-1], pieces[-1] if direction > 0 else pieces[0]
+                    ends = (self.area.clip(a, to_map((first[1] if direction > 0 else first[0]) - back, y)),
+                            self.area.clip(to_map((last[0] if direction > 0 else last[1]) - back, y), b))
+                    if ends[0] is None or ends[1] is None:
+                        continue
+                    a, b = ends[0][0], ends[1][1]
+                else:
+                    piece = self.area.clip(a, b, self.cfg.min_lane_length)
+                    if piece is None:
+                        continue
+                    a, b = piece
             yaw = normalize_angle(angle if direction > 0 else angle + math.pi)
             name = f'lane-{len(self.lanes)}'
             self.source = name
@@ -1209,7 +1226,7 @@ class _Route:
                                                      self.transit.is_free), maneuver='turn_fallback')
                     self._count('turns_fallback')
             if lane.bends:
-                self.bent_lane(lane, direction, a, b)
+                self.bent_lane(lane, direction, a, b, to_map)
             else:
                 self.add(LANE, sample_straight(a[0], a[1], b[0], b[1], yaw, self.step))
             self.lanes.append((a, b))
@@ -1217,9 +1234,16 @@ class _Route:
             driven += 1
         return None
 
-    def bent_lane(self, lane: Lane, direction: int, a: XY, b: XY) -> None:
-        """A lane that bends around obstacles (see bend_lanes), from a to b, its corners rounded."""
-        bends = [list(way) for _, _, way in lane.bends]
+    def bent_lane(self, lane: Lane, direction: int, a: XY, b: XY, to_map) -> None:
+        """A lane that bends around obstacles (see bend_lanes), from a to b, its corners rounded. With
+        blade_ahead the centre runs that much behind the blade: the ways around the obstacles from there."""
+        back = self.cfg.blade_ahead * direction
+        bends = []
+        for x0, x1, way in lane.bends:
+            if back != 0:
+                found = self.area.path(to_map(x0 - back, lane.y), to_map(x1 - back, lane.y))
+                way = found if found is not None else way
+            bends.append(list(way))
         if direction < 0:
             bends = [way[::-1] for way in bends[::-1]]
         pts = [a] + [p for way in bends for p in way] + [b]
@@ -1600,13 +1624,18 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
 
 
+def blade_points(plan: CoveragePlan, start: int, end: int) -> List[XY]:
+    """Where the blade's centre is at poses start..end: blade_offset to the left of each, blade_ahead ahead."""
+    off = plan.config.blade_offset if plan.config else 0.0
+    ahead = plan.config.blade_ahead if plan.config else 0.0
+    return [(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
+             p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in plan.poses[start:end + 1]]
+
+
 def swept_area(plan: CoveragePlan, mower_width: float):
     """What the blade covers along the whole path (a disk of mower_width), for checks and plots."""
     ends = list(plan.section_starts[1:]) + [len(plan.poses)]
-    off = plan.config.blade_offset if plan.config else 0.0
-    # the blade blade_offset to the left of each pose
-    lines = [LineString([(p.x - off * math.sin(p.yaw), p.y + off * math.cos(p.yaw)) for p in plan.poses[a:b]])
-             for a, b in zip(plan.section_starts, ends) if b - a >= 2]
+    lines = [LineString(blade_points(plan, a, b - 1)) for a, b in zip(plan.section_starts, ends) if b - a >= 2]
     if not lines:
         return Polygon()
     return union(line.buffer(0.5 * mower_width, 4) for line in lines)

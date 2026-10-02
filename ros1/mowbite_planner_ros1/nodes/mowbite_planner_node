@@ -74,12 +74,13 @@ CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIM
            'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
-SIGNED = RAD + ('perimeter_offset', 'blade_offset')
+SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'perimeter_passes': (0, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
-          'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET)}
+          'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
+          'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET)}
 
 
 class XbotRpc:

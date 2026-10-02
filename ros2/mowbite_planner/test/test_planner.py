@@ -628,6 +628,29 @@ def test_robot_width_keeps_the_body_inside(off):
     assert left == pytest.approx(edges * (0.2 - off - 0.09), rel=0.35)
 
 
+@pytest.mark.parametrize('ahead', [0.17, -0.1])
+def test_blade_ahead_mows_the_lanes_where_they_are(ahead):
+    """The blade ahead of the centre (OpenMower's base_link): the lanes start and end that much earlier, the
+    blade covers them where they are."""
+    trees = [circle(4, 4, 0.4), circle(9, 10, 0.5)]
+    obstacles = [TREE, BED] + trees
+    kw = dict(FORWARD, overlap=1 - 0.14 / 0.18, perimeter_passes=4)
+    plan = plan_coverage(GARDEN, obstacles, PlannerConfig(**dict(kw, blade_ahead=ahead, bend_max_gap=3.0)))
+    cfg = plan.config
+    check_invariants(plan, cfg, obstacles)
+    assert coverage(plan, cfg) > 0.9999
+    # every straight lane's blade runs between the same ends as the centre of a plan without it, shifted
+    plain = plan_coverage(GARDEN, obstacles, PlannerConfig(**dict(kw, bend_max_gap=3.0)))
+    for s in plan.segments:
+        if s.kind == LANE and not s.maneuver:
+            p = plan.poses[s.start]
+            starts = [plain.poses[t.start] for t in plain.segments if t.kind == LANE and not t.maneuver]
+            assert any(math.hypot(p.x + ahead * math.cos(p.yaw) - q.x, p.y + ahead * math.sin(p.yaw) - q.y) < 1e-6
+                       for q in starts)
+    with pytest.raises(PlanningError, match='blade_ahead'):
+        PlannerConfig(blade_ahead=2.0).validate()
+
+
 def test_robot_width_narrower_than_the_loop_changes_nothing():
     cfg = PlannerConfig(**FORWARD)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg)

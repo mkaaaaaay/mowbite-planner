@@ -71,6 +71,9 @@ PARAMETERS = {
                     math.isfinite, 'must be a number'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
+    'blade_ahead': (0.0, "how far the blade's centre sits ahead of the mower's centre [m] (OpenMower's base_link "
+                    'between the drive wheels), negative: behind. The lanes start and end that much earlier',
+                    math.isfinite, 'must be a number'),
     'perimeter_order': ('first', 'perimeter loops first or last (last mows over the marks the turns leave)',
                         lambda v: v in PERIMETER_ORDERS, 'must be first or last'),
     'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces',
@@ -138,6 +141,7 @@ RANGES = {
     'turn_radius': (0.0, 5.0),
     'robot_width': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
+    'blade_ahead': (-1.0, 1.0),
 }
 FILL_TYPES = {PlanPath.Request.FILL_LINEAR: 'lanes', PlanPath.Request.FILL_CONCENTRIC: 'concentric'}
 # m, float32 has steps of 1 mm or less up to here

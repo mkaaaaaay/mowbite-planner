@@ -49,6 +49,9 @@
     # the loops then go round with the blade on their outer side
     robot_width: -1.0
     blade_offset: 0.0
+    # the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels),
+    # negative: behind it. The lanes start and end that much earlier
+    blade_ahead: 0.0
     # a row split by an obstacle with at most bend_max_gap between its pieces becomes one lane bending around it,
     # at most bend_max_offset off its line (0.0: split, a cell on either side)
     bend_max_gap: 0.0
