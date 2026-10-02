@@ -1,0 +1,99 @@
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.versions {
+  font-size: 13px;
+  color: var(--text-secondary);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.news {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--success) 50%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  font-size: 14px;
+}
+
+.news a {
+  color: var(--accent);
+}
+
+.command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.command code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--well);
+  font-size: 12px;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.button {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+}
+
+.button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.primary {
+  font-weight: 600;
+  border-color: color-mix(in srgb, var(--success) 70%, transparent);
+  background: color-mix(in srgb, var(--success) 35%, transparent);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--btn-3d);
+  color: var(--foreground);
+}
+
+/* the small note on the dashboard */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--success) 50%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  font-size: 14px;
+}
+
+.banner a {
+  flex: 1;
+  color: inherit;
+  text-decoration: none;
+}
+
+.banner button {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}

@@ -1,0 +1,33 @@
+.icon {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: var(--text-secondary);
+  font: italic 600 10px/13px Georgia, serif;
+  cursor: help;
+  opacity: 0.8;
+  margin-left: 5px;
+  vertical-align: middle;
+  flex: none;
+}
+
+.bubble {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--bubble);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.45;
+  white-space: normal;
+  text-align: left;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}

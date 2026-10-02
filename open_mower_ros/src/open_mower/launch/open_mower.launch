@@ -1,0 +1,40 @@
+<launch>
+    <include file="$(find open_mower)/launch/include/_comms.launch"/>
+    <include file="$(find open_mower)/launch/include/_move_base.launch"/>
+    <include file="$(find open_mower)/launch/include/_localization.launch"/>
+    <include file="$(find open_mower)/launch/include/_teleop.launch"/>
+    <include file="$(find open_mower)/launch/include/_record.launch">
+        <arg name="prefix" value="mow_area"/>
+    </include>
+
+
+    <node pkg="mower_map" type="mower_map_service" name="map_service" output="screen" respawn="true" respawn_delay="10"/>
+    <node pkg="mower_logic" type="mower_logic" name="mower_logic" output="screen" respawn="true" respawn_delay="10">
+    </node>
+    <!-- the coverage planner: slic3r, or the MowBite Planner with OM_PLANNER=mowbite (same service, mower_logic doesn't notice) -->
+    <node unless="$(eval optenv('OM_PLANNER', 'slic3r') == 'mowbite')" pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_coverage_planner" output="screen" respawn="true" respawn_delay="10"/>
+    <include if="$(eval optenv('OM_PLANNER', 'slic3r') == 'mowbite')" file="$(find mowbite_planner_ros1)/launch/mowbite_planner.launch"/>
+
+    <node pkg="twist_mux" type="twist_mux" name="twist_mux" output="screen" respawn="true" respawn_delay="10">
+        <remap from="cmd_vel_out" to="/ll/cmd_vel"/>
+
+        <rosparam file="$(find open_mower)/params/twist_mux_topics.yaml" command="load"/>
+    </node>
+
+    <node pkg="xbot_monitoring" type="xbot_monitoring" name="xbot_monitoring" output="screen" respawn="true"
+          respawn_delay="10">
+        <remap from="/xbot_monitoring/remote_cmd_vel" to="/joy_vel"/>
+    </node>
+
+    <node pkg="xbot_monitoring" type="heatmap_generator" name="heatmap_generator" output="screen" respawn="true"
+          respawn_delay="10" unless="$(eval optenv('OM_HEATMAP_SENSOR_IDS', 'UNSET') == 'UNSET')">
+    </node>
+
+    <node pkg="xbot_remote" type="xbot_remote" name="xbot_remote" output="screen" respawn="true" respawn_delay="10">
+        <remap from="/xbot_remote/cmd_vel" to="/joy_vel"/>
+    </node>
+
+    <node pkg="mower_logic" type="monitoring" name="monitoring" output="screen" respawn="true" respawn_delay="10"/>
+
+    <include file="$(find open_mower)/launch/include/_params.launch"/>
+</launch>

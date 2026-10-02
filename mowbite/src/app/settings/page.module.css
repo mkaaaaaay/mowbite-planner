@@ -1,0 +1,302 @@
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--font-geist-sans);
+  min-height: 100vh;
+}
+
+.main {
+  width: 100%;
+  max-width: 720px;
+  padding: 20px 16px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.main h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.dim {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cardHead h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.colors {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px 16px;
+  margin-top: 4px;
+}
+
+.colorRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.colorRow input[type='color'] {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pillButton {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+}
+
+.pillButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.linkButton {
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.icons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+}
+
+.icon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 6px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: var(--well);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.iconOn {
+  border-color: var(--accent);
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.preview {
+  width: 44px;
+  height: 44px;
+}
+
+.preview * {
+  vector-effect: non-scaling-stroke;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.size {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.size input {
+  flex: 1;
+  max-width: 260px;
+  accent-color: var(--accent);
+}
+
+.size span {
+  min-width: 40px;
+  font-variant-numeric: tabular-nums;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.field input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.error {
+  color: var(--error, #ff5252);
+  font-size: 12px;
+}
+
+.back {
+  align-self: flex-start;
+  padding: 6px 12px 6px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.back:hover {
+  color: var(--foreground);
+}
+
+.lawn {
+  width: 100%;
+  max-width: 330px;
+  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--well);
+}
+
+.lawn * {
+  vector-effect: non-scaling-stroke;
+}
+
+.lawnTrack {
+  fill: none;
+  stroke: var(--c-track);
+  stroke-width: 2;
+  opacity: 0.8;
+}
+
+.segment {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.segment span {
+  margin-right: 4px;
+}
+
+.segment button {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segment .segmentOn {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.mowerRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--well);
+  font-size: 14px;
+}
+
+.mowerAdd {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--card-border);
+}
+
+.mowerAdd .pillButton {
+  align-self: flex-start;
+}
+
+.subTitle {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ports {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.ports summary {
+  cursor: pointer;
+}
+
+.ports .field {
+  margin-top: 8px;
+  max-width: 200px;
+}

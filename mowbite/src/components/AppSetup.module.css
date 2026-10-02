@@ -1,0 +1,84 @@
+.screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--background);
+}
+
+.box {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  width: 100%;
+  max-width: 380px;
+  font-size: 14px;
+}
+
+.box > svg {
+  align-self: center;
+}
+
+.box h1 {
+  text-align: center;
+  font-size: 30px;
+  font-weight: 400;
+}
+
+.box p {
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.box label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.box input {
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 16px;
+}
+
+.connect {
+  padding: 13px;
+  border-radius: 12px;
+  border: 1px solid;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--btn-3d);
+  color: var(--foreground);
+}
+
+.connect:disabled {
+  opacity: 0.5;
+}
+
+.box .error {
+  color: var(--error);
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+}

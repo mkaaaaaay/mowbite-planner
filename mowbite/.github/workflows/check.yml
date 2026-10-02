@@ -1,0 +1,27 @@
+name: check
+
+# lint, types and the tests on every push
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      # the route types (LayoutProps etc.) are generated, a fresh checkout doesn't have them yet
+      - run: npx next typegen
+      - run: npx tsc --noEmit
+      - run: npm test

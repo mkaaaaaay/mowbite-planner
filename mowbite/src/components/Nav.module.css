@@ -1,0 +1,168 @@
+/* phones: tab bar at the bottom, in reach of the thumb. desktop: sidebar */
+.nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: space-around;
+  padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+  background: var(--nav-bg);
+  backdrop-filter: var(--card-blur, blur(18px));
+  border-top: 1px solid var(--card-border);
+}
+
+
+.nav a {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 0 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.nav svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav a > span {
+  position: relative;
+  padding-bottom: 4px;
+}
+
+/* the current page: glowing line under its name */
+.active {
+  color: var(--foreground) !important;
+}
+
+.active > span::after {
+  content: '';
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow:
+    0 0 6px var(--accent),
+    0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.active svg {
+  color: var(--accent);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 70%, transparent));
+}
+
+/* unsaved changes in the map editor */
+.nav a {
+  position: relative;
+}
+
+.unsaved {
+  position: absolute;
+  top: 3px;
+  left: calc(50% + 9px);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning);
+}
+
+.nav .logo,
+.mowerSwitch {
+  display: none;
+}
+
+.wordmark {
+  font-size: 18px;
+  letter-spacing: 0.2px;
+}
+
+@media (min-width: 900px) {
+  /* fixed, not sticky: body has overflow-x hidden, which breaks sticky */
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 4px;
+    width: 220px;
+    height: 100vh;
+    flex-shrink: 0;
+    padding: 24px 12px;
+    background: var(--card);
+    border-top: none;
+    border-right: 1px solid var(--card-border);
+  }
+
+  .nav a {
+    flex: none;
+    flex-direction: row;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+  }
+
+  .nav a:hover {
+    color: var(--foreground);
+  }
+
+  .nav svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .nav a > span {
+    padding-bottom: 3px;
+  }
+
+  .unsaved {
+    top: 50%;
+    left: auto;
+    right: 14px;
+    translate: 0 -50%;
+  }
+
+  .settings {
+    margin-top: auto;
+  }
+
+  .mowerSwitch {
+    display: block;
+    margin: -6px 6px 14px;
+  }
+
+  .nav .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 16px;
+    padding: 0 6px;
+    color: var(--foreground);
+    font-size: inherit;
+  }
+
+  .nav .logo svg {
+    width: 28px;
+    height: 28px;
+    fill: initial;
+    stroke: none;
+  }
+}

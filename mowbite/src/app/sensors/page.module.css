@@ -1,0 +1,208 @@
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--font-geist-sans);
+  min-height: 100vh;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-width);
+  flex-direction: column;
+  padding: 20px 16px 60px;
+  color: var(--foreground);
+}
+
+.main h1 {
+  margin: 0 0 12px;
+  font-size: 28px;
+}
+
+.dim {
+  color: var(--text-secondary);
+}
+
+.error {
+  color: var(--error);
+}
+
+.chip {
+  display: inline-block;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chip-success {
+  background: var(--success);
+  color: #0b2413;
+}
+
+.chip-warning {
+  background: var(--warning);
+  color: #241a03;
+}
+
+.chip-error {
+  background: var(--error);
+  color: #fff;
+}
+
+.chip-accent {
+  background: var(--accent);
+  color: #fff;
+}
+
+.text-success {
+  color: var(--success);
+}
+
+.text-warning {
+  color: var(--warning);
+}
+
+.text-error {
+  color: var(--error);
+}
+
+.batteryRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+
+
+.categoryTitle {
+  margin-top: 22px !important;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+
+
+.cardLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+
+.header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.header h1 {
+  margin: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.big {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.details {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.details span {
+  display: block;
+  font-size: 11px;
+}
+
+.footnote {
+  margin-top: 20px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* how full memory or a disk is */
+.bar {
+  width: 100%;
+  height: 6px;
+  margin: 4px 0;
+  border-radius: 3px;
+  background: rgba(128, 128, 128, 0.2);
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--success);
+}
+
+.barWarn {
+  background: var(--error);
+}
+
+/* mower or the computer in it */
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.tabs button {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tabs .tabOn {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--foreground);
+}

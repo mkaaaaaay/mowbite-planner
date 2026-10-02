@@ -1,0 +1,236 @@
+:root {
+  /* light: frosted cards on a soft green-blue wash, muted so it doesn't glare outside */
+  --background: #cdd6cf;
+  --foreground: #1c2420;
+  --card: rgba(255, 255, 255, 0.42);
+  --card-border: rgba(255, 255, 255, 0.6);
+  --card-blur: blur(5px) saturate(130%);
+  --card-shadow: 0 1px 2px rgba(20, 40, 30, 0.06), 0 6px 20px rgba(20, 40, 30, 0.07);
+  /* buttons stand out a little: a light edge on top, a soft shadow below, a bit more when hovered */
+  --btn-3d: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 1px 1px rgba(20, 40, 30, 0.1), 0 2px 6px rgba(20, 40, 30, 0.08);
+  --btn-3d-hover: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 2px 2px rgba(20, 40, 30, 0.1), 0 6px 14px rgba(20, 40, 30, 0.12);
+  --text-secondary: #4f5b54;
+  --accent: #2f6fbd;
+  --warning: #a8780f;
+  --error: #c93a3e;
+  --success: #2e8a47;
+  --soft-good: #2a6d34;
+  --soft-warn: #7d5600;
+  --soft-bad: #a52a2a;
+  --soft-muted: #4c5f68;
+  --bubble: #e7ece7;
+  --well: rgba(20, 40, 30, 0.06);
+  --nav-bg: rgba(226, 233, 227, 0.78);
+  --content-max-width: 500px;
+}
+
+@media (min-width: 900px) {
+  :root {
+    --content-max-width: 1400px;
+  }
+}
+
+/* dark: by the device's setting, or picked in the app (data-theme on <html>, see lib/theme). frost builds on it */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --background: #101114;
+    --foreground: #f1f1f1;
+    --card: rgba(255, 255, 255, 0.05);
+    --card-border: rgba(255, 255, 255, 0.09);
+    --card-blur: blur(3px) saturate(140%);
+    --card-shadow: none;
+    --btn-3d: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 1px 1px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.25);
+    --btn-3d-hover: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 2px rgba(0, 0, 0, 0.35), 0 6px 14px rgba(0, 0, 0, 0.35);
+    --text-secondary: #9a9ba0;
+    --accent: #5b9df0;
+    --warning: #d4ac4a;
+    --error: #ff6669;
+    --success: #4cbf72;
+    --soft-good: #a5d6a7;
+    --soft-warn: #ffcc80;
+    --soft-bad: #ef9a9a;
+    --soft-muted: #b0bec5;
+    --bubble: #1c1c1f;
+    --well: rgba(0, 0, 0, 0.25);
+    --nav-bg: rgba(22, 23, 27, 0.88);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'],
+:root[data-theme='frost'] {
+  --background: #101114;
+  --foreground: #f1f1f1;
+  --card: rgba(255, 255, 255, 0.05);
+  --card-border: rgba(255, 255, 255, 0.09);
+  --card-blur: blur(3px) saturate(140%);
+  --card-shadow: none;
+  --btn-3d: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 1px 1px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.25);
+  --btn-3d-hover: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 2px rgba(0, 0, 0, 0.35), 0 6px 14px rgba(0, 0, 0, 0.35);
+  --text-secondary: #9a9ba0;
+  --accent: #5b9df0;
+  --warning: #d4ac4a;
+  --error: #ff6669;
+  --success: #4cbf72;
+  --soft-good: #a5d6a7;
+  --soft-warn: #ffcc80;
+  --soft-bad: #ef9a9a;
+  --soft-muted: #b0bec5;
+  --bubble: #1c1c1f;
+  --well: rgba(0, 0, 0, 0.25);
+  --nav-bg: rgba(22, 23, 27, 0.88);
+  color-scheme: dark;
+}
+
+html {
+  height: 100%;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+/* no blue box flashing around whatever was tapped (on the map it's the whole bounding box of an area) */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-height: 100%;
+  /* an app, not a document: no selecting labels by accident. the activity messages allow it again */
+  user-select: none;
+  -webkit-user-select: none;
+  display: flex;
+  flex-direction: column;
+  color: var(--foreground);
+  background: var(--background);
+  /* light: soft patches of colour behind the frosted cards, dark has its own below */
+  background-image:
+    radial-gradient(circle at 12% 6%, rgba(120, 168, 222, 0.38), transparent 45%),
+    radial-gradient(circle at 90% 18%, rgba(150, 200, 160, 0.4), transparent 50%),
+    radial-gradient(circle at 50% 100%, rgba(90, 160, 110, 0.32), transparent 55%);
+  background-attachment: fixed;
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) body {
+    background-image:
+      radial-gradient(circle at 15% 10%, rgba(91, 157, 240, 0.1), transparent 45%),
+      radial-gradient(circle at 85% 0%, rgba(168, 85, 247, 0.08), transparent 50%),
+      radial-gradient(circle at 50% 100%, rgba(76, 191, 114, 0.06), transparent 55%),
+      repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.012) 0 2px, transparent 2px 4px);
+    background-attachment: fixed;
+    background-color: var(--background);
+  }
+}
+
+:root[data-theme='dark'] body {
+  background-image:
+    radial-gradient(circle at 15% 10%, rgba(91, 157, 240, 0.1), transparent 45%),
+    radial-gradient(circle at 85% 0%, rgba(168, 85, 247, 0.08), transparent 50%),
+    radial-gradient(circle at 50% 100%, rgba(76, 191, 114, 0.06), transparent 55%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.012) 0 2px, transparent 2px 4px);
+  background-attachment: fixed;
+  background-color: var(--background);
+}
+
+/* frost: dark, a bit lighter, with milky glass cards over stronger patches of colour */
+:root[data-theme='frost'] {
+  --background: #1a1c22;
+  --card: rgba(235, 240, 255, 0.12);
+  --card-border: rgba(255, 255, 255, 0.2);
+  --card-blur: blur(18px) saturate(160%);
+  --card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 6px 24px rgba(0, 0, 0, 0.28);
+  --text-secondary: #a9abb2;
+  --bubble: #2a2d34;
+  --well: rgba(0, 0, 0, 0.16);
+  --nav-bg: rgba(52, 55, 64, 0.6);
+}
+
+:root[data-theme='frost'] body {
+  background-image:
+    radial-gradient(circle at 15% 10%, rgba(91, 157, 240, 0.26), transparent 45%),
+    radial-gradient(circle at 85% 0%, rgba(168, 85, 247, 0.2), transparent 50%),
+    radial-gradient(circle at 70% 70%, rgba(91, 157, 240, 0.1), transparent 45%),
+    radial-gradient(circle at 50% 100%, rgba(76, 191, 114, 0.18), transparent 55%);
+  background-attachment: fixed;
+  background-color: var(--background);
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+
+/* map colors, overridden from the settings page */
+:root {
+  --c-mower: #ff1fa3;
+  --c-dock: #2196f3;
+  --c-track: #ff1fa3;
+  --c-transit: #ff1fa3;
+  --c-mow: #4caf50;
+  --c-nav: #29b6f6;
+  --c-obstacle: #ef5350;
+  --c-draft: #888888;
+  --c-selected: #ff1fa3;
+  --c-vertex: #2196f3;
+  --c-stripes: #ff1fa3;
+}
+
+/* buttons give way under the finger like a real one */
+button,
+nav a,
+[class*='pillButton'],
+[class*='linkButton'] {
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 0.08s ease-out,
+    filter 0.08s ease-out,
+    box-shadow 0.08s ease-out;
+}
+
+button:active:not(:disabled),
+nav a:active,
+[class*='pillButton']:active,
+[class*='linkButton']:active {
+  transform: translateY(1px) scale(0.96);
+  filter: brightness(0.85);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+/* buttons lift a little under the mouse and go down when pressed */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  button:not(:disabled) {
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  button:not(:disabled):hover {
+    --btn-3d: var(--btn-3d-hover);
+    transform: translateY(-1px);
+  }
+
+  button:not(:disabled):active {
+    transform: translateY(1px);
+    transition-duration: 0.05s;
+  }
+}

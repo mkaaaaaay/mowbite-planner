@@ -1,0 +1,52 @@
+.pad {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--card-border);
+  background: radial-gradient(circle, rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.04) 70%);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+
+.active {
+  border-color: var(--accent);
+  cursor: grabbing;
+}
+
+.cross::before,
+.cross::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: var(--card-border);
+  transform: translate(-50%, -50%);
+}
+
+.cross::before {
+  width: 60%;
+  height: 1px;
+}
+
+.cross::after {
+  width: 1px;
+  height: 60%;
+}
+
+.knob {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.pad:not(.active) .knob {
+  transition: transform 0.15s;
+}

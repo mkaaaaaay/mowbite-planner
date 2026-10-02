@@ -1,0 +1,79 @@
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+  min-width: 0;
+}
+
+.title {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.days,
+.times {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  user-select: none;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+
+.days::-webkit-scrollbar,
+.times::-webkit-scrollbar {
+  display: none;
+}
+
+.times {
+  flex-wrap: wrap;
+}
+
+.days button,
+.times button {
+  flex: none;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.days .on,
+.times .on {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--btn-3d);
+  color: var(--foreground);
+}
+
+.days .half {
+  border-color: var(--accent);
+}
+
+.info {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.clear {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}

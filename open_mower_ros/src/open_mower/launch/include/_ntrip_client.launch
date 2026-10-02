@@ -1,0 +1,8 @@
+<?xml version="1.1"?>
+<launch>
+    <node name="ntrip_client" pkg="ros_ntrip_client" type="ntrip_client_node" output="screen"
+          respawn="true" respawn_delay="10">
+        <remap from="nmea" to="/ll/position/gps/nmea"/>
+        <remap from="rtcm" to="/ll/position/gps/rtcm"/>
+    </node>
+</launch>

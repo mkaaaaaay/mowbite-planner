@@ -1,0 +1,115 @@
+.box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  font-size: 13px;
+}
+
+.box summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.count {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.18);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.row input {
+  flex: 1 1 140px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.button {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+}
+
+.button:disabled {
+  opacity: 0.5;
+}
+
+.dim {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.error {
+  margin-top: 8px;
+  color: var(--error);
+}
+
+.list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.list li > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.list li .dim {
+  margin: 0;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.danger {
+  color: var(--error);
+}

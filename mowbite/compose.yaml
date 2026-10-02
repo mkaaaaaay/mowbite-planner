@@ -1,0 +1,32 @@
+services:
+  mowbite:
+    # prebuilt for amd64 and arm64. `docker compose up -d --build` builds it yourself instead
+    image: ghcr.io/mkaaaaaay/mowbite:latest
+    build: .
+    container_name: mowbite
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    volumes:
+      # settings shared by all devices (map colors etc.)
+      - settings:/data
+    # shows up on the openmower start page (xtech/web-openmower-entrypoint)
+    labels:
+      openmower.ui: "true"
+      openmower.ui.name: "MowBite"
+      openmower.ui.port: "8082"
+      openmower.ui.icon: "Grass"
+      openmower.ui.description: "Map editor, area recording, tracks, activity and sensors"
+    # all optional. without a url the app connects to ws://<host it was opened from>:9001,
+    # which is right when it runs on the mower. the sensor recorder finds the broker on the
+    # mower by itself, the MOWER_MQTT_HOST lines are only for a broker somewhere else
+    # environment:
+    #   MOWER_MQTT_WS_URL: ws://openmower:9001
+    #   MOWER_MQTT_PREFIX: ""
+    #   MOWER_MQTT_HOST: openmower
+    #   MOWER_MQTT_PORT: "1883"
+    #   MOWER_MQTT_USER: ""
+    #   MOWER_MQTT_PASSWORD: ""
+
+volumes:
+  settings:

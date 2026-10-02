@@ -1,0 +1,47 @@
+/* the lines next to a problem on the activity page */
+.log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* takes its own row in the row of links it sits in */
+  flex-basis: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--well);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--foreground);
+  user-select: text;
+  -webkit-user-select: text;
+  overflow-x: auto;
+}
+
+.log span {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.WARN {
+  color: var(--soft-warn);
+}
+
+.ERROR,
+.FATAL {
+  color: var(--soft-bad);
+}
+
+.at {
+  font-weight: 700;
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}

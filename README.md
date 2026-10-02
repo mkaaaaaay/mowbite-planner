@@ -11,6 +11,14 @@ spot, as a `nav_msgs/Path`. Besides its own service it answers OpenMower's `Plan
   goes into your own build of OpenMower's image and runs with `OM_PLANNER=mowbite`, MowBite's "show mowing plan" then
   shows its plans.
 
+Copies kept alongside, not built from here:
+
+- [`open_mower_ros/`](open_mower_ros/): OpenMower's ROS workspace (main plus our fixes, `OM_PLANNER=mowbite` in the
+  launch file, `mower_map` keeping unknown area properties). The planner goes into `src/lib/mowbite` (`ros1/` and
+  `ros2/` of this repository), the submodules (`xbot_framework`, `xbot_driver_gps`, `ros_ntrip_client`,
+  `slic3r_coverage_planner`) come from upstream.
+- [`mowbite/`](mowbite/): the MowBite app as of its dev branch.
+
 The tests need only shapely and pytest:
 
 ```bash

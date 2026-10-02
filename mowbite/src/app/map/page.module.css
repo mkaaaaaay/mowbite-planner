@@ -1,0 +1,544 @@
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--font-geist-sans);
+  min-height: 100vh;
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-width);
+  flex-direction: column;
+  padding: 24px 16px 60px;
+  gap: 4px;
+}
+
+.main h1 {
+  font-size: 26px;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
+.dim {
+  color: var(--text-secondary);
+}
+
+.dim a {
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.error {
+  color: var(--error);
+}
+
+.inlineRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.pillButton {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+  backdrop-filter: var(--card-blur, none);
+}
+
+/* easy to miss otherwise. green outline, filled once there's something to save */
+.saveButton {
+  border-color: var(--success);
+  color: var(--success);
+  font-weight: 600;
+}
+
+.saveButton.unsaved {
+  border-color: color-mix(in srgb, var(--success) 70%, transparent);
+  background: color-mix(in srgb, var(--success) 35%, transparent);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--btn-3d);
+  color: var(--foreground);
+}
+
+/* the editor's buttons: two even columns, a small heading over each pair */
+.toolbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.toolLabel {
+  grid-column: 1 / -1;
+  margin: 4px 0 -2px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.toolLabel {
+  display: flex;
+  align-items: center;
+}
+
+.toolLabel:first-child {
+  margin-top: 0;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 10px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.toolWide {
+  grid-column: 1 / -1;
+}
+
+.pillButton:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.areaEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+}
+
+.areaHead {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.areaMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.areaEditor .toolbar {
+  margin-top: 0;
+}
+
+.cardTitle {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.nameInput,
+.typeSelect {
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.nameInput {
+  min-width: 0;
+}
+
+.typeSelect option {
+  background: var(--bubble);
+}
+
+.mowSettings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+}
+
+.mowSettings label:not(.toggle) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mowSettings input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.mowSettings input.invalid {
+  border-color: var(--error);
+}
+
+.fieldError {
+  color: var(--error);
+  font-size: 11px;
+}
+
+/* what lib/mapCheck found, the area names select the area */
+.problems {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.problems a {
+  cursor: pointer;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.mowSettings .toggle,
+.mowSettings p,
+.angleRow {
+  grid-column: 1 / -1;
+}
+
+.angleRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.angleRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+.compass {
+  flex: none;
+  width: 52px;
+  height: 52px;
+}
+
+.compass circle {
+  fill: none;
+  stroke: var(--card-border);
+}
+
+.compass line {
+  stroke: var(--c-stripes);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.compass polygon {
+  fill: var(--c-stripes);
+}
+
+.compass text {
+  fill: var(--text-secondary);
+  font-size: 8.5px;
+  font-weight: 600;
+  text-anchor: middle;
+  dominant-baseline: middle;
+}
+
+.warning {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 183, 77, 0.5);
+  background: rgba(255, 183, 77, 0.08);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.warning code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--well);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* side by side on desktop, the map fits the window height so nothing needs scrolling */
+@media (min-width: 900px) {
+  .main {
+    max-width: none;
+  }
+
+  .editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 20px;
+    align-items: start;
+  }
+
+  .mapCol > div {
+    width: min(100%, calc(100vh - 120px));
+    margin: 0 auto;
+  }
+
+  .panel {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+  }
+
+  .panel .areaEditor,
+  .panel .inlineRow:first-child,
+  .panel .toolbar:first-child {
+    margin-top: 0;
+  }
+}
+
+.splitBox {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.pieceA,
+.pieceB,
+.pieceC {
+  font-weight: 600;
+}
+
+.pieceA {
+  color: var(--soft-warn);
+}
+
+.pieceB {
+  color: #4dd0e1;
+}
+
+.pieceC {
+  color: #ce93d8;
+}
+
+.danger {
+  color: var(--error, #ff5252);
+}
+
+.orderBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+}
+
+.orderTitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.orderRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.orderRow a {
+  flex: 1;
+  cursor: pointer;
+}
+
+.orderRow .pillButton {
+  padding: 4px 10px;
+}
+
+.orderNum {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  background: #4caf50;
+  color: #0b0b0b;
+}
+
+.warning a {
+  cursor: pointer;
+  text-decoration: underline;
+  color: var(--text-secondary);
+}
+
+
+
+.disabledLink {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.spot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--error) 50%, transparent);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--soft-bad);
+  font-size: 13px;
+}
+
+.spot button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.previewBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-size: 13px;
+}
+
+.previewBar button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tool svg {
+  flex-shrink: 0;
+}
+
+.mapCol {
+  position: relative;
+}
+
+/* angle slider on top of the map, phones only */
+.angleOnMap {
+  display: none;
+}
+
+/* one degree less or more, next to the angle slider */
+.angleStep {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+}
+
+@media (max-width: 899px) {
+  .angleOnMap {
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--card-border);
+    background: var(--nav-bg);
+    backdrop-filter: var(--card-blur, blur(18px));
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .angleOnMap input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .angleOnMap .compass {
+    width: 40px;
+    height: 40px;
+  }
+
+  .angleOnMap strong {
+    min-width: 40px;
+    text-align: right;
+    font-size: 14px;
+    color: var(--foreground);
+  }
+}

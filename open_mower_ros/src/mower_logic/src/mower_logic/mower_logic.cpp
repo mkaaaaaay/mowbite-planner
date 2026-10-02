@@ -1,0 +1,1571 @@
+// Created by Clemens Elflein on 2/21/22.
+// Copyright (c) 2022 Clemens Elflein and OpenMower contributors. All rights reserved.
+//
+// This file is part of OpenMower.
+//
+// OpenMower is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+// License as published by the Free Software Foundation, version 3 of the License.
+//
+// OpenMower is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+// warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along with OpenMower. If not, see
+// <https://www.gnu.org/licenses/>.
+//
+
+// #define VERBOSE_DEBUG   1
+
+#include <actionlib/client/simple_action_client.h>
+#include <dynamic_reconfigure/server.h>
+#include <mower_logic/PowerConfig.h>
+#include <mower_msgs/Bms.h>
+#include <mower_msgs/ESCStatus.h>
+#include <mower_msgs/Emergency.h>
+#include <mower_msgs/Power.h>
+#include <tf2/LinearMath/Transform.h>
+
+#include <EmergencyServiceInterfaceBase.hpp>
+#include <algorithm>
+#include <atomic>
+#include <cfloat>
+#include <cmath>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <map>
+#include <type_traits>
+#include <ios>
+#include <limits>
+#include <mutex>
+#include <random>
+#include <sstream>
+
+#include "Scheduler.h"
+#include "StateSubscriber.h"
+#include "behaviors/AreaRecordingBehavior.h"
+#include "behaviors/Behavior.h"
+#include "behaviors/IdleBehavior.h"
+#include "behaviors/PerimeterDocking.h"
+#include "ftc_local_planner/PlannerGetProgress.h"
+#include "mbf_msgs/ExePathAction.h"
+#include "mbf_msgs/MoveBaseAction.h"
+#include "mbf_msgs/RecoveryAction.h"
+#include "mower_logic/MowerLogicConfig.h"
+#include "mower_logic/utils.h"
+#include "mower_map/ClearMapSrv.h"
+#include "mower_map/ClearNavPointSrv.h"
+#include "mower_map/GetDockingPointSrv.h"
+#include "mower_map/GetMowingAreaSrv.h"
+#include "mower_map/SetNavPointSrv.h"
+#include "mower_msgs/EmergencyStopSrv.h"
+#include "mower_msgs/HighLevelControlSrv.h"
+#include "mower_msgs/HighLevelStatus.h"
+#include "mower_msgs/MowerControlSrv.h"
+#include "mower_msgs/Status.h"
+#include "ros/callback_queue.h"
+#include "ros/ros.h"
+#include "slic3r_coverage_planner/PlanPath.h"
+#include "std_msgs/Empty.h"
+#include "std_msgs/String.h"
+#include "xbot_mqtt/provider.h"
+#include "xbot_mqtt/publish.h"
+#include "xbot_msgs/AbsolutePose.h"
+#include "xbot_msgs/RegisterActionsSrv.h"
+#include "xbot_positioning/GPSControlSrv.h"
+#include "xbot_positioning/SetPoseSrv.h"
+
+std::string generateNanoId(size_t length = 32) {
+  static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  thread_local std::mt19937 rng{std::random_device{}()};
+  thread_local std::uniform_int_distribution<> dist(0, sizeof(alphabet) - 2);
+  std::string id(length, '\0');
+  std::generate_n(id.begin(), length, [&]() { return alphabet[dist(rng)]; });
+  return id;
+}
+
+std::string current_job_id;
+std::string current_session_id;
+bool current_job_finished = false;
+
+ros::ServiceClient pathClient, mapClient, dockingPointClient, gpsClient, mowClient, emergencyClient, pathProgressClient,
+    setNavPointClient, clearNavPointClient, clearMapClient, positioningClient, actionRegistrationClient;
+
+ros::NodeHandle* n;
+ros::NodeHandle* paramNh;
+
+dynamic_reconfigure::Server<mower_logic::MowerLogicConfig>* reconfigServer;
+actionlib::SimpleActionClient<mbf_msgs::MoveBaseAction>* mbfClient;
+actionlib::SimpleActionClient<mbf_msgs::ExePathAction>* mbfClientExePath;
+actionlib::SimpleActionClient<mbf_msgs::RecoveryAction>* mbfClientRecovery;
+
+ros::Publisher cmd_vel_pub, high_level_state_publisher, mqtt_publish_pub;
+mower_logic::MowerLogicConfig last_config;
+ll::PowerConfig last_power_config;
+
+StateSubscriber<mower_msgs::Emergency> emergency_state_subscriber{"/ll/emergency"};
+StateSubscriber<mower_msgs::Status> status_state_subscriber{"/ll/mower_status"};
+StateSubscriber<mower_msgs::Power> power_state_subscriber{"/ll/power"};
+StateSubscriber<mower_msgs::Bms> bms_state_subscriber{"/ll/bms"};
+StateSubscriber<mower_msgs::ESCStatus> left_esc_status_state_subscriber{"/ll/diff_drive/left_esc_status"};
+StateSubscriber<mower_msgs::ESCStatus> right_esc_status_state_subscriber{"/ll/diff_drive/right_esc_status"};
+StateSubscriber<xbot_msgs::AbsolutePose> pose_state_subscriber{"/xbot_positioning/xb_pose"};
+ros::Time joy_vel_time(0.0);
+
+ros::Time last_good_gps(0.0);
+
+std::recursive_mutex mower_logic_mutex;
+
+mower_msgs::HighLevelStatus high_level_status;
+
+std::atomic<bool> mowerAllowed;
+
+Behavior* currentBehavior = &IdleBehavior::INSTANCE;
+
+std::vector<xbot_msgs::ActionInfo> rootActions;
+ros::Time last_v_battery_check;
+double max_v_battery_seen = 0.0;
+
+ros::Time last_rain_check;
+bool rain_detected = true;
+ros::Time rain_resume;
+
+/**
+ * Some thread safe methods to get a copy of the logic state
+ */
+ros::Time getLastGoodGPS() {
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  return last_good_gps;
+}
+
+void setLastGoodGPS(ros::Time time) {
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  last_good_gps = time;
+}
+
+mower_logic::MowerLogicConfig getConfig() {
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  return last_config;
+}
+
+ll::PowerConfig getPowerConfig() {
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  return last_power_config;
+}
+
+void setConfig(mower_logic::MowerLogicConfig c) {
+  {
+    std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+    last_config = c;
+  }
+  // outside of mower_logic_mutex: reconfigureCB takes it while dynamic_reconfigure holds its own lock, holding
+  // both here the other way round could deadlock
+  reconfigServer->updateConfig(c);
+}
+
+mower_msgs::Status getStatus() {
+  return status_state_subscriber.getMessage();
+}
+
+mower_msgs::Power getPower() {
+  return power_state_subscriber.getMessage();
+}
+
+mower_msgs::Bms getBms() {
+  return bms_state_subscriber.getMessage();
+}
+
+xbot_msgs::AbsolutePose getPose() {
+  return pose_state_subscriber.getMessage();
+}
+
+void setEmergencyMode(uint16_t reason);
+
+void registerActions(std::string prefix, const std::vector<xbot_msgs::ActionInfo>& actions) {
+  xbot_msgs::RegisterActionsSrv srv;
+  srv.request.node_prefix = prefix;
+  srv.request.actions = actions;
+
+  ros::Rate retry_delay(1);
+  for (int i = 0; i < 10 && ros::ok(); i++) {
+    if (actionRegistrationClient.call(srv)) {
+      ROS_INFO_STREAM("successfully registered actions for " << prefix);
+      break;
+    }
+    ROS_ERROR_STREAM("Error registering actions for " << prefix << ". Retrying.");
+    retry_delay.sleep();
+  }
+}
+
+void setRobotPose(geometry_msgs::Pose& pose) {
+  // set the robot pose internally as well. othwerise we need to wait for xbot_positioning to send a new one once it has
+  // updated the internal pose.
+  auto last_pose = pose_state_subscriber.getMessage();
+  last_pose.pose.pose = pose;
+  pose_state_subscriber.setMessage(last_pose);
+
+  xbot_positioning::SetPoseSrv pose_srv;
+  pose_srv.request.robot_pose = pose;
+
+  ros::Rate retry_delay(1);
+  bool success = false;
+  for (int i = 0; i < 10; i++) {
+    if (positioningClient.call(pose_srv)) {
+      //            ROS_INFO_STREAM("successfully set pose to " << pose);
+      success = true;
+      break;
+    }
+    ROS_ERROR_STREAM("Error setting robot pose to " << pose << ". Retrying.");
+    retry_delay.sleep();
+  }
+
+  if (!success) {
+    ROS_ERROR_STREAM("Error setting robot pose. Going to emergency. THIS SHOULD NEVER HAPPEN");
+    setEmergencyMode(EmergencyReason::HIGH_LEVEL);
+  }
+}
+
+// Abort the currently running behaviour
+void abortExecution() {
+  if (currentBehavior != nullptr) {
+    currentBehavior->abort();
+  }
+}
+
+bool setGPS(bool enabled) {
+  xbot_positioning::GPSControlSrv gps_srv;
+  gps_srv.request.gps_enabled = enabled;
+
+  ros::Rate retry_delay(1);
+  bool success = false;
+  for (int i = 0; i < 10; i++) {
+    if (gpsClient.call(gps_srv)) {
+      ROS_INFO_STREAM("successfully set GPS to " << enabled);
+      success = true;
+      break;
+    }
+    ROS_ERROR_STREAM("Error setting GPS to " << enabled << ". Retrying.");
+    retry_delay.sleep();
+  }
+
+  if (!success) {
+    ROS_ERROR_STREAM("Error setting GPS. Going to emergency. THIS SHOULD NEVER HAPPEN");
+    setEmergencyMode(EmergencyReason::HIGH_LEVEL);
+  }
+
+  return success;
+}
+
+// Publishes a mower event. x/y from current pose are always included.
+// "id", "t", and "type" are added by publishEvent().
+void publishMowerEvent(const std::string& type, json details) {
+  const auto& pose = pose_state_subscriber.getMessage();
+  details["x"] = pose.pose.pose.position.x;
+  details["y"] = pose.pose.pose.position.y;
+  if (!current_job_id.empty()) details["job_id"] = current_job_id;
+  if (!current_session_id.empty()) details["session_id"] = current_session_id;
+  xbot_mqtt::publishEvent(mqtt_publish_pub, type, details);
+}
+
+/// @brief If the BLADE Motor is not in the requested status (enabled),we call the
+///        the mower_service/mow_enabled service to enable/disable. TODO: get feedback about spinup and delay if needed
+/// @param enabled
+/// @return
+bool setMowerEnabled(bool enabled) {
+  const auto last_status = status_state_subscriber.getMessage();
+
+  // For events, publish the intended state, ignoring the config.
+  if (last_status.mow_enabled != enabled) {
+    publishMowerEvent("BLADES", json{{"enabled", enabled}});
+  }
+
+  const auto last_config = getConfig();
+
+  if (!last_config.enable_mower && enabled) {
+    // ROS_INFO_STREAM("om_mower_logic: setMowerEnabled() - Mower should be enabled but is hard-disabled in the
+    // config.");
+    enabled = false;
+  }
+
+  // status change ?
+  if (last_status.mow_enabled != enabled) {
+    ros::Time started = ros::Time::now();
+    mower_msgs::MowerControlSrv mow_srv;
+    mow_srv.request.mow_enabled = enabled;
+    // Opt-in direction alternation; forward (1) by default.
+    mow_srv.request.mow_direction = last_config.randomize_mow_motor_direction ? (started.sec & 0x1) : 1;
+    ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled("
+                    << enabled << ", " << static_cast<unsigned>(mow_srv.request.mow_direction) << ") call");
+
+    ros::Rate retry_delay(1);
+    bool success = false;
+    for (int i = 0; i < 10; i++) {
+      if (mowClient.call(mow_srv)) {
+        ROS_INFO_STREAM("successfully set mower enabled to "
+                        << enabled << " (direction " << static_cast<unsigned>(mow_srv.request.mow_direction) << ")");
+        success = true;
+        break;
+      }
+      ROS_ERROR_STREAM("Error setting mower enabled to " << enabled << ". Retrying.");
+      retry_delay.sleep();
+    }
+
+    if (!success) {
+      ROS_ERROR_STREAM("Error setting mower enabled. THIS SHOULD NEVER HAPPEN");
+    }
+
+    ROS_WARN_STREAM("#### om_mower_logic: setMowerEnabled("
+                    << enabled << ", " << static_cast<unsigned>(mow_srv.request.mow_direction)
+                    << ") call completed within " << (ros::Time::now() - started).toSec() << "s");
+  }
+
+  // TODO: Spinup feedback & delay
+  /*    if (enabled) {
+          ROS_INFO_STREAM("enabled mower, waiting for it to speed up");
+
+          // TODO timeout and error
+          ros::Time started = ros::Time::now();
+          while (true) {
+              if (status_time > started) {
+                  // we have a current status message, wait for mower to speed up
+                  bool mower_running = (last_status.speed_mow_status & 0b10);
+                  if (mower_running) {
+                      ROS_INFO_STREAM("mower motor started");
+                      return true;
+                  }
+              }
+              if (ros::Time::now() - started > ros::Duration(25.0)) {
+                  // mower was not able to start
+                  ROS_ERROR_STREAM("error starting mower motor...");
+                  setMowerEnabled(false);
+                  return false;
+              }
+          }
+      }*/
+
+  return true;
+}
+
+/// @brief Halt all bot movement
+void stopMoving() {
+  // ROS_INFO_STREAM("om_mower_logic: stopMoving() - stopping bot movement");
+  geometry_msgs::Twist stop;
+  stop.angular.z = 0;
+  stop.linear.x = 0;
+  cmd_vel_pub.publish(stop);
+}
+
+/// @brief If the BLADE motor is currently enabled, we stop it
+void stopBlade() {
+  // ROS_INFO_STREAM("om_mower_logic: stopBlade() - stopping blade motor if running");
+  setMowerEnabled(false);
+  mowerAllowed = false;
+  // ROS_INFO_STREAM("om_mower_logic: stopBlade() - finished");
+}
+
+/// @brief Stop BLADE motor and any movement
+/// @param reason Emergency reason bitfield (0 = clear, != 0 = emergency with given reasons)
+void setEmergencyMode(uint16_t reason) {
+  stopBlade();
+  stopMoving();
+  mower_msgs::EmergencyStopSrv emergencyStop;
+  emergencyStop.request.reason = reason;
+
+  static uint16_t last_reason = 0;
+  if (reason != last_reason) {
+    publishMowerEvent("EMERGENCY", json{{"emergency", reason != 0}, {"reason", reason}});
+    last_reason = reason;
+  }
+
+  ros::Rate retry_delay(1);
+  bool success = false;
+  for (int i = 0; i < 10; i++) {
+    if (emergencyClient.call(emergencyStop)) {
+      ROS_INFO_STREAM("successfully set emergency reason to " << reason);
+      success = true;
+      break;
+    }
+    ROS_ERROR_STREAM("Error setting emergency reason to " << reason << ". Retrying.");
+    retry_delay.sleep();
+  }
+
+  if (!success) {
+    ROS_ERROR_STREAM("Error setting emergency. THIS SHOULD NEVER HAPPEN");
+  }
+}
+
+void updateUI(const ros::TimerEvent& timer_event) {
+  if (currentBehavior == &MowingBehavior::INSTANCE) {
+    try {
+      const auto& mb = MowingBehavior::INSTANCE;
+      int new_area = mb.get_current_area();
+      if (new_area != high_level_status.current_area && new_area != -1) {
+        publishMowerEvent("AREA",
+                          json{{"area_id", mb.get_current_area_id()}, {"area_name", mb.get_current_area_name()}});
+      }
+      high_level_status.current_area = new_area;
+    } catch (const std::runtime_error& re) {
+      // specific handling for runtime_error
+      ROS_ERROR_STREAM("Error getting current area: " << re.what());
+    }
+    try {
+      high_level_status.current_path = MowingBehavior::INSTANCE.get_current_path();
+    } catch (const std::runtime_error& re) {
+      ROS_ERROR_STREAM("Error getting current path: " << re.what());
+    }
+    try {
+      high_level_status.current_path_index = MowingBehavior::INSTANCE.get_current_path_index();
+    } catch (const std::runtime_error& re) {
+      ROS_ERROR_STREAM("Error getting current path index: " << re.what());
+    }
+  } else {
+    high_level_status.current_area = -1;
+    high_level_status.current_path = -1;
+    high_level_status.current_path_index = -1;
+  }
+
+  if (currentBehavior) {
+    high_level_status.state_name = currentBehavior->state_name();
+    high_level_status.state = (currentBehavior->get_state() & 0b11111) |
+                              (currentBehavior->get_sub_state() << mower_msgs::HighLevelStatus::SUBSTATE_SHIFT);
+    high_level_status.sub_state_name = currentBehavior->sub_state_name();
+  } else {
+    high_level_status.state_name = "NULL";
+    high_level_status.sub_state_name = "";
+    high_level_status.state = mower_msgs::HighLevelStatus::HIGH_LEVEL_STATE_NULL;
+  }
+  high_level_status.job_id = current_job_id;
+  high_level_status.session_id = current_session_id;
+  high_level_state_publisher.publish(high_level_status);
+}
+
+bool isGpsGood() {
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  // GPS is good if orientation is valid, we have low accuracy and we have a recent GPS update.
+  // TODO: think about the "recent gps flag" since it only looks at the time. E.g. if we were standing still this would
+  // still pause even if no GPS updates are needed during standstill.
+  const auto last_pose = pose_state_subscriber.getMessage();
+  return last_pose.orientation_valid && last_pose.position_accuracy < last_config.max_position_accuracy &&
+         (last_pose.flags & xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE);
+}
+
+// Mowing areas with mowable: false, from the map, each with the mowable ones that lie within it: those are mowed as
+// usual, the inner area counts. The blade stays off while the mower drives across the rest, e.g. on the way from one
+// lane to the next. Set from the map callback, read by checkSafety and the spinup check
+typedef std::vector<std::pair<double, double>> Outline;
+struct NoMowArea {
+  Outline outline;
+  std::vector<Outline> mowed_inside;
+};
+std::mutex no_mow_mutex;
+std::vector<NoMowArea> no_mow_areas;
+
+bool insideOutline(const Outline& area, double x, double y) {
+  bool inside = false;
+  for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
+    const auto& [xi, yi] = area[i];
+    const auto& [xj, yj] = area[j];
+    if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+double distanceToOutline(const Outline& area, double x, double y) {
+  double best = std::numeric_limits<double>::max();
+  for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
+    const auto& [xi, yi] = area[i];
+    const auto& [xj, yj] = area[j];
+    const double dx = xj - xi, dy = yj - yi, len2 = dx * dx + dy * dy;
+    const double t = len2 > 0 ? std::clamp(((x - xi) * dx + (y - yi) * dy) / len2, 0.0, 1.0) : 0.0;
+    best = std::min(best, std::hypot(x - xi - t * dx, y - yi - t * dy));
+  }
+  return best;
+}
+
+// inside or less than 5 cm off the edge, an edge shared with a neighbour is never exactly on it
+bool insideOrOnEdge(const Outline& area, double x, double y) {
+  return distanceToOutline(area, x, y) < 0.05 || insideOutline(area, x, y);
+}
+
+void jsonMapReceived(const std_msgs::String::ConstPtr& msg) {
+  std::vector<Outline> no_mow, mowed;
+  try {
+    const auto map = nlohmann::json::parse(msg->data);
+    for (const auto& area : map.value("areas", nlohmann::json::array())) {
+      const auto props = area.value("properties", nlohmann::json::object());
+      if (props.value("type", "") != "mow" || !props.value("active", true)) continue;
+      Outline outline;
+      for (const auto& p : area.value("outline", nlohmann::json::array())) {
+        outline.emplace_back(p.value("x", 0.0), p.value("y", 0.0));
+      }
+      if (outline.size() < 3) continue;
+      (props.value("mowable", true) ? mowed : no_mow).push_back(outline);
+    }
+  } catch (const std::exception& e) {
+    ROS_ERROR_STREAM("Can't read the map for the areas that aren't mowed: " << e.what());
+    return;
+  }
+  std::vector<NoMowArea> areas;
+  for (const auto& outline : no_mow) {
+    NoMowArea area{outline, {}};
+    for (const auto& m : mowed) {
+      if (std::all_of(m.begin(), m.end(), [&](const auto& p) { return insideOrOnEdge(outline, p.first, p.second); })) {
+        area.mowed_inside.push_back(m);
+      }
+    }
+    areas.push_back(area);
+  }
+  std::lock_guard<std::mutex> lk{no_mow_mutex};
+  no_mow_areas = areas;
+}
+
+// how far the mower has to be inside an unmowable area before the blade goes off. the position moves a few cm, an
+// outline pass right along such an area (around it, or the edge of a mowed area inside it) switched the blade on and
+// off all the time on a real mower
+const double NO_MOW_MARGIN = 0.1;
+
+bool overNoMowArea(double x, double y) {
+  std::lock_guard<std::mutex> lk{no_mow_mutex};
+  for (const auto& area : no_mow_areas) {
+    if (!insideOutline(area.outline, x, y) || distanceToOutline(area.outline, x, y) < NO_MOW_MARGIN) continue;
+    const bool mowed = std::any_of(area.mowed_inside.begin(), area.mowed_inside.end(), [&](const Outline& m) {
+      return insideOutline(m, x, y) || distanceToOutline(m, x, y) < NO_MOW_MARGIN;
+    });
+    if (!mowed) return true;
+  }
+  return false;
+}
+
+// checkSafety runs every 0.5 s, too slow for a small unmowable area: the mower crossed it before the check noticed.
+// checkNoMowArea runs ten times a second and only switches the blade off, looking a little ahead along the way the
+// mower moves (the speed from the last half second, a turn on the spot doesn't look ahead). checkSafety switches it
+// on again half a second after the last time an area was found, so at most a second later. a whole second left a
+// strip of some 50 cm behind each area unmowed
+const double NO_MOW_LOOKAHEAD = 0.25;     // s
+const double NO_MOW_LOOKAHEAD_MAX = 0.3;  // m
+const double NO_MOW_HOLD = 0.5;           // s
+// in seconds, the spinup check in the behavior thread reads it too
+std::atomic<double> no_mow_until{0.0};
+
+bool noMowAreaAhead(double x, double y) {
+  static std::deque<std::tuple<ros::Time, double, double>> recent;
+  const ros::Time now = ros::Time::now();
+  recent.emplace_back(now, x, y);
+  while (recent.size() > 2 && (now - std::get<0>(recent[1])).toSec() > 0.5) recent.pop_front();
+  double dx = 0, dy = 0;
+  const auto& [t0, x0, y0] = recent.front();
+  const double dt = (now - t0).toSec();
+  if (dt > 0.2 && dt < 2.0) {
+    dx = (x - x0) * NO_MOW_LOOKAHEAD / dt;
+    dy = (y - y0) * NO_MOW_LOOKAHEAD / dt;
+    const double len = std::hypot(dx, dy);
+    if (len > NO_MOW_LOOKAHEAD_MAX) {
+      dx *= NO_MOW_LOOKAHEAD_MAX / len;
+      dy *= NO_MOW_LOOKAHEAD_MAX / len;
+    }
+  }
+  const int steps = std::max(1, static_cast<int>(std::ceil(std::hypot(dx, dy) / 0.05)));
+  for (int i = 0; i <= steps; i++) {
+    if (overNoMowArea(x + dx * i / steps, y + dy * i / steps)) return true;
+  }
+  return false;
+}
+
+void checkNoMowArea(const ros::TimerEvent&) {
+  const auto pose = pose_state_subscriber.getMessage();
+  if (!noMowAreaAhead(pose.pose.pose.position.x, pose.pose.pose.position.y)) return;
+  no_mow_until = ros::Time::now().toSec() + NO_MOW_HOLD;
+  if (status_state_subscriber.getMessage().mow_enabled) setMowerEnabled(false);
+}
+
+// whether the blade is off for an area that isn't mowed (over it or right before it), the spinup check doesn't wait
+// for the blade then
+bool overNoMowArea() {
+  const auto pose = pose_state_subscriber.getMessage();
+  return ros::Time::now().toSec() < no_mow_until || overNoMowArea(pose.pose.pose.position.x, pose.pose.pose.position.y);
+}
+
+/// @brief Called every 0.5s, used to control BLADE motor via mower_enabled variable and stop any movement in case of
+/// /odom and /mower/status outages
+/// @param timer_event
+void checkSafety(const ros::TimerEvent& timer_event) {
+  const auto last_status = status_state_subscriber.getMessage();
+  const auto last_emergency = emergency_state_subscriber.getMessage();
+  const auto last_config = getConfig();
+  const auto last_pose = pose_state_subscriber.getMessage();
+  const auto last_power = power_state_subscriber.getMessage();
+  const auto last_left_esc_state = left_esc_status_state_subscriber.getMessage();
+  const auto last_left_esc_state_time = left_esc_status_state_subscriber.getMessageTime();
+  const auto last_right_esc_state = right_esc_status_state_subscriber.getMessage();
+  const auto last_right_esc_state_time = right_esc_status_state_subscriber.getMessageTime();
+  const auto pose_time = pose_state_subscriber.getMessageTime();
+  const auto status_time = status_state_subscriber.getMessageTime();
+  const auto power_time = power_state_subscriber.getMessageTime();
+  const auto last_good_gps = getLastGoodGPS();
+
+  high_level_status.emergency = last_emergency.latched_emergency;
+  high_level_status.is_charging = last_power.charge_voltage > 10.0 || last_power.charge_voltage_adc > 10.0;
+
+  // Initialize to true, if after all checks it is still true then mower should be enabled.
+  mowerAllowed = true;
+
+  // send to idle if emergency and we're not recording
+  if (currentBehavior != nullptr) {
+    if (last_emergency.latched_emergency) {
+      currentBehavior->requestPause(pauseType::PAUSE_EMERGENCY);
+      if (currentBehavior == &AreaRecordingBehavior::INSTANCE || currentBehavior == &IdleBehavior::INSTANCE ||
+          currentBehavior == &IdleBehavior::DOCKED_INSTANCE) {
+        if (high_level_status.is_charging) {
+          // emergency and docked and idle or area recording, so it's safe to reset the emergency mode, reset it. It's
+          // safe since we won't start moving in this mode.
+          setEmergencyMode(0);
+        }
+      }
+    } else {
+      currentBehavior->requestContinue(pauseType::PAUSE_EMERGENCY);
+    }
+  }
+
+  // TODO: Have a single point where we check for this timeout instead of twice (here and in the behavior)
+  // check if odometry is current. If not, the GPS was bad so we stop moving.
+  // Note that the mowing behavior will pause as well by itself.
+  if (ros::Time::now() - pose_time > ros::Duration(1.0)) {
+    stopBlade();
+    stopMoving();
+    ROS_WARN_STREAM_THROTTLE(
+        5, "om_mower_logic: EMERGENCY pose values stopped. dt was: " << (ros::Time::now() - pose_time));
+    return;
+  }
+
+  // check if status is current. if not, we have a problem since it contains wheel ticks and so on.
+  // Since these should never drop out, we enter emergency instead of "only" stopping
+  if (ros::Time::now() - status_time > ros::Duration(3) || ros::Time::now() - power_time > ros::Duration(3)) {
+    setEmergencyMode(EmergencyReason::HIGH_LEVEL);
+    ROS_WARN_STREAM_THROTTLE(
+        5, "om_mower_logic: EMERGENCY /mower/status values stopped. dt was: " << (ros::Time::now() - status_time));
+    return;
+  }
+
+  // If the motor controllers error, we enter emergency mode in the hope to save them. They should not error.
+  if (last_left_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR ||
+      last_right_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR) {
+    setEmergencyMode(EmergencyReason::HIGH_LEVEL);
+    ROS_ERROR_STREAM("EMERGENCY: at least one motor control errored. errors left: "
+                     << (last_left_esc_state.status) << ", status right: " << last_right_esc_state.status);
+    return;
+  }
+
+  // We need orientation and a positional accuracy less than configured
+  bool gpsGoodNow = isGpsGood();
+  if (gpsGoodNow || last_config.ignore_gps_errors) {
+    setLastGoodGPS(ros::Time::now());
+    high_level_status.gps_quality_percent =
+        1.0 - fmin(1.0, last_pose.position_accuracy / last_config.max_position_accuracy);
+    if (currentBehavior->needs_gps()) {
+      ROS_INFO_STREAM_THROTTLE(10, "GPS quality: " << high_level_status.gps_quality_percent);
+    }
+  } else {
+    // GPS = bad, set quality to 0
+    high_level_status.gps_quality_percent = 0;
+    if (last_pose.orientation_valid) {
+      // set this if we don't even have an orientation
+      high_level_status.gps_quality_percent = -1;
+    }
+    if (currentBehavior->needs_gps()) {
+      ROS_WARN_STREAM_THROTTLE(1, "Low quality GPS");
+    }
+  }
+
+  bool gpsTimeout = ros::Time::now() - last_good_gps > ros::Duration(last_config.gps_timeout);
+
+  if (gpsTimeout) {
+    // GPS = bad, set quality to 0
+    high_level_status.gps_quality_percent = 0;
+    if (currentBehavior->needs_gps()) {
+      ROS_WARN_STREAM_THROTTLE(1, "GPS timeout");
+    }
+  }
+
+  {
+    static bool last_gps_timeout = true;
+    if (gpsTimeout != last_gps_timeout) {
+      publishMowerEvent("GPS", json{{"available", !gpsTimeout}});
+      last_gps_timeout = gpsTimeout;
+    }
+  }
+
+  if (currentBehavior != nullptr && currentBehavior->needs_gps()) {
+    currentBehavior->setGoodGPS(!gpsTimeout);
+    // Stop the mower
+    if (gpsTimeout) {
+      stopBlade();
+      stopMoving();
+      return;
+    }
+  }
+
+  if (currentBehavior != nullptr && currentBehavior->redirect_joystick()) {
+    if (ros::Time::now() - joy_vel_time > ros::Duration(10)) {
+      stopMoving();  // To avoid cmd_vel receive timeout in mower_comms
+    }
+  }
+
+  // checkNoMowArea switched the blade off over (or right before) an area that isn't mowed, it stays off until a moment
+  // after that (NO_MOW_HOLD), so it doesn't flicker at the edge
+  const bool over_no_mow = ros::Time::now().toSec() < no_mow_until;
+
+  // enable the mower (if not aleady) if mowerAllowed is still true after checks and bahavior agrees
+  setMowerEnabled(currentBehavior != nullptr && mowerAllowed && currentBehavior->mower_enabled() && !over_no_mow);
+
+  // Get BMS voltage if available, otherwise use ADC or charger voltage
+  const auto last_bms = bms_state_subscriber.getMessage();
+  const float last_battery_v =
+      utils::GetFirstValid({last_power.battery_voltage_adc, last_bms.voltage, last_power.battery_voltage});
+
+  double battery_percent = (last_battery_v - last_power_config.battery_empty_voltage) /
+                           (last_power_config.battery_full_voltage - last_power_config.battery_empty_voltage);
+  battery_percent = std::max(battery_percent, 0.0);  // Clamp from below to 0.0
+  battery_percent = std::min(battery_percent, 1.0);  // Clamp from above to 1.0
+  high_level_status.battery_percent = battery_percent;
+
+  // we are in non emergency, check if we should pause. This could be empty battery, rain or hot mower motor etc.
+  bool dockingNeeded = false;
+
+  std::stringstream dockingReason(std::ios_base::ate | std::ios_base::in | std::ios_base::out);
+
+  // a manual pause (home while mowing) only holds the mowing job, not the area recorder. Otherwise
+  // recording can't be started until the next start_mowing or a restart, since nothing else clears it
+  if (last_config.manual_pause_mowing && currentBehavior != &AreaRecordingBehavior::INSTANCE) {
+    dockingReason << "Manual pause";
+    dockingNeeded = true;
+  }
+
+  // Dock if below critical voltage to avoid BMS undervoltage protection
+  if (!dockingNeeded && (last_battery_v < last_power_config.battery_critical_voltage)) {
+    dockingReason << "Battery voltage critical: " << last_battery_v << " V";
+    dockingNeeded = true;
+  }
+
+  // Otherwise take the max battery voltage over 20s to ignore droop during short current spikes
+  max_v_battery_seen = std::max<double>(max_v_battery_seen, last_battery_v);
+  if (ros::Time::now() - last_v_battery_check > ros::Duration(20.0)) {
+    if (!dockingNeeded && (max_v_battery_seen < last_power_config.battery_empty_voltage)) {
+      dockingReason << "Battery average voltage low: " << max_v_battery_seen << " V";
+      dockingNeeded = true;
+    }
+    max_v_battery_seen = 0.0;
+    last_v_battery_check = ros::Time::now();
+  }
+
+  if (!dockingNeeded && last_status.mower_motor_temperature >= last_config.motor_hot_temperature) {
+    dockingReason << "Mow motor over temp: " << last_status.mower_motor_temperature << " °C";
+    dockingNeeded = true;
+  }
+
+  // Rain detected is initialized to true and flips to false if rain is not detected
+  // continuously for rain_check_seconds. This is to avoid false positives due to noise
+  rain_detected = rain_detected && last_status.rain_detected;
+  if (last_config.rain_check_seconds == 0 ||
+      ros::Time::now() - last_rain_check > ros::Duration(last_config.rain_check_seconds)) {
+    if (rain_detected) {
+      // Reset rain resume time
+      rain_resume =
+          ros::Time::now() + ros::Duration(last_config.rain_check_seconds + last_config.rain_delay_minutes * 60);
+    }
+    if (!dockingNeeded && rain_detected && last_config.rain_mode) {
+      dockingReason << "Rain detected";
+      dockingNeeded = true;
+      if (last_config.rain_mode == 3) {
+        auto new_config = getConfig();
+        new_config.manual_pause_mowing = true;
+        setConfig(new_config);
+      }
+    }
+    last_rain_check = ros::Time::now();
+    rain_detected = true;
+  }
+
+  if (dockingNeeded && currentBehavior != &DockingBehavior::INSTANCE &&
+      currentBehavior != &UndockingBehavior::RETRY_INSTANCE && currentBehavior != &IdleBehavior::INSTANCE &&
+      currentBehavior != &IdleBehavior::DOCKED_INSTANCE) {
+    ROS_INFO_STREAM("Docking: " << dockingReason.rdbuf());
+    publishMowerEvent("DOCKING", json{{"reason", dockingReason.str()}});
+    abortExecution();
+  }
+}
+
+// The planner puts a pose every few cm, also along straight lines. Drops the ones within tolerance of the line
+// through their neighbours (Ramer-Douglas-Peucker), like the position history does for the track.
+std::vector<bool> simplifyPath(const std::vector<geometry_msgs::PoseStamped>& poses, double tolerance) {
+  std::vector<bool> keep(poses.size(), poses.size() <= 2);
+  if (poses.size() <= 2) return keep;
+  keep.front() = keep.back() = true;
+  std::vector<std::pair<size_t, size_t>> todo{{0, poses.size() - 1}};
+  while (!todo.empty()) {
+    const auto [first, last] = todo.back();
+    todo.pop_back();
+    const auto& a = poses[first].pose.position;
+    const auto& b = poses[last].pose.position;
+    const double dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+    double max_dist = 0;
+    size_t max_i = first;
+    for (size_t i = first + 1; i < last; i++) {
+      const auto& p = poses[i].pose.position;
+      const double d = len > 0 ? std::abs(dy * (p.x - a.x) - dx * (p.y - a.y)) / len : std::hypot(p.x - a.x, p.y - a.y);
+      if (d > max_dist) {
+        max_dist = d;
+        max_i = i;
+      }
+    }
+    if (max_dist > tolerance) {
+      keep[max_i] = true;
+      todo.push_back({first, max_i});
+      todo.push_back({max_i, last});
+    }
+  }
+  return keep;
+}
+
+[[noreturn]] void invalidParam(const std::string& message) {
+  throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, message);
+}
+
+// A list of {"x", "y"} points like in map.json, raising an RPC error for the app if it's anything else.
+geometry_msgs::Polygon requirePolygon(const nlohmann::json& points, const std::string& key) {
+  if (!points.is_array()) invalidParam("parameter is not a list of points: " + key);
+  geometry_msgs::Polygon poly;
+  for (const auto& p : points) {
+    if (!p.is_object() || !p.contains("x") || !p.contains("y") || !p["x"].is_number() || !p["y"].is_number()) {
+      invalidParam("point without numeric x and y in parameter: " + key);
+    }
+    // the message holds float32, anything that doesn't fit would become infinity
+    const double x = p["x"].get<double>();
+    const double y = p["y"].get<double>();
+    if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > FLT_MAX || std::abs(y) > FLT_MAX) {
+      invalidParam("point out of range in parameter: " + key);
+    }
+    geometry_msgs::Point32 pt;
+    pt.x = x;
+    pt.y = y;
+    poly.points.push_back(pt);
+  }
+  return poly;
+}
+
+// Plans an area the way mowing would, without starting anything. The area is either a mowing area of the map
+// ("area_id") or given directly ("outline", "obstacles"), both in the map.json format. The settings of the
+// area can be overridden with "angle", "outline_count", "outline_overlap_count", "outline_offset", "angle_min" and
+// "angle_max" (same meaning as in map.json), mow_angle_offset and the angle increment are applied like when mowing.
+nlohmann::json planArea(const nlohmann::json& params) {
+  if (!params.is_object()) invalidParam("parameters must be an object");
+  const auto number = [&](const char* key) {
+    if (!params[key].is_number() || !std::isfinite(params[key].get<double>())) {
+      invalidParam(std::string("non-numeric parameter: ") + key);
+    }
+    return params[key].get<double>();
+  };
+  // the planner takes these as uint8
+  const auto count = [&](const char* key) {
+    // compared as double, get<int>() would wrap a huge number around into the range
+    if (!params[key].is_number_integer() || params[key].get<double>() < 0 || params[key].get<double>() > 255) {
+      invalidParam(std::string("parameter is not a whole number from 0 to 255: ") + key);
+    }
+    return params[key].get<int>();
+  };
+
+  mower_map::MapArea area;
+  area.active = true;
+  area.angle = NAN;
+  area.outline_count = -1;
+  area.outline_overlap_count = -1;
+  area.outline_offset = NAN;
+  area.angle_min = NAN;
+  area.angle_max = NAN;
+
+  ros::NodeHandle n;
+  if (params.contains("area_id")) {
+    if (!params["area_id"].is_string()) invalidParam("non-string parameter: area_id");
+    const auto id = params["area_id"].get<std::string>();
+    auto client = n.serviceClient<mower_map::GetMowingAreaSrv>("mower_map_service/get_mowing_area");
+    mower_map::GetMowingAreaSrv srv;
+    bool found = false;
+    for (srv.request.index = 0; client.call(srv); srv.request.index++) {
+      if (srv.response.area.id == id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) invalidParam("no mowing area with id: " + id);
+    area = srv.response.area;
+  }
+
+  if (params.contains("outline")) area.area = requirePolygon(params["outline"], "outline");
+  if (params.contains("obstacles")) {
+    if (!params["obstacles"].is_array()) invalidParam("parameter is not a list of polygons: obstacles");
+    area.obstacles.clear();
+    for (const auto& o : params["obstacles"]) area.obstacles.push_back(requirePolygon(o, "obstacles"));
+  }
+  if (params.contains("angle")) area.angle = number("angle");
+  if (params.contains("outline_count")) area.outline_count = count("outline_count");
+  if (params.contains("outline_overlap_count")) area.outline_overlap_count = count("outline_overlap_count");
+  if (params.contains("outline_offset")) area.outline_offset = number("outline_offset");
+  if (params.contains("angle_min")) area.angle_min = number("angle_min");
+  if (params.contains("angle_max")) area.angle_max = number("angle_max");
+  // mowing ignores a range with only one end, here it's better to say so
+  if (std::isnan(area.angle_min) != std::isnan(area.angle_max))
+    invalidParam("angle_min and angle_max only work together");
+  if (area.area.points.size() < 3) invalidParam("the area needs at least 3 outline points (area_id or outline)");
+
+  // own client, mowing may use pathClient at the same time
+  auto planner = n.serviceClient<slic3r_coverage_planner::PlanPath>("slic3r_coverage_planner/plan_path");
+  std::vector<slic3r_coverage_planner::Path> paths;
+  double angle;
+  if (!MowingBehavior::INSTANCE.plan_area(area, getConfig(), planner, paths, angle)) {
+    throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL, "coverage planning failed");
+  }
+
+  // 1 cm off the planned line and mm precision are plenty, and keep the answer small (a big lawn has 100k poses)
+  const auto mm = [](double v) { return std::round(v * 1000.0) / 1000.0; };
+  nlohmann::json result = {{"area_id", area.id}, {"angle", angle}, {"paths", nlohmann::json::array()}};
+  for (const auto& path : paths) {
+    // pose_index is the index of each point in the full path, like current_path_index in the robot state, so apps
+    // can tell how far the mower got
+    nlohmann::json points = nlohmann::json::array();
+    nlohmann::json pose_index = nlohmann::json::array();
+    const auto keep = simplifyPath(path.path.poses, 0.01);
+    for (size_t i = 0; i < keep.size(); i++) {
+      if (!keep[i]) continue;
+      points.push_back({mm(path.path.poses[i].pose.position.x), mm(path.path.poses[i].pose.position.y)});
+      pose_index.push_back(i);
+    }
+    result["paths"].push_back({{"is_outline", path.is_outline != 0}, {"points", points}, {"pose_index", pose_index}});
+  }
+  return result;
+}
+
+// mower_logic settings apps may change with params.set. applied right away and kept in mower_logic_params.json
+// (next to map.json), which goes on top of the yaml at the next start, so a change survives a restart
+const char* PARAMS_FILE = "mower_logic_params.json";
+ros::Publisher params_changed_pub;
+// the config from the yaml, before the stored params went on top. null in params.set goes back to it
+mower_logic::MowerLogicConfig yaml_config;
+
+template <typename T>
+void setParam(T& field, const nlohmann::json& v, T min, T max, const std::string& name) {
+  if constexpr (std::is_same_v<T, bool>) {
+    if (!v.is_boolean()) invalidParam("not true or false: " + name);
+  } else if constexpr (std::is_integral_v<T>) {
+    if (!v.is_number_integer()) invalidParam("not a whole number: " + name);
+  } else {
+    if (!v.is_number() || !std::isfinite(v.get<double>())) invalidParam("not a number: " + name);
+  }
+  if constexpr (!std::is_same_v<T, bool>) {
+    // compared as double, get<int>() would wrap a huge number around into the range
+    if (v.get<double>() < min || v.get<double>() > max) {
+      invalidParam(name + " must be from " + nlohmann::json(min).dump() + " to " + nlohmann::json(max).dump());
+    }
+  }
+  field = v.get<T>();
+}
+
+struct SettableParam {
+  std::function<void(mower_logic::MowerLogicConfig&, const nlohmann::json&)> set;
+  std::function<nlohmann::json(const mower_logic::MowerLogicConfig&)> get;
+};
+
+#define SETTABLE(field)                                                                        \
+  {                                                                                            \
+    #field, {                                                                                  \
+      [](mower_logic::MowerLogicConfig& c, const nlohmann::json& v) {                          \
+        setParam(c.field, v, mower_logic::MowerLogicConfig::__getMin__().field,                \
+                 mower_logic::MowerLogicConfig::__getMax__().field, #field);                   \
+      },                                                                                       \
+          [](const mower_logic::MowerLogicConfig& c) { return nlohmann::json(c.field); }       \
+    }                                                                                          \
+  }
+
+// what's about how and when it mows, nothing about the hardware, docking or safety
+const std::map<std::string, SettableParam> SETTABLE_PARAMS = {
+    SETTABLE(automatic_mode),     SETTABLE(outline_count),     SETTABLE(outline_overlap_count),
+    SETTABLE(outline_offset),     SETTABLE(mow_angle_offset),  SETTABLE(mow_angle_offset_is_absolute),
+    SETTABLE(mow_angle_increment), SETTABLE(rain_mode),        SETTABLE(rain_delay_minutes),
+};
+
+nlohmann::json readStoredParams();
+
+// the settable params with their value, range, default and whether the value is one set by an app (kept in
+// PARAMS_FILE, the yaml doesn't count then)
+nlohmann::json settableParams() {
+  const auto c = getConfig();
+  const auto stored = readStoredParams();
+  const auto min = mower_logic::MowerLogicConfig::__getMin__();
+  const auto max = mower_logic::MowerLogicConfig::__getMax__();
+  const auto def = mower_logic::MowerLogicConfig::__getDefault__();
+  nlohmann::json result = nlohmann::json::object();
+  for (const auto& [name, p] : SETTABLE_PARAMS) {
+    result[name] = {{"value", p.get(c)},       {"min", p.get(min)},
+                    {"max", p.get(max)},       {"default", p.get(def)},
+                    {"yaml", p.get(yaml_config)}, {"stored", stored.contains(name)}};
+  }
+  return result;
+}
+
+nlohmann::json readStoredParams() {
+  std::ifstream f(PARAMS_FILE);
+  if (!f.good()) return nlohmann::json::object();
+  try {
+    auto j = nlohmann::json::parse(f);
+    if (j.is_object()) return j;
+  } catch (const std::exception& e) {
+    ROS_ERROR_STREAM("can't read " << PARAMS_FILE << ": " << e.what());
+  }
+  return nlohmann::json::object();
+}
+
+// Changes some mower_logic params ({"name": value, ...}), all or none. null takes a stored value out again, the one
+// from the yaml counts then. Returns the settable params like params.settable.
+nlohmann::json setParams(const nlohmann::json& params) {
+  if (!params.is_object() || params.empty()) invalidParam("parameters must be an object of name: value");
+  auto config = getConfig();
+  for (const auto& [name, value] : params.items()) {
+    const auto it = SETTABLE_PARAMS.find(name);
+    if (it == SETTABLE_PARAMS.end()) invalidParam("not a settable param: " + name);
+    it->second.set(config, value.is_null() ? it->second.get(yaml_config) : value);
+  }
+  auto stored = readStoredParams();
+  for (const auto& [name, value] : params.items()) {
+    if (value.is_null()) {
+      stored.erase(name);
+    } else {
+      stored[name] = value;
+    }
+  }
+  const std::string tmp = std::string(PARAMS_FILE) + ".tmp";
+  {
+    std::ofstream f(tmp);
+    f << stored.dump(2);
+    if (!f.good()) throw std::runtime_error("can't write the params");
+  }
+  std::filesystem::rename(tmp, PARAMS_FILE);
+  setConfig(config);
+  // xbot_monitoring publishes params/json again
+  params_changed_pub.publish(std_msgs::Empty());
+  ROS_INFO_STREAM("params.set: " << params.dump());
+  return settableParams();
+}
+
+// the stored params at startup, on top of the yaml. ones that don't fit anymore are left out
+void applyStoredParams() {
+  const auto stored = readStoredParams();
+  if (stored.empty()) return;
+  auto config = getConfig();
+  for (const auto& [name, value] : stored.items()) {
+    const auto it = SETTABLE_PARAMS.find(name);
+    try {
+      if (it == SETTABLE_PARAMS.end()) invalidParam("not a settable param: " + name);
+      it->second.set(config, value);
+    } catch (const std::exception& e) {
+      ROS_WARN_STREAM("ignoring " << name << " from " << PARAMS_FILE << ": " << e.what());
+    }
+  }
+  setConfig(config);
+  ROS_INFO_STREAM("applied " << PARAMS_FILE << ": " << stored.dump());
+}
+
+// The ids of the mowing areas in the map, in the order they get mowed.
+std::vector<std::string> mowingAreaIds() {
+  ros::NodeHandle n;
+  auto client = n.serviceClient<mower_map::GetMowingAreaSrv>("mower_map_service/get_mowing_area");
+  std::vector<std::string> ids;
+  mower_map::GetMowingAreaSrv srv;
+  for (srv.request.index = 0; client.call(srv); srv.request.index++) ids.push_back(srv.response.area.id);
+  return ids;
+}
+
+// Starts mowing like the start_mowing action, optionally only some of the mowing areas in a given order ("areas":
+// list of ids). The others are left out, also after a break for charging or a restart, until the job is done. A job
+// that got interrupted carries on in its area if the list has it, otherwise with the first one of the list.
+nlohmann::json startMowing(const nlohmann::json& params) {
+  std::vector<std::string> areas;
+  if (!params.is_null()) {
+    if (!params.is_object()) invalidParam("parameters must be an object");
+    if (params.contains("areas")) {
+      if (!params["areas"].is_array()) invalidParam("parameter is not a list of area ids: areas");
+      const auto known = mowingAreaIds();
+      for (const auto& a : params["areas"]) {
+        if (!a.is_string()) invalidParam("parameter is not a list of area ids: areas");
+        if (std::find(known.begin(), known.end(), a.get<std::string>()) == known.end()) {
+          invalidParam("no mowing area with id: " + a.get<std::string>());
+        }
+        if (std::find(areas.begin(), areas.end(), a.get<std::string>()) != areas.end()) {
+          invalidParam("area listed twice: " + a.get<std::string>());
+        }
+        areas.push_back(a.get<std::string>());
+      }
+      if (areas.empty()) invalidParam("no areas given, leave out \"areas\" to mow all of them");
+    }
+  }
+  Behavior* behavior = currentBehavior;
+  if (behavior != &IdleBehavior::INSTANCE && behavior != &IdleBehavior::DOCKED_INSTANCE) {
+    invalidParam("the mower can only start while idle");
+  }
+  MowingBehavior::INSTANCE.set_job_areas(areas);
+  behavior->command_start();
+  return {{"areas", areas}};
+}
+
+// clang-format off
+xbot_mqtt::RpcProvider rpc_provider("mower_logic", {{
+  RPC_METHOD("mowing.plan", {
+    return planArea(params);
+  }),
+  RPC_METHOD("params.settable", {
+    return settableParams();
+  }),
+  RPC_METHOD("params.set", {
+    return setParams(params);
+  }),
+  RPC_METHOD("mowing.start", {
+    return startMowing(params);
+  }),
+  // the area list of the current job and where it is in it, areas empty when it mows all of them
+  RPC_METHOD("mowing.job", {
+    return MowingBehavior::INSTANCE.get_job();
+  }),
+  RPC_METHOD("schedule.get", {
+    return Scheduler::INSTANCE.get();
+  }),
+  RPC_METHOD("schedule.set", {
+    // the schedule as schedule.get returns it, also wrapped in a list like map.replace takes its map
+    try {
+      return Scheduler::INSTANCE.set(params.is_array() && params.size() == 1 ? params[0] : params);
+    } catch (const std::invalid_argument& e) {
+      invalidParam(e.what());
+    }
+  }),
+  RPC_METHOD("schedule.next", {
+    return Scheduler::INSTANCE.next();
+  }),
+}});
+// clang-format on
+
+void reconfigureCB(mower_logic::MowerLogicConfig& c, uint32_t level) {
+  ROS_INFO_STREAM("om_mower_logic: Setting mower_logic config");
+  // the mowing.plan rpc reads it from its own thread
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
+  last_config = c;
+}
+
+bool highLevelCommand(mower_msgs::HighLevelControlSrvRequest& req, mower_msgs::HighLevelControlSrvResponse& res) {
+  switch (req.command) {
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_HOME:
+      ROS_INFO_STREAM("COMMAND_HOME");
+      if (currentBehavior) {
+        currentBehavior->command_home();
+      }
+      break;
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_START:
+      ROS_INFO_STREAM("COMMAND_START");
+      if (!MowingBehavior::INSTANCE.has_unfinished_job()) MowingBehavior::INSTANCE.set_job_areas({});
+      if (currentBehavior) {
+        currentBehavior->command_start();
+      }
+      break;
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_S1:
+      ROS_INFO_STREAM("COMMAND_S1");
+      if (currentBehavior) {
+        currentBehavior->command_s1();
+      }
+      break;
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_S2:
+      ROS_INFO_STREAM("COMMAND_S2");
+      if (currentBehavior) {
+        currentBehavior->command_s2();
+      }
+      break;
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_DELETE_MAPS: {
+      ROS_WARN_STREAM("COMMAND_DELETE_MAPS");
+      if (currentBehavior != &AreaRecordingBehavior::INSTANCE && currentBehavior != &IdleBehavior::INSTANCE &&
+          currentBehavior != &IdleBehavior::DOCKED_INSTANCE && currentBehavior != nullptr) {
+        ROS_ERROR_STREAM("Deleting maps is only allowed during IDLE or AreaRecording!");
+        return true;
+      }
+      mower_map::ClearMapSrv clear_map_srv;
+      // TODO check result
+      clearMapClient.call(clear_map_srv);
+
+      // Abort the current behavior. Idle will refresh and go to AreaRecorder, AreaRecorder will to to Idle wich will go
+      // to a fresh AreaRecorder
+      currentBehavior->abort();
+    } break;
+    case mower_msgs::HighLevelControlSrvRequest::COMMAND_RESET_EMERGENCY:
+      ROS_WARN_STREAM("COMMAND_RESET_EMERGENCY");
+      setEmergencyMode(0);
+      break;
+  }
+  return true;
+}
+
+void actionReceived(const std_msgs::String::ConstPtr& action) {
+  if (action->data == "mower_logic/reset_emergency") {
+    ROS_WARN_STREAM("Got reset emergency action.");
+    setEmergencyMode(0);
+    return;
+  }
+
+  if (currentBehavior) {
+    currentBehavior->handle_action(action->data);
+  }
+}
+
+void joyVelReceived(const geometry_msgs::Twist::ConstPtr& joy_vel) {
+  joy_vel_time = ros::Time::now();
+  if (currentBehavior && currentBehavior->redirect_joystick()) {
+    cmd_vel_pub.publish(joy_vel);
+  }
+}
+
+void buildRootActions() {
+  xbot_msgs::ActionInfo reset_emergency_action;
+  reset_emergency_action.action_id = "reset_emergency";
+  reset_emergency_action.enabled = true;
+  reset_emergency_action.action_name = "Reset Emergency";
+  rootActions.push_back(reset_emergency_action);
+}
+
+int main(int argc, char** argv) {
+  buildRootActions();
+
+  ros::init(argc, argv, "mower_logic");
+
+  n = new ros::NodeHandle();
+  paramNh = new ros::NodeHandle("~");
+  ros::NodeHandle powerNodeHandle("/ll/services/power");
+  mowerAllowed = false;
+
+  boost::recursive_mutex mutex;
+
+  reconfigServer = new dynamic_reconfigure::Server<mower_logic::MowerLogicConfig>(mutex, *paramNh);
+  reconfigServer->setCallback(reconfigureCB);
+  params_changed_pub = n->advertise<std_msgs::Empty>("xbot_monitoring/params_changed", 1);
+  yaml_config = getConfig();
+  applyStoredParams();
+
+  last_power_config = ll::PowerConfig::__getDefault__();
+  last_power_config.__fromServer__(powerNodeHandle);
+
+  cmd_vel_pub = n->advertise<geometry_msgs::Twist>("/logic_vel", 1);
+
+  high_level_state_publisher = n->advertise<mower_msgs::HighLevelStatus>("mower_logic/current_state", 100, true);
+  mqtt_publish_pub = n->advertise<xbot_mqtt::MqttPublish>("/xbot_monitoring/mqtt_publish", 10);
+
+  pathClient = n->serviceClient<slic3r_coverage_planner::PlanPath>("slic3r_coverage_planner/plan_path");
+  mapClient = n->serviceClient<mower_map::GetMowingAreaSrv>("mower_map_service/get_mowing_area");
+  ros::Subscriber json_map_sub = n->subscribe("mower_map_service/json_map", 1, jsonMapReceived);
+  clearMapClient = n->serviceClient<mower_map::ClearMapSrv>("mower_map_service/clear_map");
+
+  gpsClient = n->serviceClient<xbot_positioning::GPSControlSrv>("xbot_positioning/set_gps_state");
+  positioningClient = n->serviceClient<xbot_positioning::SetPoseSrv>("xbot_positioning/set_robot_pose");
+  actionRegistrationClient = n->serviceClient<xbot_msgs::RegisterActionsSrv>("xbot/register_actions");
+
+  mowClient = n->serviceClient<mower_msgs::MowerControlSrv>("ll/_service/mow_enabled");
+  emergencyClient = n->serviceClient<mower_msgs::EmergencyStopSrv>("ll/_service/emergency");
+
+  dockingPointClient = n->serviceClient<mower_map::GetDockingPointSrv>("mower_map_service/get_docking_point");
+
+  pathProgressClient =
+      n->serviceClient<ftc_local_planner::PlannerGetProgress>("/move_base_flex/FTCPlanner/planner_get_progress");
+
+  setNavPointClient = n->serviceClient<mower_map::SetNavPointSrv>("mower_map_service/set_nav_point");
+  clearNavPointClient = n->serviceClient<mower_map::ClearNavPointSrv>("mower_map_service/clear_nav_point");
+
+  mbfClient = new actionlib::SimpleActionClient<mbf_msgs::MoveBaseAction>("/move_base_flex/move_base");
+  mbfClientExePath = new actionlib::SimpleActionClient<mbf_msgs::ExePathAction>("/move_base_flex/exe_path");
+  mbfClientRecovery = new actionlib::SimpleActionClient<mbf_msgs::RecoveryAction>("/move_base_flex/recovery");
+
+  emergency_state_subscriber.Start(n);
+  status_state_subscriber.Start(n);
+  power_state_subscriber.Start(n);
+  bms_state_subscriber.Start(n);
+  left_esc_status_state_subscriber.Start(n);
+  right_esc_status_state_subscriber.Start(n);
+  pose_state_subscriber.Start(n);
+
+  ros::Subscriber joy_cmd = n->subscribe("/joy_vel", 0, joyVelReceived, ros::TransportHints().tcpNoDelay(true));
+  ros::Subscriber action = n->subscribe("xbot/action", 0, actionReceived, ros::TransportHints().tcpNoDelay(true));
+
+  ros::ServiceServer high_level_control_srv = n->advertiseService("mower_service/high_level_control", highLevelCommand);
+
+  ros::AsyncSpinner asyncSpinner(1);
+  asyncSpinner.start();
+
+  // RPCs on their own queue and thread, planning a big area takes a moment and shouldn't hold up the timers.
+  // After the main spinner, registering the methods can wait a while for xbot_monitoring
+  ros::CallbackQueue rpc_queue;
+  ros::NodeHandle rpc_nh;
+  rpc_nh.setCallbackQueue(&rpc_queue);
+  ros::AsyncSpinner rpc_spinner(1, &rpc_queue);
+  rpc_spinner.start();
+  rpc_provider.init(rpc_nh);
+
+  ros::Rate r(1.0);
+
+  ROS_INFO("Waiting for emergency message");
+  while (!emergency_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+  ROS_INFO("Waiting for a power message");
+  while (!power_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+
+  ROS_INFO("Waiting for a status message");
+  while (!status_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+
+  ROS_INFO("Waiting for a pose message");
+  while (!power_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+  ROS_INFO("Waiting for left ESC status message");
+  while (!left_esc_status_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+  ROS_INFO("Waiting for right ESC status message");
+  while (!right_esc_status_state_subscriber.hasMessage()) {
+    if (!ros::ok()) {
+      delete (reconfigServer);
+      delete (mbfClient);
+      delete (mbfClientExePath);
+      delete (mbfClientRecovery);
+      return 1;
+    }
+    r.sleep();
+  }
+
+  ROS_INFO("Waiting for emergency service");
+  if (!emergencyClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Emergency server not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+
+    return 1;
+  }
+
+  ROS_INFO("Waiting for path server");
+  if (!pathClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Path service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+
+    return 1;
+  }
+  ROS_INFO("Waiting for mower service");
+  if (!mowClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Mower service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+
+    return 1;
+  }
+
+  ROS_INFO("Waiting for gps service");
+  if (!gpsClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("GPS service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+
+    return 1;
+  }
+  ROS_INFO("Waiting for positioning service");
+  if (!positioningClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("positioning service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+
+    return 1;
+  }
+
+  ROS_INFO("Waiting for map server");
+  if (!mapClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Map server service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 2;
+  }
+  ROS_INFO("Waiting for docking point server");
+  if (!dockingPointClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Docking server service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 2;
+  }
+  ROS_INFO("Waiting for nav point server");
+  if (!setNavPointClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Set Nav Point server service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 2;
+  }
+  ROS_INFO("Waiting for clear nav point server");
+  if (!clearNavPointClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Clear Nav Point server service not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 2;
+  }
+
+  ROS_INFO("Waiting for move base flex");
+  if (!mbfClient->waitForServer(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("Move base flex not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 3;
+  }
+
+  ROS_INFO("Waiting for mowing path progress server");
+  if (!pathProgressClient.waitForExistence(ros::Duration(60.0, 0.0))) {
+    ROS_ERROR("FTCLocalPlanner progress server not found.");
+    delete (reconfigServer);
+    delete (mbfClient);
+    delete (mbfClientExePath);
+    delete (mbfClientRecovery);
+    return 3;
+  }
+
+  ros::Time started = ros::Time::now();
+  while ((ros::Time::now() - started).toSec() < 10.0) {
+    ROS_INFO_STREAM("Waiting for an emergency status message");
+    r.sleep();
+    if (emergency_state_subscriber.getMessage().latched_emergency) {
+      ROS_INFO_STREAM("Got emergency, resetting it");
+      setEmergencyMode(0);
+      break;
+    }
+  }
+
+  ROS_INFO("registering actions");
+  registerActions("mower_logic", rootActions);
+
+  ROS_INFO("om_mower_logic: Got all servers, we can mow");
+
+  rain_resume = last_rain_check = last_v_battery_check = ros::Time::now();
+  ros::Timer safety_timer = n->createTimer(ros::Duration(0.5), checkSafety);
+  ros::Timer no_mow_timer = n->createTimer(ros::Duration(0.1), checkNoMowArea);
+  ros::Timer ui_timer = n->createTimer(ros::Duration(1.0), updateUI);
+  Scheduler::INSTANCE.load();
+  ros::Timer schedule_timer = n->createTimer(ros::Duration(10.0), [](const ros::TimerEvent&) { Scheduler::INSTANCE.tick(); });
+
+  // release emergency if it was set
+  setEmergencyMode(0);
+
+  // initialise the shared state object to be passed into the behaviors
+  auto shared_state = std::make_shared<sSharedState>();
+  shared_state->active_semiautomatic_task = false;
+
+  // Behavior execution loop
+  while (ros::ok()) {
+    if (currentBehavior != nullptr) {
+      currentBehavior->start(last_config, shared_state);
+      Behavior* newBehavior = currentBehavior->execute();
+      currentBehavior->exit();
+
+      if (newBehavior != nullptr) {
+        // Session START: undocking begins a new session; mowing is the fallback for idle-start (not on charger)
+        if (newBehavior == &UndockingBehavior::INSTANCE || newBehavior == &PerimeterUndockingBehavior::INSTANCE ||
+            (newBehavior == &MowingBehavior::INSTANCE && current_session_id.empty())) {
+          if (current_job_id.empty()) current_job_id = generateNanoId();
+          current_session_id = generateNanoId();
+        }
+
+        // Session END: entering either idle variant (docked or not)
+        if (newBehavior == &IdleBehavior::INSTANCE || newBehavior == &IdleBehavior::DOCKED_INSTANCE) {
+          current_session_id = "";
+          if (current_job_finished) {
+            current_job_id = "";
+            current_job_finished = false;
+          }
+        }
+      }
+
+      if (newBehavior != currentBehavior && newBehavior != nullptr) {
+        publishMowerEvent("STATE", json{{"state", newBehavior->state_name()}});
+      }
+
+      currentBehavior = newBehavior;
+    } else {
+      high_level_status.state_name = "NULL";
+      high_level_status.state = mower_msgs::HighLevelStatus::HIGH_LEVEL_STATE_NULL;
+      high_level_state_publisher.publish(high_level_status);
+      // we have no defined behavior, set emergency
+      ROS_ERROR_STREAM("null behavior - emergency mode");
+      setEmergencyMode(EmergencyReason::HIGH_LEVEL);
+      ros::Rate r(1.0);
+      r.sleep();
+    }
+  }
+
+  delete (n);
+  delete (paramNh);
+  delete (reconfigServer);
+  delete (mbfClient);
+  delete (mbfClientExePath);
+  delete (mbfClientRecovery);
+  return 0;
+}

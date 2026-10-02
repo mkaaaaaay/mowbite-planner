@@ -1,0 +1,10 @@
+<!--
+    Only the mower_simulation node, the same way mower_simulation_gui.launch starts it, but without rviz and the
+    GPS pose converter. Used with HEADLESS=1 for automatic tests: no virtual desktop, VNC or rviz, which is most
+    of the CPU the simulation container needs.
+-->
+<launch>
+    <node pkg="mower_simulation" type="mower_simulation" name="mower_simulation" required="true">
+        <param name="publish_tf" value="false"/>
+    </node>
+</launch>

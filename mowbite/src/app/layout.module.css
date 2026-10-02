@@ -1,0 +1,39 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  width: 100%;
+}
+
+/* the phone's status bar in the android app: content scrolls under it, so give it a backdrop like the tab bar */
+.shell::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  height: env(safe-area-inset-top);
+  background: var(--nav-bg);
+  backdrop-filter: var(--card-blur, blur(18px));
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  /* room for the tab bar at the bottom, and for the phone's status bar in the android app */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+
+@media (min-width: 900px) {
+  .shell {
+    flex-direction: row;
+  }
+
+  .content {
+    padding-bottom: 0;
+    /* room for the fixed sidebar */
+    margin-left: 220px;
+  }
+}

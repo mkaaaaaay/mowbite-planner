@@ -1,0 +1,11 @@
+.select {
+  max-width: 100%;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}

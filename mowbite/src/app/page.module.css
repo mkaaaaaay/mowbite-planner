@@ -1,0 +1,500 @@
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 16px;
+  width: 100%;
+  max-width: var(--content-max-width);
+  padding: 24px 16px 60px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: 0.3px;
+}
+
+.brand strong {
+  font-weight: 700;
+}
+
+@media (min-width: 900px) {
+  .main {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .main h1 {
+    grid-column: 1 / -1;
+  }
+
+  /* with the map: status and today on the left, map on the right */
+  .withMap .status,
+  .withMap .today {
+    grid-column: 1;
+  }
+
+  .withMap .map {
+    grid-column: 2;
+    grid-row: 2 / span 3;
+    position: sticky;
+    top: 24px;
+  }
+}
+
+.dim {
+  color: var(--text-secondary);
+}
+
+.status,
+.today {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  box-shadow: var(--card-shadow, none);
+  backdrop-filter: var(--card-blur, none);
+}
+
+/* a thin colored line on top says at a glance whether all is well */
+.status {
+  border-top: 3px solid var(--tone, var(--card-border));
+}
+
+.tone-good {
+  --tone: var(--success);
+}
+
+.tone-live {
+  --tone: var(--accent);
+}
+
+.tone-warn {
+  --tone: var(--warning);
+}
+
+.tone-error {
+  --tone: var(--error);
+}
+
+/* a state the app doesn't know */
+.tone-neutral {
+  --tone: var(--card-border);
+}
+
+/* offline or no fresh state: everything in the card is old, the line under the headline says since when */
+.stale .statusTop > :first-child,
+.stale .headline h2,
+.stale .facts {
+  opacity: 0.45;
+}
+
+.offline {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.statusTop {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.headline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.headline h2 {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.headline span {
+  font-size: 13px;
+}
+
+.ring {
+  position: relative;
+  flex: none;
+  width: 84px;
+  height: 84px;
+}
+
+.ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring circle {
+  fill: none;
+  stroke-width: 7;
+}
+
+.ringBg {
+  stroke: rgba(128, 128, 128, 0.2);
+}
+
+.ringFill {
+  stroke: var(--ring);
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.6s;
+}
+
+.ring-success {
+  --ring: var(--success);
+}
+
+.ring-warning {
+  --ring: var(--warning);
+}
+
+.ring-error {
+  --ring: var(--error);
+}
+
+.ring > div {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.ring strong {
+  font-size: 19px;
+}
+
+.ring span {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.facts div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.1);
+  font-size: 13px;
+}
+
+.facts span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.facts .warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.controls button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--card-border);
+  background: rgba(128, 128, 128, 0.08);
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--btn-3d);
+}
+
+.controls button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.controls .main:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  backdrop-filter: var(--card-blur, none);
+  box-shadow: var(--btn-3d);
+  color: var(--foreground);
+}
+
+.controls .reset {
+  grid-column: 1 / -1;
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+  color: var(--error);
+}
+
+.controls .resetJobButton {
+  grid-column: 1 / -1;
+  padding: 8px;
+  border-style: dashed;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.controls .resetJob {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.controls .resetJob span {
+  flex: 1 1 100%;
+}
+
+.controls .resetJob button {
+  flex: 1;
+}
+
+@media (max-width: 600px) {
+  .controls button:not(.reset) {
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 4px;
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 600px) {
+  .controls button:not(.reset) {
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 4px;
+    font-size: 12px;
+  }
+}
+
+.map {
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid var(--card-border);
+}
+
+.todayHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.todayHead h2 {
+  font-size: 16px;
+}
+
+.todayHead a {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.todayNumbers {
+  display: flex;
+  gap: 28px;
+}
+
+.todayNumbers div {
+  display: flex;
+  flex-direction: column;
+}
+
+.todayNumbers strong {
+  font-size: 20px;
+}
+
+.todayNumbers span,
+.label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.todayNumbers .bad strong {
+  color: var(--error);
+}
+
+.label {
+  margin-bottom: -10px;
+}
+
+.lastRun {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border-left: 3px solid var(--card-border);
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.lastRun > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.lastRun strong {
+  font-size: 14px;
+}
+
+.badge {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(144, 164, 174, 0.16);
+}
+
+.run-good {
+  border-left-color: var(--success);
+}
+
+.run-good .badge {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+}
+
+.run-bad {
+  border-left-color: var(--error);
+}
+
+.run-bad .badge {
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+
+.run-live {
+  border-left-color: var(--accent);
+}
+
+.weather {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(128, 128, 128, 0.08);
+  font-size: 13px;
+}
+
+.weather > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.weather strong {
+  font-size: 18px;
+}
+
+.weather strong .dim {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.rainHint {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.credit {
+  margin-left: auto;
+  align-self: flex-end;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.nextRun {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+/* a start the schedule left out, with why, until it's closed */
+.missed {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+  font-size: 13px;
+}
+
+.missed svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.missed a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--foreground);
+}
+
+.missed a span {
+  color: var(--text-secondary);
+}
+
+.missed button {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+/* on phones, the sidebar has its own */
+.mowerSwitch {
+  justify-self: start;
+}
+
+@media (min-width: 900px) {
+  .mowerSwitch {
+    display: none;
+  }
+}

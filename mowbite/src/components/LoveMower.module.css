@@ -1,0 +1,476 @@
+/* the rest of the title row, the invisible button sits at its right end */
+.gap {
+  flex: 1;
+}
+
+.spot {
+  width: 56px;
+  align-self: stretch;
+  min-height: 48px;
+  margin: -8px -16px -8px 0;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* both drive along this line, the heart sits above where they meet */
+.lane {
+  position: fixed;
+  left: 0;
+  right: 0;
+  height: 0;
+  z-index: 25;
+  pointer-events: none;
+}
+
+/* timeline, shared by everything below:
+   0-12% the lawn grows, 12-32% both drive in and mow, 32-38% the kiss, 38-42% a step back, flowers come up,
+   until 80% they look at each other, then the openmower turns round and they drive off together to the right,
+   and the stubble fades */
+
+.field {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  overflow: hidden;
+  transform-origin: bottom;
+  animation: field var(--dur) linear forwards;
+}
+
+/* the stubble left behind */
+.field > :first-child {
+  opacity: 1;
+}
+
+@keyframes field {
+  0% {
+    transform: scaleY(0);
+    opacity: 0;
+    animation-timing-function: ease-out;
+  }
+  12% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 0;
+  }
+}
+
+/* the tall grass on each side, cut away right behind the mower coming from that side */
+.leftHalf {
+  clip-path: inset(0 calc(100% - var(--mid)) 0 0);
+  animation: cut-left var(--dur) linear forwards;
+}
+
+.rightHalf {
+  clip-path: inset(0 0 0 var(--mid));
+  animation: cut-right var(--dur) linear forwards;
+}
+
+@keyframes cut-left {
+  0%,
+  12% {
+    clip-path: inset(0 calc(100% - var(--mid)) 0 0);
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  32% {
+    clip-path: inset(0 calc(100% - var(--mid)) 0 calc(var(--mid) - 30px));
+  }
+  38% {
+    clip-path: inset(0 calc(100% - var(--mid)) 0 calc(var(--mid) - 18px));
+  }
+  42%,
+  100% {
+    clip-path: inset(0 calc(100% - var(--mid)) 0 var(--mid));
+  }
+}
+
+@keyframes cut-right {
+  0%,
+  12% {
+    clip-path: inset(0 0 0 var(--mid));
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  32% {
+    clip-path: inset(0 calc(100% - var(--mid) - 46px) 0 var(--mid));
+  }
+  38% {
+    clip-path: inset(0 calc(100% - var(--mid) - 30px) 0 var(--mid));
+  }
+  42%,
+  100% {
+    clip-path: inset(0 calc(100% - var(--mid)) 0 var(--mid));
+  }
+}
+
+.eater,
+.mower {
+  position: absolute;
+  bottom: 0;
+}
+
+/* inline svgs sit on the text baseline, with a gap below */
+.eater svg,
+.mower svg {
+  display: block;
+}
+
+/* the drawing has room below the body, this puts it into the grass. its mouth is 37px from the left */
+.eater {
+  bottom: -9px;
+  left: -70px;
+  animation: eater var(--dur) linear forwards;
+}
+
+.mower {
+  left: 100%;
+  color: var(--foreground);
+  animation: mower var(--dur) linear forwards;
+}
+
+@keyframes eater {
+  0%,
+  12% {
+    left: -70px;
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  32% {
+    left: calc(var(--mid) - 51px);
+  }
+  38% {
+    left: calc(var(--mid) - 39px);
+  }
+  42% {
+    left: calc(var(--mid) - 43px);
+  }
+  82% {
+    left: calc(var(--mid) - 43px);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.8, 0.4);
+  }
+  100% {
+    left: calc(100% + 40px);
+  }
+}
+
+@keyframes mower {
+  0%,
+  12% {
+    left: 100%;
+    animation-timing-function: cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+  32% {
+    left: calc(var(--mid) + 14px);
+  }
+  38% {
+    left: calc(var(--mid) - 2px);
+  }
+  42% {
+    left: calc(var(--mid) + 6px);
+  }
+  82% {
+    left: calc(var(--mid) + 6px);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.8, 0.4);
+  }
+  100% {
+    left: calc(100% + 130px);
+  }
+}
+
+/* the eater hops for joy after the kiss */
+.joy {
+  animation: joy var(--dur) ease-out forwards;
+}
+
+@keyframes joy {
+  0%,
+  38% {
+    transform: none;
+  }
+  41% {
+    transform: translateY(-9px);
+  }
+  44% {
+    transform: none;
+  }
+  47% {
+    transform: translateY(-4px);
+  }
+  50%,
+  100% {
+    transform: none;
+  }
+}
+
+/* the openmower wiggles, and turns round to drive off with it */
+.wiggle {
+  transform-origin: 50% 100%;
+  animation: wiggle var(--dur) ease-in-out forwards;
+}
+
+@keyframes wiggle {
+  0%,
+  38% {
+    transform: none;
+  }
+  41% {
+    transform: rotate(-7deg);
+  }
+  44% {
+    transform: rotate(5deg);
+  }
+  47%,
+  78% {
+    transform: none;
+  }
+  82%,
+  100% {
+    transform: scaleX(-1);
+  }
+}
+
+/* bits of grass flying up behind each while it cuts */
+.bits {
+  position: absolute;
+  bottom: 12px;
+  left: 6px;
+  opacity: 0;
+  animation: bits var(--dur) linear forwards;
+}
+
+.mower .bits {
+  left: 56px;
+}
+
+@keyframes bits {
+  0%,
+  13% {
+    opacity: 0;
+  }
+  15%,
+  30% {
+    opacity: 1;
+  }
+  32%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.bits i {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #7cb342;
+  animation: bit 0.6s ease-out infinite;
+}
+
+/* the eater throws them back to the left */
+.eater .bits i {
+  --flip: -1;
+}
+
+@keyframes bit {
+  from {
+    transform: none;
+    opacity: 1;
+  }
+  to {
+    transform: translate(calc(var(--flip, 1) * var(--bx)), var(--by));
+    opacity: 0;
+  }
+}
+
+/* flowers come up in the stubble after the kiss */
+.flower {
+  position: absolute;
+  bottom: 1px;
+  transform: scale(0);
+  transform-origin: 50% 100%;
+  animation: bloom var(--dur) ease-out forwards;
+}
+
+.flower svg {
+  display: block;
+}
+
+@keyframes bloom {
+  0%,
+  42% {
+    transform: scale(0);
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  54%,
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* sparks out of the heart */
+.spark {
+  position: absolute;
+  left: var(--mid);
+  bottom: 44px;
+  color: #ffd54f;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+  animation: spark var(--dur) ease-out forwards;
+}
+
+@keyframes spark {
+  0%,
+  38% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(0.3);
+  }
+  42% {
+    opacity: 1;
+  }
+  54%,
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--sx)), var(--sy)) scale(1);
+  }
+}
+
+/* little hearts above the two as they drive off */
+.trail {
+  position: absolute;
+  left: 20px;
+  bottom: 30px;
+  color: #ff5c8a;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  animation: trail var(--dur) ease-out forwards;
+}
+
+.t2 {
+  left: -18px;
+  font-size: 10px;
+  animation-delay: 300ms;
+}
+
+@keyframes trail {
+  0%,
+  82% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+  86% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-22px);
+  }
+}
+
+.heart,
+.small {
+  position: absolute;
+  left: var(--mid);
+  bottom: 36px;
+  color: #ff5c8a;
+  line-height: 1;
+  opacity: 0;
+}
+
+.heart {
+  font-size: 28px;
+  translate: -50% 0;
+  animation: pop var(--dur) ease-out forwards;
+}
+
+@keyframes pop {
+  0%,
+  37% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  41% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+  46% {
+    transform: scale(1);
+  }
+  53% {
+    transform: scale(1.12);
+  }
+  60% {
+    transform: scale(1);
+  }
+  74% {
+    opacity: 1;
+    transform: translateY(-6px) scale(1);
+  }
+  82%,
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) scale(0.9);
+  }
+}
+
+.small {
+  font-size: 13px;
+  animation: float var(--dur) ease-out forwards;
+}
+
+.s1 {
+  --x: -34px;
+  animation-delay: 150ms;
+}
+
+.s2 {
+  --x: 30px;
+  animation-delay: 450ms;
+}
+
+.s3 {
+  --x: -8px;
+  animation-delay: 750ms;
+}
+
+.s4 {
+  --x: 46px;
+  animation-delay: 300ms;
+}
+
+.s5 {
+  --x: -50px;
+  animation-delay: 600ms;
+}
+
+.s6 {
+  --x: 14px;
+  animation-delay: 900ms;
+}
+
+@keyframes float {
+  0%,
+  40% {
+    opacity: 0;
+    transform: translate(-50%, 10px) scale(0.4);
+  }
+  46% {
+    opacity: 1;
+  }
+  66%,
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--x)), -40px) scale(1);
+  }
+}

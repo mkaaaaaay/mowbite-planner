@@ -1,0 +1,81 @@
+/* in front of page headings on phones, where the nav bar has no room for it */
+.titleMark {
+  display: none;
+}
+
+@media (max-width: 899px) {
+  .titleMark {
+    display: inline-block;
+    margin-right: 8px;
+    vertical-align: -5px;
+  }
+}
+
+/* it munches its way into the grass and the grass grows back */
+.chomping {
+  cursor: pointer;
+}
+
+.chomping .body {
+  animation: logo-walk 3s ease-in-out;
+}
+
+.chomping .tuft1,
+.chomping .tuft2 {
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+
+.chomping .tuft1 {
+  animation: logo-eat-1 3s ease-in-out;
+}
+
+.chomping .tuft2 {
+  animation: logo-eat-2 3s ease-in-out;
+}
+
+@keyframes logo-walk {
+  0% {
+    transform: translateX(0);
+  }
+  35% {
+    transform: translateX(5px);
+  }
+  70% {
+    transform: translateX(11px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes logo-eat-1 {
+  0%,
+  15% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  40%,
+  85% {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes logo-eat-2 {
+  0%,
+  45% {
+    transform: scaleY(1);
+  }
+  72%,
+  88% {
+    transform: scaleY(0);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
