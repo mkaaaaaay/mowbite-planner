@@ -71,12 +71,15 @@ FIXED = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic
          'allow_reverse': 'forwards only (FTC)'}
 CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIMETER_ORDERS,
            'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
-           'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES}
+           'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle')
+# may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
+SIGNED = RAD + ('perimeter_offset', 'blade_offset')
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'perimeter_passes': (0, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
-          'angle_step': (limits.MIN_ANGLE_STEP, None)}
+          'angle_step': (limits.MIN_ANGLE_STEP, None),
+          'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET)}
 
 
 class XbotRpc:
@@ -106,9 +109,11 @@ class XbotRpc:
             return
         try:
             try:
-                params = json.loads(req.params) if req.params else {}
+                params = json.loads(req.params) if req.params else None
             except ValueError:
-                params = None
+                params = []
+            if params is None:  # none given, or null
+                params = {}
             if not isinstance(params, dict):
                 raise PlanningError('params must be an object (by name)')
             result = json.dumps(self.methods[req.method](params), allow_nan=False)
@@ -221,8 +226,8 @@ class MowbitePlannerRos1:
             if name in CHOICES:
                 entry['choices'] = CHOICES[name]
             if kind == 'number':
-                entry['unit'] = 'rad' if name in RAD else '' if name == 'overlap' else 'm'
-                if name not in RAD:
+                entry['unit'] = 'rad' if name in RAD else '' if name in ('overlap', 'transit_edge_cost') else 'm'
+                if name not in SIGNED:
                     entry['min'] = 0.0
             if name in RANGES:
                 entry['min'], hi = RANGES[name]

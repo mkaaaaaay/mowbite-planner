@@ -232,8 +232,10 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   `$ROS_HOME/mowbite_planner_settings.json` (`/data/ros` in the container, it outlives a new image) and used
   from the next plan on, an interrupted area whose plan changes starts again. Answers like `planner.settings`.
 - `planner.plan`: like the MQTT service's `ext.mowbite_planner.plan` (`area_id` or `outline`, `settings` to
-  try before setting them, `poses`), with the node's settings and `mower_logic`'s parameters. On top of
-  `mowing.plan`'s answer: segments, warnings, stats and a fingerprint. Without the increment `mower_logic`
+  try before setting them, `poses`, `report`, `trace`), with the node's settings and `mower_logic`'s
+  parameters. On top of `mowing.plan`'s answer: segments, warnings, stats and a fingerprint, with
+  `report: true` a check of the plan (unmowed pieces, poses off the area, gaps, how much is mowed twice),
+  with `trace: true` where every loop, lane and segment comes from. Without the increment `mower_logic`
   adds to the angle after every finished job.
 
 ```bash

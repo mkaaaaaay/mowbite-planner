@@ -42,6 +42,10 @@ TURN = 'turn'
 TRANSIT = 'transit'
 
 ANGLE_STRATEGIES = ('longest_edge', 'min_width', 'optimal')
+# 'nearest': the closest cell not mowed yet next, 'optimized': the order with the shortest drives between them
+ROUTE_ORDERS = ('nearest', 'optimized')
+# orders route_order 'optimized' tries at most for one set of cells, so it doesn't take long with many
+ORDER_BUDGET = 4000
 LANE_ORDERS = ('snake', 'skip')
 # lanes: parallel lanes; crosshatch: lanes, then lanes across them; concentric: loops further and further in
 FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
@@ -66,6 +70,8 @@ MAX_PASSES = 255
 MAX_TURN_RADIUS = 10.0
 # m, coordinates further out are a mistake (or the wrong frame), not a lawn
 MAX_COORDINATE = 1e7
+# m, a blade further off the mower's centre is a mistake
+MAX_BLADE_OFFSET = 1.0
 
 
 class PlanningError(ValueError):
@@ -102,11 +108,22 @@ class PlannerConfig:
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
+    route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
     transit_clearance: float = 0.05  # m, transits keep this far from the outer loop and obstacle loops
     simplify_tolerance: float = 0.01  # m, the outline and obstacles are simplified this much first
     min_lane_length: float = 0.10  # m, shorter pieces of a lane are left out
+    # m, a row split by an obstacle with at most this much between its pieces (a tree, a bed) becomes one lane
+    # that bends around it, if the bend stays within bend_max_offset of the row's line: fewer cells, the
+    # zigzag goes on past the obstacle. 0: the row is split
+    bend_max_gap: float = 0.0
+    bend_max_offset: float = 0.5  # m
+    # m, drives between the parts of the plan keep this far off the edges (a wall, a bed) where that doesn't
+    # cost much more (transit_edge_cost), 0: the shortest way
+    transit_edge_distance: float = 0.0
+    # every metre of a drive closer to the edge than transit_edge_distance counts this much more
+    transit_edge_cost: float = 2.0
     # lanes reach this many perimeter loops further out (OpenMower's outline_overlap_count)
     lane_overlap_passes: int = 0
     # leave parts out (OpenMower's skip_area_outline, skip_obstacle_outlines, skip_fill), the rest is
@@ -114,6 +131,13 @@ class PlannerConfig:
     skip_outline_loops: bool = False
     skip_obstacle_loops: bool = False
     skip_lanes: bool = False
+    # m, the mower's body: its centre keeps robot_width / 2 off the outline and the obstacles, the first loop
+    # moves further in where perimeter_offset would bring the body closer. None: only perimeter_offset counts
+    robot_width: Optional[float] = None
+    # m, how far the blade's centre sits to the left of the mower's centre (negative: right). The loops go
+    # round with the blade on their outer side, so it mows up to perimeter_offset while the body stays further
+    # in, the lanes move so the blade's lines stay a lane spacing apart
+    blade_offset: float = 0.0
 
     @property
     def lane_spacing(self) -> float:
@@ -122,6 +146,19 @@ class PlannerConfig:
     @property
     def first_loop_offset(self) -> float:
         return 0.5 * self.mower_width if self.perimeter_offset is None else self.perimeter_offset
+
+    @property
+    def blade_loop_offset(self) -> float:
+        """m, how far inside the outline (and off the obstacles) the blade's centre runs on the first loop:
+        first_loop_offset, further in where the body (robot_width) wouldn't fit there."""
+        if self.robot_width is None:
+            return self.first_loop_offset
+        return max(self.first_loop_offset, 0.5 * self.robot_width - abs(self.blade_offset))
+
+    @property
+    def centre_offset(self) -> float:
+        """m, how far the mower's centre keeps off the outline and the obstacles."""
+        return self.blade_loop_offset + abs(self.blade_offset)
 
     @property
     def allowed_turns(self) -> Tuple[str, ...]:
@@ -178,6 +215,10 @@ class PlannerConfig:
         finite('transit_clearance', 0.0)
         finite('simplify_tolerance', 0.0)
         finite('min_lane_length', 0.0)
+        finite('bend_max_gap', 0.0)
+        finite('bend_max_offset', 0.0)
+        finite('transit_edge_distance', 0.0)
+        finite('transit_edge_cost', 0.0)
         finite('angle_offset')
         finite('crosshatch_angle')
         # finer steps only take longer: half a degree turns a 10 m lane by 9 cm at its end
@@ -189,11 +230,16 @@ class PlannerConfig:
             raise PlanningError('angle_min and angle_max go together')
         if self.perimeter_offset is not None:
             finite('perimeter_offset')
+        if self.robot_width is not None:
+            finite('robot_width', 0.0)
+        finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         for name in ('perimeter_passes', 'lane_overlap_passes'):
             v = getattr(self, name)
             whole = isinstance(v, int) or isinstance(v, float) and math.isfinite(v) and v == int(v)
             if isinstance(v, bool) or not whole or not 0 <= v <= MAX_PASSES:
                 raise PlanningError(f'{name} must be a whole number 0..{MAX_PASSES}, got {v!r}')
+        if self.route_order not in ROUTE_ORDERS:
+            raise PlanningError(f'route_order must be one of {", ".join(ROUTE_ORDERS)}, got {self.route_order!r}')
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
@@ -209,7 +255,7 @@ class PlannerConfig:
 
 
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
-_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset')
+_OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width')
 _FLOATS = tuple(f.name for f in dataclasses.fields(PlannerConfig) if isinstance(f.default, float)) + _OPTIONAL
 
 
@@ -221,6 +267,7 @@ class PathSegment:
     # turns: 'u_turn', 'bulb', 'k_turn', 'detour', 'pivot'; transits replacing a turn: 'turn_fallback'
     maneuver: str = ''
     section: int = 0
+    source: str = ''  # what it mows or leads to: 'loop-<i>', 'lane-<i>' (see CoveragePlan.origins)
 
 
 @dataclass
@@ -233,6 +280,7 @@ class SegmentInfo:
     # parts of the area with no way between them (e.g. a hedge across it) are sections of their own: the
     # path jumps from the end of one to the start of the next, getting there is up to whoever drives it
     section: int = 0
+    source: str = ''  # the loop or lane it mows or leads to: 'loop-<i>', 'lane-<i>'
 
 
 @dataclass
@@ -248,13 +296,22 @@ class CoveragePlan:
     # the geometry it was planned on, for checks and plots
     area: object = None  # outline as given (cleaned), obstacles not taken out
     free_space: object = None  # area minus obstacles: what gets mowed
-    robot_space: object = None  # where the mower's centre may go: free_space shrunk by perimeter_offset
+    robot_space: object = None  # where the mower's centre may go: free_space shrunk by centre_offset
     lane_region: object = None  # where the lane centres lie
     remaining: object = None  # free_space minus the strips the perimeter loops mow
     angles: List[float] = dataclasses.field(default_factory=list)  # of every set of lanes (crosshatch: 2)
     transit_space: object = None  # robot_space and the drivable areas
     config: Optional[PlannerConfig] = None  # what it was planned with
     section_starts: List[int] = dataclasses.field(default_factory=lambda: [0])  # first pose of every section
+    # where things come from, for following a plan through its stages (export's Planner Studio payload):
+    # the loop levels (level k: free_space shrunk by the k-th loop's offset), the strips too narrow for lanes,
+    # the lanes of every set as cells (lane frame, see Lane), and for every 'loop-<i>' and 'lane-<i>' (index
+    # into perimeter_loops, lanes) what it was made from: {'parent': 'level-<k>' | 'middle-<k>' | 'narrow' |
+    # 'cell-<set>-<index>' (into cells), 'kind': ...}
+    levels: List[object] = dataclasses.field(default_factory=list)
+    narrow: object = None
+    cells: List[Tuple[float, List[List['Lane']]]] = dataclasses.field(default_factory=list)
+    origins: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
 
 
 # lane angle ------------------------------------------------------------------------------------------------
@@ -375,12 +432,47 @@ class Lane:
     x0: float
     x1: float
     y: float
+    # where it bends around an obstacle (bend_max_gap): from x, to x, the way between in the map (from the
+    # piece before to the one after), in order along x
+    bends: Tuple[Tuple[float, float, Tuple[XY, ...]], ...] = ()
 
     def ends(self, angle: float) -> Tuple[XY, XY]:
         """Where it starts and ends in the map, for lanes at angle."""
         c, s = math.cos(angle), math.sin(angle)
         return ((self.x0 * c - self.y * s, self.x0 * s + self.y * c),
                 (self.x1 * c - self.y * s, self.x1 * s + self.y * c))
+
+    def pieces(self) -> List[Tuple[float, float]]:
+        """The straight pieces, without the bends."""
+        xs = [self.x0] + [x for x0, x1, _ in self.bends for x in (x0, x1)] + [self.x1]
+        return list(zip(xs[::2], xs[1::2]))
+
+
+def bend_lanes(rows: List[List[Lane]], angle: float, space: TransitPlanner, max_gap: float,
+               max_offset: float) -> List[List[Lane]]:
+    """Joins the pieces of a row with at most max_gap between them (where a small obstacle splits the row)
+    into one lane that bends around it, on the shortest way through space, if that way never leaves the
+    row's line by more than max_offset nor goes back. Fewer cells: the zigzag goes on past the obstacle."""
+    c, s = math.cos(angle), math.sin(angle)
+    out = []
+    for row in rows:
+        joined: List[Lane] = []
+        for lane in row:
+            prev = joined[-1] if joined else None
+            if prev is not None and 0.0 < lane.x0 - prev.x1 <= max_gap:
+                p = (prev.x1 * c - prev.y * s, prev.x1 * s + prev.y * c)
+                q = (lane.x0 * c - lane.y * s, lane.x0 * s + lane.y * c)
+                way = space.path(p, q)
+                if way is not None:
+                    local = [(x * c + y * s, -x * s + y * c) for x, y in way]
+                    if all(abs(v - lane.y) <= max_offset for _, v in local) and \
+                            all(u1 >= u0 - 1e-9 for (u0, _), (u1, _) in zip(local, local[1:])):
+                        joined[-1] = Lane(prev.row, prev.x0, lane.x1, prev.y,
+                                          prev.bends + ((prev.x1, lane.x0, tuple(way)),) + lane.bends)
+                        continue
+            joined.append(lane)
+        out.append(joined)
+    return out
 
 
 def _ring_list(geom) -> List[List[XY]]:
@@ -601,6 +693,85 @@ def split_cells(rows: List[List[Lane]]) -> List[List[Lane]]:
 # route -----------------------------------------------------------------------------------------------------
 
 
+def best_order(start: List[List[float]], link, end: List[List[float]],
+               first: Optional[List[int]] = None, budget: int = ORDER_BUDGET) -> List[Tuple[int, int]]:
+    """The order of n items (cells), each done one of several ways (options), with the lowest total cost:
+    start[i][a] to begin with item i done way a, link(i, a, j, b) from i done way a to j done way b, end[i][a]
+    to finish with it. Starts from `first` (default: the cheapest next one each time), then moves runs of up to
+    three items elsewhere and reverses runs while that helps, at most `budget` orders tried. For every order
+    the best ways follow exactly (dynamic programming). Returns [(item, way)] in order."""
+    n = len(start)
+    if n == 0:
+        return []
+    k = [len(o) for o in start]
+    links = {(i, j): [[link(i, a, j, b) for b in range(k[j])] for a in range(k[i])]
+             for i in range(n) for j in range(n) if i != j}
+
+    def solve(order: List[int]) -> Tuple[float, List[int]]:
+        cost = list(start[order[0]])
+        back = []
+        for i, j in zip(order, order[1:]):
+            m = links[i, j]
+            nxt, came = [], []
+            for b in range(k[j]):
+                c, a = min((cost[a] + m[a][b], a) for a in range(k[i]))
+                nxt.append(c)
+                came.append(a)
+            cost = nxt
+            back.append(came)
+        last = order[-1]
+        total, way = min((cost[b] + end[last][b], b) for b in range(k[last]))
+        ways = [way]
+        for came in reversed(back):
+            ways.append(came[ways[-1]])
+        return total, ways[::-1]
+
+    if first is None:
+        left, first, way = set(range(n)), [], None
+        while left:
+            if not first:
+                i = min(left, key=lambda i: (min(start[i]), i))
+                way = min(range(k[i]), key=lambda a: (start[i][a], a))
+            else:
+                p = first[-1]
+                i, way = min(((j, b) for j in left for b in range(k[j])),
+                             key=lambda jb: (links[p, jb[0]][way][jb[1]], jb))
+            first.append(i)
+            left.remove(i)
+    order = list(first)
+    best, ways = solve(order)
+    tried = 1
+    improved = True
+    while improved and tried < budget:
+        improved = False
+        moves = []
+        for size in (1, 2, 3):
+            for i in range(n - size + 1):
+                for j in range(n - size + 1):
+                    if j != i:
+                        moves.append(('move', size, i, j))
+        for i in range(n - 1):
+            for j in range(i + 2, n + 1):
+                moves.append(('reverse', 0, i, j))
+        for kind, size, i, j in moves:
+            if tried >= budget:
+                break
+            if kind == 'move':
+                run, rest = order[i:i + size], order[:i] + order[i + size:]
+                candidate = rest[:j] + run + rest[j:]
+            else:
+                candidate = order[:i] + order[i:j][::-1] + order[j:]
+            if candidate == order:
+                continue
+            tried += 1
+            cost, cw = solve(candidate)
+            if cost < best - 1e-9:
+                order, best, ways = candidate, cost, cw
+                improved = True
+                break
+    return list(zip(order, ways))
+
+
 class _Route:
     def __init__(self, cfg: PlannerConfig, transit: TransitPlanner, area: TransitPlanner, start: Optional[XY],
                  heading: Optional[float], end: Optional[XY]):
@@ -620,6 +791,12 @@ class _Route:
         self.end = end
         self.started = False
         self.section = 0
+        # rings (by id) the centre drives with the blade on their inner side, see centre_rings
+        self.blade_in: set = set()
+        # what the segments added now mow or lead to, and where every loop and lane comes from
+        self.source = ''
+        self.origins: Dict[str, Dict[str, Any]] = {}
+        self.cell_of: Dict[int, str] = {}  # lane (by id) -> its cell, 'cell-<set>-<index>' in CoveragePlan.cells
 
     def _count(self, key: str) -> None:
         self.counts[key] = self.counts.get(key, 0) + 1
@@ -627,7 +804,7 @@ class _Route:
     def add(self, kind: str, poses: List[Pose2D], reverse: bool = False, maneuver: str = '') -> None:
         if not poses:
             return
-        self.segments.append(PathSegment(kind, poses, reverse, maneuver, self.section))
+        self.segments.append(PathSegment(kind, poses, reverse, maneuver, self.section, self.source))
         last = poses[-1]
         self.pos = (last.x, last.y)
         self.heading = last.yaw
@@ -650,7 +827,7 @@ class _Route:
             return
         # leaving and arriving on arcs where they fit
         poses = connect(self.pos, self.heading, target, heading, self.cfg.turn_radius, self.step,
-                        self.transit.is_free, self.transit.path)
+                        self.transit.is_free, self.transit.careful_path)
         if poses is None:
             self.warnings.append(f'no way found from ({self.pos[0]:.2f}, {self.pos[1]:.2f}) to ({target[0]:.2f}, '
                                  f'{target[1]:.2f}): the path jumps there')
@@ -664,6 +841,27 @@ class _Route:
 
     # loops
 
+    def centre_rings(self, geom) -> List[Tuple[str, List[XY]]]:
+        """The rings of geom as rings() gives them, for the mower's centre to drive so the blade mows along
+        geom's: with blade_offset the centre runs that much further in (the blade on the outer side). Around the
+        parts of geom narrower than twice the offset (a strip, the thin end of a loop) it runs that much further
+        out, with the blade on the inner side, as far as it may go there."""
+        off = abs(self.cfg.blade_offset)
+        if off == 0:
+            return rings(geom)
+        half = 0.5 * self.cfg.mower_width
+        core = inset(geom, off)
+        found = rings(core)
+        thin = geom if core.is_empty else polygonal(geom.difference(core.buffer(off, QUAD_SEGS)))
+        for part in polygons(thin):
+            if part.area < half * half:  # the tips of sharp corners, the loops round them anyway
+                continue
+            for kind, ring in rings(inset(part, -off)):
+                if self.area.is_free(ring + ring[:1]):
+                    found.append((kind, ring))
+                    self.blade_in.add(id(ring))
+        return found
+
     def _ring_distance(self, ring: List[XY]) -> float:
         if self.pos is None:
             return 0.0
@@ -674,7 +872,7 @@ class _Route:
 
     def drive_ring(self, ring: List[XY], hole: bool, kind: str = PERIMETER, maneuver: str = '',
                    target: Optional[XY] = None, level: int = 0, spacing: Optional[float] = None,
-                   radius: Optional[float] = None) -> None:
+                   radius: Optional[float] = None, parent: Optional[str] = None) -> None:
         """One loop. ring comes as rings() gives it (outline ccw, hole cw: the mowable side on the left).
         It starts closest to target (default: a little ahead of the mower). Its corners are rounded with
         perimeter_corner_radius (or radius), less the further in it is (`level` loops `spacing` apart), so
@@ -693,7 +891,11 @@ class _Route:
         entry = _clear_of_corners(closed, i, entry, 2.0 * radius)
         loop = [entry] + closed[i + 1:] + closed[1:i + 1] + [entry]
         direction = self.cfg.perimeter_direction
-        if direction == 'auto':
+        if self.cfg.blade_offset != 0:
+            # rings come with the mowable side on the left: the blade goes on the other side, but for the rings
+            # driven with the blade on the inner one
+            flip = (self.cfg.blade_offset > 0) != (id(ring) in self.blade_in)
+        elif direction == 'auto':
             flip = False
             # the start pose's heading counts too: no half turn on the spot before the first loop
             if self.heading is not None:
@@ -709,6 +911,10 @@ class _Route:
         if flip:
             loop = loop[::-1]
         first = _first_direction(loop)
+        name = f'loop-{len(self.loops)}'
+        self.source = name
+        self.origins[name] = {'parent': parent or f'level-{level}', 'kind': 'obstacle' if hole else 'outline',
+                              'level': level}
         self.go_to(entry, math.atan2(first[1], first[0]) if first else None)
         # with the mowable side on the left only left turns go round a corner of it and get rounded
         poses = drive_polyline(loop, self.step, radius, self.area.is_free, -1 if flip else 1,
@@ -729,8 +935,9 @@ class _Route:
         groups: Dict[int, List[Tuple[int, List[XY]]]] = {}
         spare = len(hole_polys)
         for k, level in enumerate(levels):
-            outlines.append((k, [ring for kind, ring in rings(level) if kind == 'outline']))
-            for kind, ring in rings(level):
+            level_rings = self.centre_rings(level)
+            outlines.append((k, [ring for kind, ring in level_rings if kind == 'outline']))
+            for kind, ring in level_rings:
                 if kind != 'hole':
                     continue
                 poly = Polygon(ring)
@@ -781,13 +988,14 @@ class _Route:
     def extra_loops(self, geom, finish: bool = False) -> None:
         """Loops around the bits of the area no lane gets to (strips too narrow for one), closest first.
         finish: the one closest to the end point last, ending as close to it as it gets."""
-        todo = [(kind == 'hole', ring) for kind, ring in rings(geom)]
+        todo = [(kind == 'hole', ring) for kind, ring in self.centre_rings(geom)]
         keep = min(todo, key=lambda t: self._end_distance(t[1]), default=None) \
             if finish and self.end is not None else None
         while todo:
             item = min([t for t in todo if t is not keep] or todo, key=lambda t: self._ring_distance(t[1]))
             todo.remove(item)
-            self.drive_ring(item[1], item[0], LANE, 'ring', target=self.end if item is keep else None, radius=0.0)
+            self.drive_ring(item[1], item[0], LANE, 'ring', target=self.end if item is keep else None, radius=0.0,
+                            parent='narrow')
 
     def concentric(self, levels: List[object], middles: List[object], perimeter: int, last: bool,
                    spacing: float) -> None:
@@ -797,7 +1005,7 @@ class _Route:
         moves on. Loops of the first `perimeter` levels count as perimeter loops, the rest as lanes."""
         loops = []  # (depth, hole, ring, line), depth k for level k, k + 0.5 for middles[k]
         for depth, geom in [(k, g) for k, g in enumerate(levels)] + [(k + 0.5, g) for k, g in enumerate(middles)]:
-            for kind, ring in rings(geom):
+            for kind, ring in self.centre_rings(geom):
                 if depth < perimeter:
                     skip = self.cfg.skip_obstacle_loops if kind == 'hole' else self.cfg.skip_outline_loops
                 else:
@@ -829,11 +1037,13 @@ class _Route:
             final = len(done) == len(loops) and self.end is not None
             # a middle loop (depth k + 0.5) is half a spacing further in, rounded like the next level's
             level, gap = int(math.ceil(depth)), spacing
+            parent = f'level-{depth}' if depth == level else f'middle-{int(depth)}'
             if depth < perimeter:
-                self.drive_ring(ring, hole, target=self.end if final else None, level=level, spacing=gap)
+                self.drive_ring(ring, hole, target=self.end if final else None, level=level, spacing=gap,
+                                parent=parent)
             else:
                 self.drive_ring(ring, hole, LANE, 'ring', target=self.end if final else None, level=level,
-                                spacing=gap)
+                                spacing=gap, parent=parent)
 
     # lanes
 
@@ -863,6 +1073,9 @@ class _Route:
             return self.cfg.turn_radius * angle_diff(angle if direction > 0 else angle + math.pi, self.heading)
 
         pending = [list(cell) for cell in cells if cell]
+        if self.cfg.route_order == 'optimized' and len(pending) > 1:
+            pending = self.optimized_cells(pending, options, angle, finish and self.end is not None, to_map)
+            finish = False
         reserved = None
         if finish and self.end is not None and pending:
             ri = min(range(len(pending)),
@@ -887,6 +1100,37 @@ class _Route:
             rest = self.drive_lanes(lanes, direction, angle, to_map)
             if rest:
                 pending.append(sorted(rest, key=lambda lane: lane.row))
+
+    def optimized_cells(self, cells: List[List[Lane]], options, angle: float, finish: bool,
+                        to_map) -> List[List[Lane]]:
+        """Mows the cells in the order best_order() finds, drives estimated as the straight distance plus
+        turning (turn_radius times the angle), with finish the last one ending as close to the end point as it
+        can. Returns the lanes it couldn't get to, for the nearest-first order to pick up."""
+        r = self.cfg.turn_radius
+        opts = [list(options(cell)) for cell in cells]
+
+        def heading(direction: int) -> float:
+            return angle if direction > 0 else angle + math.pi
+
+        def out(o) -> float:  # the way the last lane goes
+            return heading(o[1] if len(o[0]) % 2 else -o[1])
+
+        start = [[self._distance(self.pos, o[2]) + (0.0 if self.heading is None else
+                                                    r * angle_diff(heading(o[1]), self.heading)) for o in os]
+                 for os in opts]
+        end = [[1000.0 * self._distance(self.end, o[3]) if finish else 0.0 for o in os] for os in opts]
+
+        def link(i: int, a: int, j: int, b: int) -> float:
+            p, q = opts[i][a], opts[j][b]
+            return math.hypot(q[2][0] - p[3][0], q[2][1] - p[3][1]) + r * angle_diff(heading(q[1]), out(p))
+
+        left = []
+        for i, a in best_order(start, link, end):
+            lanes, direction, _, _ = opts[i][a]
+            rest = self.drive_lanes(lanes, direction, angle, to_map)
+            if rest:
+                left.append(sorted(rest, key=lambda lane: lane.row))
+        return left
 
     def _turn_into(self, a: XY, yaw: float) -> bool:
         """The next cell's first lane right next to where the mower is and the other way round: that's a turn
@@ -913,7 +1157,8 @@ class _Route:
             return lanes
         # lanes k apart leave room for a U-turn of turn_radius. Every pass goes the same way, the turn from
         # the end of one pass to the start of the next is a long U-turn along the headland
-        k = max(1, int(math.ceil(2.0 * self.cfg.turn_radius / spacing - 1e-9)))
+        # (blade_offset: the centre lines are twice the offset closer every other turn)
+        k = max(1, int(math.ceil((2.0 * self.cfg.turn_radius + 2.0 * abs(self.cfg.blade_offset)) / spacing - 1e-9)))
         n = len(lanes)
         if n < 2 * k:
             # too few lanes for that: from the middle, every step about half the cell wide (the smallest step
@@ -925,13 +1170,28 @@ class _Route:
 
     def drive_lanes(self, lanes: List[Lane], direction: int, angle: float, to_map) -> Optional[List[Lane]]:
         """Mows the lanes as a zigzag. Returns the lanes it couldn't get to, None when all are done."""
+        driven = 0
         for i, lane in enumerate(lanes):
             xa, xb = (lane.x0, lane.x1) if direction > 0 else (lane.x1, lane.x0)
-            a, b = to_map(xa, lane.y), to_map(xb, lane.y)
+            # the blade on the lane, the centre blade_offset to its right (left of the lanes going +x is +y)
+            y = lane.y - self.cfg.blade_offset * direction
+            a, b = to_map(xa, y), to_map(xb, y)
+            if self.cfg.blade_offset != 0 and not self.area.is_free([a, b]):
+                # shifted towards an edge the lanes run along, with fewer loops than twice the offset in lane
+                # spacings: as much of it as the centre may drive
+                piece = self.area.clip(a, b, self.cfg.min_lane_length)
+                self._count('lanes_shortened')
+                if piece is None:
+                    continue
+                a, b = piece
             yaw = normalize_angle(angle if direction > 0 else angle + math.pi)
-            if i == 0 and self._turn_into(a, yaw):
+            name = f'lane-{len(self.lanes)}'
+            self.source = name
+            self.origins[name] = {'parent': self.cell_of.get(id(lane), ''),
+                                  'kind': 'bent' if lane.bends else 'straight', 'row': lane.row}
+            if driven == 0 and self._turn_into(a, yaw):
                 pass
-            elif i == 0:
+            elif driven == 0:
                 self.go_to(a, yaw)
             else:
                 turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
@@ -948,10 +1208,24 @@ class _Route:
                     self.add(TRANSIT, drive_polyline(pts, self.step, self.cfg.turn_radius,
                                                      self.transit.is_free), maneuver='turn_fallback')
                     self._count('turns_fallback')
-            self.add(LANE, sample_straight(a[0], a[1], b[0], b[1], yaw, self.step))
+            if lane.bends:
+                self.bent_lane(lane, direction, a, b)
+            else:
+                self.add(LANE, sample_straight(a[0], a[1], b[0], b[1], yaw, self.step))
             self.lanes.append((a, b))
             direction = -direction
+            driven += 1
         return None
+
+    def bent_lane(self, lane: Lane, direction: int, a: XY, b: XY) -> None:
+        """A lane that bends around obstacles (see bend_lanes), from a to b, its corners rounded."""
+        bends = [list(way) for _, _, way in lane.bends]
+        if direction < 0:
+            bends = [way[::-1] for way in bends[::-1]]
+        pts = [a] + [p for way in bends for p in way] + [b]
+        pts = [p for i, p in enumerate(pts) if i == 0 or not same_position(p, pts[i - 1])]
+        self.add(LANE, drive_polyline(pts, self.step, self.cfg.turn_radius, self.area.is_free), maneuver='bend')
+        self._count('bends')
 
 
 def _clear_of_corners(closed: List[XY], i: int, entry: XY, keep: float) -> XY:
@@ -1002,7 +1276,8 @@ def _assemble(segments: List[PathSegment]) -> Tuple[List[Pose2D], List[SegmentIn
             if start is None:
                 start = len(poses) - 1
         if start is not None and len(poses) - 1 > start:
-            infos.append(SegmentInfo(seg.kind, start, len(poses) - 1, seg.reverse, seg.maneuver, seg.section))
+            infos.append(SegmentInfo(seg.kind, start, len(poses) - 1, seg.reverse, seg.maneuver, seg.section,
+                                     seg.source))
     return poses, infos
 
 
@@ -1045,7 +1320,11 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         _check_coordinates('a drivable area', d)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
     half = 0.5 * cfg.mower_width
-    first = cfg.first_loop_offset
+    # the blade's first loop, the mower's centre is `off` further in (blade_offset, the loops go round with the
+    # blade on their outer side)
+    first = cfg.blade_loop_offset
+    off = abs(cfg.blade_offset)
+    centre = first + off
     spacing = cfg.lane_spacing
     concentric = cfg.fill_pattern == 'concentric'
 
@@ -1063,9 +1342,10 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         raise PlanningError('the obstacles cover the whole area')
     # slivers smaller than the blade (where a noisy outline crosses itself) aren't parts of their own
     free = polygonal(union(p for p in polygons(free) if p.area >= half * half))
-    robot_space = inset(free, first)
+    robot_space = inset(free, centre)
     if robot_space.is_empty:
-        raise PlanningError(f'the area is too narrow for a first loop {first} m inside the outline')
+        raise PlanningError(f'the area is too narrow for a first loop {centre} m inside the outline')
+    blade_space = robot_space if off == 0 else inset(free, first)
     if cfg.waypoint_spacing > 0:
         # every square metre takes about 1 / lane spacing metres of path
         estimate = free.area / spacing / cfg.waypoint_spacing
@@ -1090,7 +1370,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     loop_spacing = min(spacing, cfg.mower_width / math.sqrt(2.0)) if concentric else spacing
     levels = []
     while concentric or len(levels) < count:
-        level = robot_space if not levels else inset(free, first + len(levels) * loop_spacing)
+        level = blade_space if not levels else inset(free, first + len(levels) * loop_spacing)
         if level.is_empty:
             break
         levels.append(level)
@@ -1124,6 +1404,10 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 
+    # turns and loops stay inside the mowing area, so do the bends of lanes around obstacles
+    edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
+    area_space = TransitPlanner(robot_space, cfg.transit_clearance, **edges)
+
     # 3. lanes, for crosshatch a second time across them
     passes: List[Tuple[float, List[List[Lane]]]] = []
     if not concentric and not cfg.skip_lanes and not lane_region.is_empty:
@@ -1133,13 +1417,16 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
             angles.append(second + math.pi if second < 0 else second)
         for a in angles:
             rows = scan_lanes(lane_region, a, spacing, cfg.min_lane_length, remaining, robot_space, half)
+            if cfg.bend_max_gap > 0 and cfg.blade_offset == 0:
+                rows = bend_lanes(rows, a, area_space, cfg.bend_max_gap, cfg.bend_max_offset)
             passes.append((a, split_cells(rows)))
     # (remaining counts every loop, so not when some are left out)
     if not narrow.is_empty and passes and not (cfg.skip_outline_loops or cfg.skip_obstacle_loops):
         # a narrow piece needs no loop where the lanes already mow what the loops leave around it (they reach
         # on into a strip along them, see scan_lanes). The lanes of each pass by row, so only those next to a
         # piece are looked at
-        by_row = [(a, sorted((lane.y, lane.x0, lane.x1) for cell in cells for lane in cell)) for a, cells in passes]
+        by_row = [(a, sorted((lane.y, x0, x1) for cell in cells for lane in cell for x0, x1 in lane.pieces()))
+                  for a, cells in passes]
 
         def left(piece) -> float:
             strip = piece.buffer(half, QUAD_SEGS)
@@ -1165,18 +1452,20 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     if start_xy is None:
         corner = list(polygons(area))[0].exterior.coords[0]
         start_xy = (corner[0], corner[1])
-    area_space = TransitPlanner(robot_space, cfg.transit_clearance)
     transit_space = robot_space
     extra_space = union(clean_polygon(d) for d in drivable)
     if not extra_space.is_empty:
         # drivable areas are recorded like outlines, the mower's centre may go anywhere in them, but not
         # closer to an obstacle than in the mowing area
-        keep_off = blocked.buffer(max(first, half), QUAD_SEGS) if not blocked.is_empty else None
+        keep_off = blocked.buffer(max(centre, half), QUAD_SEGS) if not blocked.is_empty else None
         if keep_off is not None:
             extra_space = extra_space.difference(keep_off)
         transit_space = polygonal(union([robot_space, extra_space]))
-    transit = area_space if transit_space is robot_space else TransitPlanner(transit_space, cfg.transit_clearance)
+    transit = area_space if transit_space is robot_space else TransitPlanner(transit_space, cfg.transit_clearance,
+                                                                             **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy)
+    route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
+                     for ci, cell in enumerate(cells) for lane in cell}
     last = cfg.perimeter_order == 'last'
     holes = [ring for kind, ring in rings(free) if kind == 'hole']
 
@@ -1272,6 +1561,10 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     took('route')
     if not poses:
         raise PlanningError('nothing to mow: the area is too small for one loop or lane')
+    if route.counts.get('lanes_shortened'):
+        route.warnings.append(f'{route.counts["lanes_shortened"]} lanes along an edge shortened or left out: with '
+                              f'blade_offset {cfg.blade_offset} m the centre runs that far off the blade\'s line, '
+                              'more perimeter loops leave room for it')
     section_starts = [s.start for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section]
     if len(section_starts) > 1:
         route.warnings.append(f'the area has {len(section_starts)} parts with no way between them: the path '
@@ -1304,13 +1597,15 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         lanes=route.lanes, stats=stats, warnings=route.warnings, area=area, free_space=free,
         robot_space=robot_space, lane_region=lane_region, remaining=remaining,
         angles=[a for a, _ in passes] or [angle], transit_space=transit_space, config=cfg,
-        section_starts=section_starts)
+        section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
 
 
 def swept_area(plan: CoveragePlan, mower_width: float):
     """What the blade covers along the whole path (a disk of mower_width), for checks and plots."""
     ends = list(plan.section_starts[1:]) + [len(plan.poses)]
-    lines = [LineString([(p.x, p.y) for p in plan.poses[a:b]])
+    off = plan.config.blade_offset if plan.config else 0.0
+    # the blade blade_offset to the left of each pose
+    lines = [LineString([(p.x - off * math.sin(p.yaw), p.y + off * math.cos(p.yaw)) for p in plan.poses[a:b]])
              for a, b in zip(plan.section_starts, ends) if b - a >= 2]
     if not lines:
         return Polygon()

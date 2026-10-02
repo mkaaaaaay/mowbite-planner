@@ -196,11 +196,18 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `allow_reverse` | true | K-turns |
 | `turn_types` | all | `[u_turn, bulb, k_turn, detour, pivot]`, the ones allowed, preferred first |
 | `lane_order` | `snake` | `snake` or `skip` |
+| `route_order` | `nearest` | cells `nearest` first, or `optimized`: the order with the shortest drives between them |
 | `perimeter_corner_radius` | 0.15 | rounding of the loops' outline corners [m], 0 = sharp |
 | `waypoint_spacing` | 0.10 | distance between poses [m], 0 = only where the direction changes |
 | `transit_clearance` | 0.05 | how far transits stay from the outer loop and obstacle loops [m] |
 | `simplify_tolerance` | 0.01 | the boundary and obstacles are simplified this much first [m] |
 | `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
+| `robot_width` | -1.0 | the mower's body [m]: its centre keeps half of it off the outline and the obstacles, negative = only `perimeter_offset` counts |
+| `blade_offset` | 0.0 | the blade's centre this far left of the mower's [m] (negative: right), the loops go round with the blade on their outer side, -1..1 |
+| `bend_max_gap` | 0.0 | a row split by an obstacle with at most this much between its pieces becomes one lane bending around it [m], 0 = split |
+| `bend_max_offset` | 0.5 | how far such a bend may leave its lane's line [m] |
+| `transit_edge_distance` | 0.0 | transits keep this far off the edges where that costs little more [m], 0 = the shortest way |
+| `transit_edge_cost` | 2.0 | every metre of a transit closer to the edge than that counts this much more |
 | `publish_path` | true | publish every plan on `~/coverage_path` |
 | `max_path_poses` | 30000 | `~/plan_path` cuts longer paths, at least 4 |
 
@@ -270,8 +277,8 @@ service then stays quiet.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `ext.planner.plan` | Planner Studio's request (OpenMower's app, xtech/openmower-app): `area`, `obstacles`, `nav_areas`, `params` | Planner Studio's stages, stats and report (parameters the planner doesn't know are listed as not used), the paths under `mowbite` |
-| `ext.mowbite_planner.plan` | `area_id` (id, name or index of a mowing area of the mower's map) or `outline`, `obstacles`, `nav_areas`; optional `angle`, `outline_count`, `outline_overlap_count`, `outline_offset`, `angle_min`, `angle_max` in place of the area's properties, `settings` (any planner setting), `start`, `end`, `poses` | like OpenMower's `mowing.plan`: `paths` with `is_outline` and `points` (simplified to 1 cm, in mm), plus their segments, `fingerprint`, `warnings`, `stats`, with `poses: true` every pose |
+| `ext.planner.plan` | Planner Studio's request (OpenMower's app, xtech/openmower-app): `area`, `obstacles`, `nav_areas`, `params` (its names: `tool_width`, `headland_rounds`, `min_turning_radius`, `ring_order`, `disk_lateral_offset`, `transit_wall_fade`, `transit_wall_risk`, `merge_max_gap`, `bend_max_dev`, `order` greedy/ortools, or the planner's own) | Planner Studio's stages, lineage, stats and report (parameters the planner doesn't know are listed as not used), the paths under `mowbite` |
+| `ext.mowbite_planner.plan` | `area_id` (id, name or index of a mowing area of the mower's map) or `outline`, `obstacles`, `nav_areas`; optional `angle`, `outline_count`, `outline_overlap_count`, `outline_offset`, `angle_min`, `angle_max` in place of the area's properties, `settings` (any planner setting), `start`, `end`, `poses`, `report`, `trace` | like OpenMower's `mowing.plan`: `paths` with `is_outline` and `points` (simplified to 1 cm, in mm), plus their segments, `fingerprint`, `warnings`, `stats`, with `poses: true` every pose, with `report: true` what's wrong with the plan (`hard`), what's worth knowing (`soft`) and how much is mowed once, more than once (`double_mowed_pct`) and not at all, with `trace: true` where everything comes from (`stages`, `lineage`: the area, loop levels, cells, loops, lanes, every segment and what it was made from) |
 | `ext.mowbite_planner.info` | none | version, settings, whether the map and parameters are in |
 
 Points are `[x, y]` or `{"x": x, "y": y}`, `start` may have a heading. The service keeps the map and the

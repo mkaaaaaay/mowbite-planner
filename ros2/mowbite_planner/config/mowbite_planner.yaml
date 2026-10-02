@@ -37,11 +37,26 @@
     # the turns allowed, preferred first
     turn_types: [u_turn, bulb, k_turn, detour, pivot]
     lane_order: snake
+    # cells: nearest (the closest one not mowed yet next) or optimized (shortest drives between them)
+    route_order: nearest
     perimeter_corner_radius: 0.15
     waypoint_spacing: 0.10
     transit_clearance: 0.05
     simplify_tolerance: 0.01
     min_lane_length: 0.10
+    # the mower's body [m]: its centre keeps half of it off the outline and the obstacles (negative: only
+    # perimeter_offset counts). blade_offset: the blade's centre this far left of the mower's (negative: right),
+    # the loops then go round with the blade on their outer side
+    robot_width: -1.0
+    blade_offset: 0.0
+    # a row split by an obstacle with at most bend_max_gap between its pieces becomes one lane bending around it,
+    # at most bend_max_offset off its line (0.0: split, a cell on either side)
+    bend_max_gap: 0.0
+    bend_max_offset: 0.5
+    # transits keep transit_edge_distance off the edges where that costs little more: every metre closer
+    # counts transit_edge_cost more (0.0: the shortest way)
+    transit_edge_distance: 0.0
+    transit_edge_cost: 2.0
     publish_path: true
     # ~/plan_path splits longer paths (OpenMower counts the poses of a path in an int16), at least 4
     max_path_poses: 30000

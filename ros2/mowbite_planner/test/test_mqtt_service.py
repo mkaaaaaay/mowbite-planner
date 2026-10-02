@@ -149,6 +149,19 @@ def test_plan_outline():
     assert again['fingerprint'] == res['fingerprint'] and 'poses' not in again
 
 
+def test_plan_with_report_and_trace():
+    s = PlannerService()
+    res = result(s, 'ext.mowbite_planner.plan', {
+        'outline': outline(rect(0, 0, 10, 6)), 'obstacles': [rect(4, 2, 5, 3)], 'report': True, 'trace': True})
+    json.dumps(res, allow_nan=False)
+    assert res['report']['hard'] == [] and res['report']['left_m2'] < 0.1 and 'double_mowed_pct' in res['report']
+    assert [st['key'] for st in res['stages']][-2:] == ['route', 'ends']
+    assert {o['id'] for o in res['lineage']['objects']} >= {'level-0', 'lane-0', 'loop-0', 'seg-0'}
+    plain = result(s, 'ext.mowbite_planner.plan', {'outline': outline(rect(0, 0, 10, 6)),
+                                                   'obstacles': [rect(4, 2, 5, 3)]})
+    assert 'report' not in plain and 'lineage' not in plain and plain['fingerprint'] == res['fingerprint']
+
+
 def test_plan_area_of_the_map(service, planned):
     res = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
     assert res['area_id'] == 'front'

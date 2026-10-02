@@ -530,6 +530,7 @@ def test_rpc_methods_registered(planner):
 
 
 def test_rpc_settings(planner):
+    assert rpc('planner.settings', 'null') == rpc('planner.settings', {})
     result, error = rpc('planner.settings')
     assert error is None and result['file'] == stored_file() and result['own_angle'] is False
     s = result['settings']
@@ -546,6 +547,10 @@ def test_rpc_settings(planner):
                  'allow_reverse'):
         assert not s[name]['settable'] and s[name]['from'], name
     assert s['overlap']['from'] == '/mower_logic/tool_width'
+    assert s['blade_offset'] == {'value': 0.0, 'default': 0.0, 'stored': False, 'type': 'number', 'settable': True,
+                                 'unit': 'm', 'min': -1.0, 'max': 1.0}
+    assert s['robot_width']['nullable'] and s['robot_width']['min'] == 0.0 and 'max' not in s['robot_width']
+    assert s['transit_edge_cost']['unit'] == ''
 
 
 def test_rpc_settings_set(planner):

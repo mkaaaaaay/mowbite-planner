@@ -26,9 +26,10 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from .export import to_openmower_json, to_poses_json, to_studio_payload
+from .export import to_openmower_json, to_poses_json, to_studio_payload, to_trace_json
 from .mapfile import AreaJob, _number, area_job, area_settings, settings_for
 from .planner import PlannerConfig, PlanningError, plan_coverage
+from .report import check_plan
 
 log = logging.getLogger('mowbite_planner')
 
@@ -38,7 +39,10 @@ TOPICS = ('rpc/request', 'map/json', 'params/json')
 AREA_PROPERTIES = ('angle', 'outline_count', 'outline_overlap_count', 'outline_offset', 'angle_min', 'angle_max')
 # Planner Studio's names for the planner's settings
 STUDIO_NAMES = {'tool_width': 'mower_width', 'headland_rounds': 'perimeter_passes',
-                'min_turning_radius': 'turn_radius', 'ring_order': 'perimeter_order'}
+                'min_turning_radius': 'turn_radius', 'ring_order': 'perimeter_order',
+                'disk_lateral_offset': 'blade_offset', 'transit_wall_fade': 'transit_edge_distance',
+                'transit_wall_risk': 'transit_edge_cost', 'merge_max_gap': 'bend_max_gap',
+                'bend_max_dev': 'bend_max_offset'}
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
@@ -168,7 +172,8 @@ class PlannerService:
     def plan(self, p: Mapping[str, Any]) -> Dict[str, Any]:
         """ext.mowbite_planner.plan: {area_id} of the mower's map or {outline, obstacles, nav_areas}, angle,
         outline_count, ... in place of the area's properties (like OpenMower's mowing.plan), settings (any
-        planner setting), start, end, poses. Planned with the settings the ROS 1 node would use."""
+        planner setting), start, end, poses, report (check_plan), trace (stages and lineage). Planned with the
+        settings the ROS 1 node would use."""
         props = {k: p[k] for k in AREA_PROPERTIES if k in p}
         area_id, start, end = None, None, None
         if p.get('area_id') is not None:
@@ -200,6 +205,10 @@ class PlannerService:
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))
+        if p.get('report'):  # what's wrong with it, what's worth knowing, how much is mowed
+            result['report'] = check_plan(plan)
+        if p.get('trace'):  # where everything comes from, stage by stage
+            result.update(to_trace_json(plan))
         return result
 
     def studio_plan(self, p: Mapping[str, Any]) -> Dict[str, Any]:
@@ -217,6 +226,8 @@ class PlannerService:
                 settings['angle'] = None if deg is None else math.radians(deg)
             elif name in ('start_point', 'end_point'):
                 ends[name] = _pose(value, name)
+            elif name == 'order':  # Planner Studio's route solver
+                settings['route_order'] = {'greedy': 'nearest', 'ortools': 'optimized'}.get(value, value)
             elif name in STUDIO_NAMES or name in PlannerConfig.names():
                 settings[STUDIO_NAMES.get(name, name)] = value
             else:

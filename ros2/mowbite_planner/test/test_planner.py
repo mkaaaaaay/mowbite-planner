@@ -19,7 +19,7 @@ from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_ang
 from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, plan_turn, u_turn  # noqa: E402
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
-                                     angle_in_range, longest_edge_angle, scan_lanes, split_cells)
+                                     angle_in_range, best_order, longest_edge_angle, scan_lanes, split_cells)
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -85,7 +85,7 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
         assert angle_diff(travel, facing) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:
-        if s.kind == LANE and s.maneuver != 'ring':
+        if s.kind == LANE and s.maneuver not in ('ring', 'bend'):
             yaws = {poses[i].yaw for i in range(s.start, s.end)}
             assert len(yaws) == 1
             yaw = yaws.pop()
@@ -550,6 +550,267 @@ def test_perimeter_direction(direction, pattern):
     sign = 1 if direction == 'ccw' else -1
     for s in loops:
         assert sign * signed_area(plan.poses[s.start:s.end + 1]) > 0
+
+
+# body and blade --------------------------------------------------------------------------------------------
+
+FORWARD = dict(allow_reverse=False, lane_order='skip', mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0)
+
+
+def blade_line(poses, off):
+    return [(p.x - off * math.sin(p.yaw), p.y + off * math.cos(p.yaw)) for p in poses]
+
+
+@pytest.mark.parametrize('off', [0.05, -0.05, 0.08])
+@pytest.mark.parametrize('pattern', ['lanes', 'crosshatch'])
+def test_blade_offset_covers_everything(off, pattern):
+    """The centre runs blade_offset to the side of what the blade mows: all is still mowed, the loops go round
+    with the blade on the outer side (the blade up to perimeter_offset, the centre that much further in)."""
+    cfg = PlannerConfig(**dict(FORWARD, blade_offset=off, fill_pattern=pattern))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, [TREE, BED])
+    assert coverage(plan, cfg) > 0.9999
+    # the centre keeps |off| from the outline and the obstacles, the blade's line of the outer loop runs on it
+    outline = Polygon(GARDEN).exterior
+    cloud = MultiPoint([(p.x, p.y) for p in plan.poses])
+    assert outline.distance(cloud) == pytest.approx(abs(off), abs=2e-3)
+    for o in (TREE, BED):
+        assert Polygon(o).distance(cloud) >= abs(off) - cfg.simplify_tolerance - 2e-3
+    loops = [s for s in plan.segments if s.kind == PERIMETER]
+    outer = max(loops, key=lambda s: abs(signed_area(plan.poses[s.start:s.end + 1])))
+    blade = blade_line(plan.poses[outer.start:outer.end + 1], off)
+    near = sorted(outline.distance(Point(p)) for p in blade)
+    assert near[int(0.9 * len(near))] < 0.005  # but where the corners are rounded
+    # with the mowable side on the left the loops along the outline go ccw and the ones around an obstacle cw:
+    # a blade on the left goes the other way round
+    for s in loops:
+        ring = Polygon([(p.x, p.y) for p in plan.poses[s.start:s.end + 1]]).buffer(0)
+        around = any(ring.contains(Polygon(o).centroid) for o in (TREE, BED)) and ring.area < 20
+        assert (signed_area(plan.poses[s.start:s.end + 1]) > 0) == ((off < 0) != around)
+
+
+def test_blade_offset_keeps_lanes_a_spacing_apart():
+    off = 0.06
+    cfg = PlannerConfig(**dict(FORWARD, blade_offset=off, angle=0.0))
+    plan = plan_coverage(rect(0, 0, 12, 8), [], cfg)
+    check_invariants(plan, cfg)
+    ys = sorted({round(y, 6) for s in plan.segments if s.kind == LANE
+                 for y in [blade_line(plan.poses[s.start:s.start + 1], off)[0][1]]})
+    gaps = [b - a for a, b in zip(ys, ys[1:])]
+    assert max(gaps) <= cfg.lane_spacing + 1e-6 and min(gaps) > 0.5 * cfg.lane_spacing
+    # every lane's centre off its blade line by the offset, to the right of the way it goes
+    for s in plan.segments:
+        if s.kind == LANE:
+            p = plan.poses[s.start]
+            assert any(abs(blade_line([p], off)[0][1] - y) < 1e-6 for y in ys)
+
+
+def test_blade_offset_with_few_loops_warns():
+    cfg = PlannerConfig(**dict(FORWARD, blade_offset=0.08, perimeter_passes=0, angle=0.0))
+    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg)
+    check_invariants(plan, cfg)
+    assert any('shortened' in w for w in plan.warnings)
+
+
+@pytest.mark.parametrize('off', [0.0, 0.1])
+def test_robot_width_keeps_the_body_inside(off):
+    cfg = PlannerConfig(**dict(FORWARD, robot_width=0.4, blade_offset=off))
+    assert cfg.blade_loop_offset == pytest.approx(0.2 - off) and cfg.centre_offset == pytest.approx(0.2)
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, [TREE, BED])
+    cloud = MultiPoint([(p.x, p.y) for p in plan.poses])
+    assert Polygon(GARDEN).exterior.distance(cloud) == pytest.approx(0.2, abs=2e-3)
+    for o in (TREE, BED):
+        assert Polygon(o).distance(cloud) >= 0.2 - cfg.simplify_tolerance - 2e-3
+    # what the body keeps it from is left: a strip along the edges, less with the blade further out
+    left = plan.free_space.difference(swept_area(plan, cfg.mower_width)).area
+    edges = sum(Polygon(o).length for o in (GARDEN, TREE, BED))
+    assert left == pytest.approx(edges * (0.2 - off - 0.09), rel=0.35)
+
+
+def test_robot_width_narrower_than_the_loop_changes_nothing():
+    cfg = PlannerConfig(**FORWARD)
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg)
+    narrow = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, perimeter_offset=0.1, robot_width=0.1)))
+    wider = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, perimeter_offset=0.1)))
+    assert [(p.x, p.y) for p in narrow.poses] == [(p.x, p.y) for p in wider.poses]
+    assert plan.poses != wider.poses
+
+
+def test_body_and_blade_settings_out_of_range():
+    for kw, match in ((dict(robot_width=-0.1), 'robot_width'), (dict(blade_offset=1.5), 'blade_offset'),
+                      (dict(blade_offset=math.nan), 'blade_offset'), (dict(robot_width=True), 'robot_width')):
+        with pytest.raises(PlanningError, match=match):
+            PlannerConfig(**kw).validate()
+    assert PlannerConfig().with_overrides({'robot_width': None, 'blade_offset': 0}).blade_offset == 0.0
+
+
+# drives off the edges --------------------------------------------------------------------------------------
+
+
+def test_careful_path_keeps_off_the_edge():
+    space = Polygon(rect(0, 0, 12, 6))
+    a, b = (1.0, 0.05), (11.0, 0.05)  # along the bottom edge
+    plain = TransitPlanner(space)
+    assert plain.careful_path(a, b) == [a, b]  # no edge_distance: the shortest way
+    careful = TransitPlanner(space, edge_distance=0.4, edge_cost=2.0)
+    way = careful.careful_path(a, b)
+    assert way[0] == a and way[-1] == b and len(way) == 4
+    assert careful.edge_length(way) == pytest.approx(0.7, abs=0.01)  # only getting in and out
+    assert careful.edge_length([a, b]) == pytest.approx(10.0)
+    assert careful.cost(way) < careful.cost([a, b])
+    assert prep(space.buffer(1e-6)).covers(LineString(way))
+    # where keeping off costs more than it's worth, the shortest way
+    cheap = TransitPlanner(space, edge_distance=0.4, edge_cost=0.01)
+    assert cheap.careful_path(a, b) == [a, b]
+    # across the middle nothing changes, nor where the shrunk space has no way (a passage narrower than 0.8 m)
+    assert careful.careful_path((2.0, 3.0), (10.0, 3.0)) == [(2.0, 3.0), (10.0, 3.0)]
+    neck = Polygon([(0, 0), (5, 0), (5, 2.7), (7, 2.7), (7, 0), (12, 0), (12, 6), (7, 6), (7, 3.3), (5, 3.3),
+                    (5, 6), (0, 6)])
+    narrow = TransitPlanner(neck, edge_distance=0.4, edge_cost=2.0)
+    assert narrow.careful_path((1.0, 3.0), (11.0, 3.0)) == narrow.path((1.0, 3.0), (11.0, 3.0))
+
+
+def test_transits_keep_off_the_edges():
+    many = [circle(5 + 6 * i, 5 + 5 * j, 0.6, 12) for i in range(3) for j in range(2)]
+    boundary = rect(0, 0, 20, 14)
+    near = {}
+    for d in (0.0, 0.4):
+        cfg = PlannerConfig(**dict(FORWARD, transit_edge_distance=d))
+        plan = plan_coverage(boundary, many, cfg, start=(1, 1, 0.0), end=(1, 1))
+        check_invariants(plan, cfg, many)
+        assert coverage(plan, cfg) > 0.9999
+        band = TransitPlanner(plan.robot_space, edge_distance=0.4, edge_cost=1.0)
+        band.careful_path((1, 1), (2, 2))
+        ways = [[(p.x, p.y) for p in plan.poses[s.start:s.end + 1]] for s in plan.segments if s.kind == TRANSIT]
+        near[d] = sum(band.edge_length(w) for w in ways if len(w) > 1)
+    assert near[0.4] < 0.85 * near[0.0]
+
+
+def test_edge_settings_out_of_range():
+    for kw in (dict(transit_edge_distance=-1), dict(transit_edge_cost=math.inf)):
+        with pytest.raises(PlanningError, match=list(kw)[0]):
+            PlannerConfig(**kw).validate()
+
+
+# lanes bending around obstacles ----------------------------------------------------------------------------
+
+TREES = [circle(5 + 6 * i, 5 + 5 * j, 0.4, 12) for i in range(4) for j in range(3)]
+
+
+def test_lane_pieces():
+    lane = Lane(0, 0.0, 10.0, 1.0, ((3.0, 4.0, ((3.0, 1.0), (3.5, 1.4), (4.0, 1.0))), (6.0, 6.5, ((6.0, 1.0),
+                                                                                                  (6.5, 1.0)))))
+    assert lane.pieces() == [(0.0, 3.0), (4.0, 6.0), (6.5, 10.0)]
+    assert Lane(0, 1.0, 2.0, 0.0).pieces() == [(1.0, 2.0)]
+
+
+def test_lanes_bend_around_small_obstacles():
+    boundary = rect(0, 0, 30, 20)
+    plain = plan_coverage(boundary, TREES, PlannerConfig(**FORWARD), start=(1, 1, 0.0), end=(1, 1))
+    cfg = PlannerConfig(**dict(FORWARD, bend_max_gap=3.0))
+    plan = plan_coverage(boundary, TREES, cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, TREES)
+    assert coverage(plan, cfg) > 0.9999
+    # one zigzag past all the trees instead of a cell on every side of each
+    assert plain.stats['cells'] > 10 and plan.stats['cells'] == 1
+    assert plan.stats['transit_length'] < 0.6 * plain.stats['transit_length']
+    assert plan.stats['path_length'] < plain.stats['path_length']
+    bends = [s for s in plan.segments if s.maneuver == 'bend']
+    assert len(bends) >= 12
+    # a bend keeps within bend_max_offset of its lane's line (rounding its corners cuts them, never widens them)
+    a = plan.angle
+    for s in bends:
+        across = [-p.x * math.sin(a) + p.y * math.cos(a) for p in plan.poses[s.start:s.end + 1]]
+        line = across[0]
+        assert across[-1] == pytest.approx(line, abs=1e-6)
+        assert max(abs(v - line) for v in across) <= cfg.bend_max_offset + 1e-6
+
+
+def test_bends_only_within_their_limits():
+    # the big tree of the garden: its middle rows would bend further than 0.5 m off their line
+    cells = {}
+    for offset in (0.5, 1.0):
+        cfg = PlannerConfig(**dict(FORWARD, bend_max_gap=3.0, bend_max_offset=offset))
+        plan = plan_coverage(GARDEN, [TREE, BED], cfg)
+        check_invariants(plan, cfg, [TREE, BED])
+        assert coverage(plan, cfg) > 0.9999
+        cells[offset] = plan.stats['cells']
+    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**FORWARD)).stats['cells']
+    assert cells[1.0] < cells[0.5] <= plain
+    # gaps longer than bend_max_gap stay (the middle rows past a tree, not the ones that only touch it), so
+    # does every row with a blade offset
+    count = {}
+    for gap, off in ((3.0, 0.0), (0.5, 0.0), (3.0, 0.05)):
+        plan = plan_coverage(rect(0, 0, 30, 20), TREES, PlannerConfig(**dict(FORWARD, bend_max_gap=gap,
+                                                                              blade_offset=off)))
+        count[gap, off] = sum(1 for s in plan.segments if s.maneuver == 'bend')
+    assert 0 < count[0.5, 0.0] < 0.5 * count[3.0, 0.0] and count[3.0, 0.05] == 0
+
+
+# route order -----------------------------------------------------------------------------------------------
+
+
+def brute_force(start, link, end):
+    import itertools
+    n = len(start)
+    best = math.inf
+    for order in itertools.permutations(range(n)):
+        for ways in itertools.product(*[range(len(start[i])) for i in order]):
+            c = start[order[0]][ways[0]] + end[order[-1]][ways[-1]] + sum(
+                link(order[k], ways[k], order[k + 1], ways[k + 1]) for k in range(n - 1))
+            best = min(best, c)
+    return best
+
+
+def order_cost(found, start, link, end):
+    return start[found[0][0]][found[0][1]] + end[found[-1][0]][found[-1][1]] + sum(
+        link(i, a, j, b) for (i, a), (j, b) in zip(found, found[1:]))
+
+
+@pytest.mark.parametrize('seed', range(8))
+def test_best_order_finds_the_shortest(seed):
+    # items with two ends each (done one way or the other), on a plane
+    rnd = random.Random(seed)
+    n = 6
+    ends = [((rnd.uniform(0, 10), rnd.uniform(0, 10)), (rnd.uniform(0, 10), rnd.uniform(0, 10))) for _ in range(n)]
+    ways = [[e, e[::-1]] for e in ends]  # (in, out)
+    dist = lambda p, q: math.hypot(p[0] - q[0], p[1] - q[1])  # noqa: E731
+    start = [[dist((0, 0), w[0]) for w in ws] for ws in ways]
+    end = [[dist((10, 10), w[1]) for w in ws] for ws in ways]
+    link = lambda i, a, j, b: dist(ways[i][a][1], ways[j][b][0])  # noqa: E731
+    found = best_order(start, link, end)
+    assert sorted(i for i, _ in found) == list(range(n))
+    greedy = best_order(start, link, end, budget=1)
+    cost = order_cost(found, start, link, end)
+    assert cost <= order_cost(greedy, start, link, end) + 1e-9
+    assert cost <= 1.05 * brute_force(start, link, end) + 1e-9
+    assert best_order(start, link, end) == found  # always the same
+
+
+def test_best_order_small_cases():
+    assert best_order([], None, []) == []
+    assert best_order([[1.0, 0.5]], None, [[0.0, 2.0]]) == [(0, 0)]
+
+
+def test_optimized_order_drives_less():
+    many = [circle(5 + 6 * i, 5 + 5 * j, 0.6, 12) for i in range(4) for j in range(3)]
+    plans = {}
+    for b, obs in ((GARDEN, [TREE, BED]), (rect(0, 0, 30, 20), many)):
+        for order in ('nearest', 'optimized'):
+            cfg = PlannerConfig(**dict(FORWARD, route_order=order))
+            plan = plan_coverage(b, obs, cfg, start=(1, 1, 0.0), end=(1, 1))
+            check_invariants(plan, cfg, obs)
+            assert coverage(plan, cfg) > 0.9999
+            plans[len(obs), order] = plan
+        assert plans[len(obs), 'optimized'].stats['transit_length'] < \
+            0.9 * plans[len(obs), 'nearest'].stats['transit_length']
+        # it still ends as close to the dock as the nearest-first order
+        gap = {o: math.hypot(plans[len(obs), o].poses[-1].x - 1, plans[len(obs), o].poses[-1].y - 1)
+               for o in ('nearest', 'optimized')}
+        assert gap['optimized'] <= gap['nearest'] + 0.2
+    with pytest.raises(PlanningError, match='route_order'):
+        PlannerConfig(route_order='tsp').validate()
 
 
 # turn types ------------------------------------------------------------------------------------------------

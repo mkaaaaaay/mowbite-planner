@@ -41,8 +41,8 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .planner import (ANGLE_STRATEGIES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, PERIMETER,
-                      PERIMETER_DIRECTIONS, PERIMETER_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan, PlannerConfig,
-                      PlanningError, plan_coverage)
+                      PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan,
+                      PlannerConfig, PlanningError, plan_coverage)
 
 XY = Tuple[float, float]
 
@@ -66,6 +66,11 @@ PARAMETERS = {
                          'mower_width / 2, the blade edge on the outline. 0 for outlines recorded by driving '
                          "the mower's centre along the edge (OpenMower's outline_offset)", math.isfinite,
                          'must be a number'),
+    'robot_width': (-1.0, "width of the mower's body [m]: its centre keeps half of it off the outline and the "
+                    'obstacles, the first loop moves further in if needed. Negative: only perimeter_offset counts',
+                    math.isfinite, 'must be a number'),
+    'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
+                     'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
     'perimeter_order': ('first', 'perimeter loops first or last (last mows over the marks the turns leave)',
                         lambda v: v in PERIMETER_ORDERS, 'must be first or last'),
     'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces',
@@ -101,6 +106,9 @@ PARAMETERS = {
     'lane_order': ('snake', 'snake: lane after neighbouring lane. skip: lanes far enough apart for a forward '
                    'U-turn of turn_radius, the ones between on the way back', lambda v: v in LANE_ORDERS,
                    'must be snake or skip'),
+    'route_order': ('nearest', 'cells: nearest (the closest one not mowed yet next) or optimized (the order with the '
+                    'shortest drives between them, takes a little longer to plan)', lambda v: v in ROUTE_ORDERS,
+                    'must be nearest or optimized'),
     'perimeter_corner_radius': (0.15, 'outline corners of the perimeter loops are rounded with this radius '
                                 '[m], 0 = sharp', lambda v: v >= 0.0, 'must be >= 0'),
     'waypoint_spacing': (0.10, 'distance between path poses [m], 0 = only where the direction changes',
@@ -110,6 +118,13 @@ PARAMETERS = {
     'simplify_tolerance': (0.01, 'the boundary and obstacles are simplified this much first [m]',
                            lambda v: v >= 0.0, 'must be >= 0'),
     'min_lane_length': (0.10, 'shorter pieces of a lane are left out [m]', lambda v: v >= 0.0, 'must be >= 0'),
+    'bend_max_gap': (0.0, 'a row split by an obstacle with at most this much between its pieces becomes one lane '
+                     'bending around it [m], 0 = split', lambda v: v >= 0.0, 'must be >= 0'),
+    'bend_max_offset': (0.5, "how far a bend may leave its lane's line [m]", lambda v: v >= 0.0, 'must be >= 0'),
+    'transit_edge_distance': (0.0, 'transits keep this far off the edges where that costs little more [m], 0 = '
+                              'the shortest way', lambda v: v >= 0.0, 'must be >= 0'),
+    'transit_edge_cost': (2.0, 'every metre of a transit closer to the edge than transit_edge_distance counts this '
+                          'much more', lambda v: v >= 0.0, 'must be >= 0'),
     'publish_path': (True, 'publish every plan on ~/coverage_path', None, ''),
     'max_path_poses': (MAX_PATH_POSES, '~/plan_path splits longer paths (OpenMower counts poses in an int16)',
                        lambda v: v >= 4, 'must be >= 4'),
@@ -121,6 +136,8 @@ RANGES = {
     'lane_overlap_passes': (0, MAX_PASSES),
     'angle_step_deg': (0.5, 90.0),
     'turn_radius': (0.0, 5.0),
+    'robot_width': (-1.0, 5.0),
+    'blade_offset': (-1.0, 1.0),
 }
 FILL_TYPES = {PlanPath.Request.FILL_LINEAR: 'lanes', PlanPath.Request.FILL_CONCENTRIC: 'concentric'}
 # m, float32 has steps of 1 mm or less up to here
@@ -267,6 +284,7 @@ class MowbitePlannerNode(Node):
                    angle_max=rad('angle_max_deg'), angle_step=rad('angle_step_deg'),
                    crosshatch_angle=rad('crosshatch_angle_deg'),
                    perimeter_offset=None if values['perimeter_offset'] < 0.0 else values['perimeter_offset'],
+                   robot_width=None if values['robot_width'] < 0.0 else values['robot_width'],
                    turn_types=tuple(values['turn_types']))
         cfg.update(overrides)
         return PlannerConfig(**cfg)

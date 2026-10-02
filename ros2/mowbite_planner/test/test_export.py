@@ -16,6 +16,7 @@ from mowbite_planner import PlannerConfig, SegmentInfo, plan_coverage  # noqa: E
 from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, simplified_indices,  # noqa: E402
                                     to_openmower_json, to_studio_payload)
 from mowbite_planner.planner import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
+from mowbite_planner.report import check_plan  # noqa: E402
 
 
 def rect(x0, y0, x1, y1):
@@ -206,8 +207,9 @@ def test_to_studio_payload(kw):
     nav = [rect(-4, 0, 0, 2)]
     out = to_studio_payload(plan, AREA, [BED], nav, {'tool_width': 0.2}, ['outline_compensation'])
     json.dumps(out, allow_nan=False)
-    assert [s['key'] for s in out['stages']] == ['area', 'perimeter', 'remaining', 'lanes', 'route', 'ends']
-    assert [s['n'] for s in out['stages']] == [1, 2, 3, 4, 5, 6]
+    assert [s['key'] for s in out['stages']] == ['area', 'levels', 'remaining', 'cells', 'loops', 'lanes', 'route',
+                                                 'ends']
+    assert [s['n'] for s in out['stages']] == [1, 2, 3, 4, 5, 6, 7, 8]
     objects = out['lineage']['objects']
     ids = [o['id'] for o in objects]
     assert len(ids) == len(set(ids))
@@ -224,10 +226,59 @@ def test_to_studio_payload(kw):
             assert g['type'] == 'point' and len(g['coords']) == 1
     by_stage = {s['key']: s['ids'] for s in out['stages']}
     assert len(by_stage['route']) == len(plan.segments) and len(by_stage['lanes']) == len(plan.lanes)
-    assert len(by_stage['perimeter']) == len(plan.perimeter_loops)
-    assert out['report']['soft'] == ['parameter outline_compensation is not used by the MowBite Planner']
+    assert len(by_stage['loops']) == len(plan.perimeter_loops)
+    by_id = {o['id']: o for o in objects}
+    # every lane comes from a cell, every loop from a level (or a strip too narrow for lanes), every segment
+    # from the loop or lane it mows or leads to, those from the mowable area
+    for i in by_stage['lanes']:
+        assert by_id[i]['parents'][0].startswith('cell-')
+    for i in by_stage['loops']:
+        assert by_id[i]['parents'][0].split('-')[0] in ('level', 'narrow')
+    assert all(by_id[i]['parents'] for i in by_stage['route'][1:])
+    assert all(by_id[i]['parents'] == by_stage['area'] for i in by_stage['levels'])
+    assert all(by_id[i]['parents'][0].startswith('lane-region') for i in by_stage['cells'])
+    assert {e['op'] for e in out['lineage']['events']} >= {'difference', 'inset', 'scan', 'route'}
+    assert out['report']['hard'] == []
+    assert out['report']['soft'][-1] == 'parameter outline_compensation is not used by the MowBite Planner'
+    assert out['stats']['left_m2'] < 0.1 and out['stats']['double_mowed_pct'] > 0
     assert out['params'] == {'tool_width': 0.2}
     assert out['domains']['nav_areas'] == [[[float(x), float(y)] for x, y in nav[0]]]
     assert out['domains']['expected_cover_m2'] == pytest.approx(59.0)
     assert set(out['stage_times']) == set(plan.stats['timings'])
     assert out['mowbite']['fingerprint'] == out['stats']['fingerprint'] == fingerprint(plan)
+
+
+# report ----------------------------------------------------------------------------------------------------
+
+
+def test_check_plan_finds_nothing_in_a_good_plan():
+    report = check_plan(plan_of())
+    assert report['hard'] == []
+    assert report['area_m2'] == pytest.approx(59.0) and report['left_m2'] < 0.1
+    assert report['mowed_m2'] == pytest.approx(59.0, abs=0.1)
+    # lanes 0.187 m apart with a 0.22 m blade, and the loops: a good part is mowed twice
+    assert 10 < report['double_mowed_pct'] < 80
+
+
+def test_check_plan_finds_what_is_wrong():
+    plan = plan_of()
+    poses = list(plan.poses)
+    k = plan.segments[-1].start + 2
+    poses[k] = poses[k]._replace(x=poses[k].x + 3.0, y=-2.0)  # off the area, and a gap
+    report = check_plan(dataclasses.replace(plan, poses=poses))
+    assert any('outside' in h for h in report['hard']) and any('gaps' in h for h in report['hard'])
+    backwards = dataclasses.replace(plan, config=dataclasses.replace(plan.config, allow_reverse=False),
+                                    segments=[dataclasses.replace(plan.segments[0], reverse=True)] + plan.segments[1:])
+    assert 'drives backwards with allow_reverse off' in check_plan(backwards)['hard']
+
+
+def test_check_plan_tells_left_on_purpose_from_left_out():
+    # a body that keeps the blade off the edges: a strip left on purpose, not a mistake
+    body = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.5))
+    report = check_plan(body)
+    assert report['hard'] == [] and report['edge_left_m2'] > 0.5
+    assert any('left on purpose' in s for s in report['soft'])
+    # lanes along the edge that a blade offset with no loops leaves out: grass left
+    short = plan_coverage(AREA, [], PlannerConfig(blade_offset=0.1, perimeter_passes=0, angle=0.0))
+    report = check_plan(short)
+    assert any('left unmowed' in h for h in report['hard']) and any('shortened' in s for s in report['soft'])

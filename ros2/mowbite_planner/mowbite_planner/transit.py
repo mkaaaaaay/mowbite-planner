@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point
 from shapely.geometry.polygon import orient
+from shapely.ops import nearest_points
 from shapely.prepared import prep
 
 from .geometry import JOIN_MITRE, polygons
@@ -87,10 +88,18 @@ class TransitPlanner:
     Graph nodes come from the space shrunk by `clearance`, so drives don't scrape along the very edge.
     Where a way only exists closer to the edge (a narrow passage), or is a lot shorter there, the unshrunk
     corners are used. Points in different parts of the space have no way between them, that's known at once.
+
+    careful_path() also weighs how much of a way runs along the edge: every metre closer than edge_distance
+    counts 1 + edge_cost times, a way through the space shrunk by edge_distance wins where it's cheaper so.
     """
 
-    def __init__(self, space, clearance: float = 0.05, tolerance: float = 1e-3):
+    def __init__(self, space, clearance: float = 0.05, tolerance: float = 1e-3, edge_distance: float = 0.0,
+                 edge_cost: float = 0.0):
         self._space = space
+        self._tolerance = tolerance
+        self._edge_distance, self._edge_cost = edge_distance, edge_cost
+        self._inner: Optional['TransitPlanner'] = None  # the space shrunk by edge_distance, made when needed
+        self._band = None  # what's closer to the edge than that
         # a hair wider, so a drive exactly along the edge (the outer perimeter loop) still counts as inside
         wider = space.buffer(tolerance, 4)
         self._check = prep(wider)
@@ -107,6 +116,21 @@ class TransitPlanner:
         if len(pts) == 1 or all(abs(p[0] - pts[0][0]) < 1e-9 and abs(p[1] - pts[0][1]) < 1e-9 for p in pts):
             return self._check.covers(Point(pts[0]))
         return self._check.covers(LineString(pts))
+
+    def clip(self, a: XY, b: XY, min_length: float = 0.0) -> Optional[Tuple[XY, XY]]:
+        """The longest piece of the line from a to b inside the space, from a's side to b's, None if there's
+        none at least min_length long."""
+        cut = self._space.intersection(LineString([a, b]))
+        pieces = [g for g in getattr(cut, 'geoms', [cut]) if g.geom_type == 'LineString' and not g.is_empty]
+        if not pieces:
+            return None
+        best = max(pieces, key=lambda g: g.length)
+        if best.length < max(min_length, 1e-6):
+            return None
+        p, q = best.coords[0], best.coords[-1]
+        if math.hypot(p[0] - a[0], p[1] - a[1]) > math.hypot(q[0] - a[0], q[1] - a[1]):
+            p, q = q, p
+        return (p[0], p[1]), (q[0], q[1])
 
     def parts(self) -> list:
         """The connected parts of the space (a hair wider), part() gives indices into this."""
@@ -154,6 +178,42 @@ class TransitPlanner:
             if best is not None and _length(best) <= 1.2 * straight + 0.5:
                 break
         return best
+
+    def edge_length(self, pts: Sequence[XY]) -> float:
+        """How much of the way runs closer to the space's edge than edge_distance."""
+        if self._band is None or len(pts) < 2:
+            return 0.0
+        return LineString(pts).intersection(self._band).length
+
+    def cost(self, pts: Sequence[XY]) -> float:
+        return _length(pts) + self._edge_cost * self.edge_length(pts)
+
+    def careful_path(self, a: XY, b: XY) -> Optional[List[XY]]:
+        """Like path(), but a way that keeps edge_distance off the edge where that's cheaper (see cost()):
+        straight from a into the shrunk space, through it, straight out to b."""
+        best = self.path(a, b)
+        if best is None or self._edge_distance <= 0.0 or self._edge_cost <= 0.0:
+            return best
+        if self._inner is None:
+            inner = self._space.buffer(-self._edge_distance, 4)
+            if inner.is_empty:
+                return best
+            self._inner = TransitPlanner(inner, self._clearance, self._tolerance)
+            # (not its edge, ways through the shrunk space may run along that)
+            self._band = self._space.difference(inner.buffer(self._tolerance, 4))
+        inner = self._inner
+        ends = []
+        for p in (a, b):
+            q = p if inner.is_free([p]) else nearest_points(inner._space, Point(p))[0].coords[0]
+            ends.append((float(q[0]), float(q[1])))
+        (a2, b2) = ends
+        middle = inner.path(a2, b2) if inner.part(a2) is not None and inner.part(a2) == inner.part(b2) else None
+        if middle is None or not self.is_free([a, a2]) or not self.is_free([b2, b]):
+            return best
+        way = [a] + [p for p in middle if p != a and p != b] + [b]
+        way = [p for i, p in enumerate(way)
+               if i == 0 or math.hypot(p[0] - way[i - 1][0], p[1] - way[i - 1][1]) > 1e-9]
+        return way if self.cost(way) < self.cost(best) - 1e-9 else best
 
     def _sees(self, gi: int, i: int, j: int) -> bool:
         key = (gi, i, j) if i < j else (gi, j, i)
