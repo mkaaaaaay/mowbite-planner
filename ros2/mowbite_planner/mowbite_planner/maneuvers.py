@@ -299,15 +299,29 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
                 return poses
         return None
 
+    def straight_on(start: XY, heading: float, toward: XY, back: bool = False) -> Optional[List[Pose2D]]:
+        # where the arc doesn't fit right there (in a corner, along an edge): straight on a bit first, then the arc
+        ux, uy = math.cos(heading), math.sin(heading)
+        for length in (0.5 * radius, radius, 2.0 * radius):
+            q = (start[0] + length * ux, start[1] + length * uy)
+            line = sample_straight(start[0], start[1], q[0], q[1], heading, step)
+            if not fits([start, q]) or body is not None and \
+                    not body([Pose2D(p.x, p.y, p.yaw + math.pi) for p in line] if back else line):
+                return None  # further on it doesn't fit either
+            out = arc(q, heading, toward, back)
+            if out is not None:
+                return join(line, out)
+        return None
+
     leave: List[Pose2D] = []
     arrive: List[Pose2D] = []
     for _ in range(2):  # the two ends depend on each other when the way is one straight line
         if heading_a is not None:
-            out = arc(a, heading_a, pts[1])
+            out = arc(a, heading_a, pts[1]) or straight_on(a, heading_a, pts[1])
             if out is not None:
                 leave, pts[0] = out, (out[-1].x, out[-1].y)
         if heading_b is not None:
-            back = arc(b, heading_b + math.pi, pts[-2], True)
+            back = arc(b, heading_b + math.pi, pts[-2], True) or straight_on(b, heading_b + math.pi, pts[-2], True)
             if back is not None:
                 arrive = [Pose2D(p.x, p.y, normalize_angle(p.yaw + math.pi)) for p in reversed(back)]
                 pts[-1] = (back[-1].x, back[-1].y)

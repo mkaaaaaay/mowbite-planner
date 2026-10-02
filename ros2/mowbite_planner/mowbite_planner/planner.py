@@ -31,8 +31,8 @@ from shapely.ops import nearest_points
 
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
-from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, omega, path_length,
-                        plan_turn, same_position, sample_arc, sample_straight)
+from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, join, omega,
+                        path_length, plan_turn, same_position, sample_arc, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -924,9 +924,7 @@ class _Route:
         dist = math.hypot(target[0] - self.pos[0], target[1] - self.pos[1])
         if dist < 1e-6:
             return
-        # leaving and arriving on arcs where they fit
-        poses = connect(self.pos, self.heading, target, heading, self.cfg.turn_radius, self.step,
-                        self.transit.is_free, self.transit.careful_path, self.body)
+        poses = self.drive_to(target, heading)
         if poses is None:
             self.warnings.append(f'no way found from ({self.pos[0]:.2f}, {self.pos[1]:.2f}) to ({target[0]:.2f}, '
                                  f'{target[1]:.2f}): the path jumps there')
@@ -934,6 +932,40 @@ class _Route:
             self.pos = target
             return
         self.add(TRANSIT, poses)
+
+    def drive_to(self, target: XY, heading: Optional[float]) -> Optional[List[Pose2D]]:
+        """The drive from where the mower is to target, arriving facing heading: leaving and arriving on arcs where
+        they fit. Where it would arrive the other way round (turning on the spot by more than SPIN_LIMIT there), via a
+        U-turn into it from beside it, like between lanes, if that turns on the spot less. None if there's no way."""
+        r = self.cfg.turn_radius
+
+        def drive(b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
+            return connect(self.pos, self.heading, b, h, r, self.step, self.transit.is_free, self.transit.careful_path,
+                           self.body)
+
+        best = drive(target, heading)
+        if best is None or heading is None or r <= 1e-3:
+            return best
+        best_spins = _spins(best, self.heading, heading)
+        if not best_spins:
+            return best
+        nx, ny = -math.sin(heading), math.cos(heading)
+        back = normalize_angle(heading + math.pi)
+        for d in (2.0 * r, r):
+            for side in (1.0, -1.0):
+                x = (target[0] + side * d * nx, target[1] + side * d * ny)
+                if not self.transit.is_free([x]):
+                    continue
+                turn = plan_turn(Pose2D(x[0], x[1], back), target, r, False, self.step, self.transit.is_free, None,
+                                 tuple(t for t in self.cfg.allowed_turns if t in ('u_turn', 'bulb')), self.body)
+                way = drive(x, back) if turn is not None else None
+                if way is None:
+                    continue
+                poses = join(way, turn.pieces[0].poses)
+                spins = _spins(poses, self.heading, heading)
+                if spins < best_spins or spins == best_spins and path_length(poses) < path_length(best):
+                    best, best_spins = poses, spins
+        return best
 
     def _distance(self, a: Optional[XY], b: XY) -> float:
         return 0.0 if a is None else math.hypot(b[0] - a[0], b[1] - a[1])
@@ -1377,11 +1409,10 @@ class _Route:
                         self.add(TURN, piece.poses, piece.reverse, turn.name)
                     self._count('turns_' + turn.name)
                 else:
-                    pts = self.transit.path(self.pos, a)
-                    if pts is None:
+                    poses = self.drive_to(a, yaw)
+                    if poses is None:
                         return lanes[i:]
-                    self.add(TRANSIT, drive_polyline(pts, self.step, self.cfg.turn_radius, self.transit.is_free,
-                                                     body=self.body), maneuver='turn_fallback')
+                    self.add(TRANSIT, poses, maneuver='turn_fallback')
                     self._count('turns_fallback')
             if lane.bends:
                 self.bent_lane(lane, direction, a, b, to_map)
@@ -1489,6 +1520,14 @@ def _driven(geoms, half: float, ahead: float):
                 parts.append(Polygon([(a[0] - half * uy, a[1] + half * ux), (b[0] - half * uy, b[1] + half * ux),
                                       (b[0] + half * uy, b[1] - half * ux), (a[0] + half * uy, a[1] - half * ux)]))
     return union(parts)
+
+
+def _spins(poses: Sequence[Pose2D], heading_in: Optional[float], heading_out: Optional[float]) -> int:
+    """How often the mower turns on the spot by more than SPIN_LIMIT driving poses, coming in facing heading_in and
+    going on facing heading_out."""
+    yaws = ([heading_in] if heading_in is not None else []) + [p.yaw for p in poses] + \
+        ([heading_out] if heading_out is not None else [])
+    return sum(1 for a, b in zip(yaws, yaws[1:]) if angle_diff(a, b) > SPIN_LIMIT)
 
 
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:

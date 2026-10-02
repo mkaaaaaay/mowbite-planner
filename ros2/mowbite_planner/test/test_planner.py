@@ -19,8 +19,8 @@ from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_ang
 from mowbite_planner.maneuvers import bulb_turn, drive_polyline, k_turn, omega, plan_turn, u_turn  # noqa: E402
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
-                                     SPIN_LIMIT, angle_in_range, best_order, longest_edge_angle, scan_lanes,
-                                     split_cells)
+                                     SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
+                                     scan_lanes, split_cells)
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
@@ -828,6 +828,16 @@ def test_omega():
         assert loop[-1].yaw == pytest.approx(normalize_angle(0.3 + math.radians(deg)))
         assert all(angle_diff(a.yaw, b.yaw) <= math.radians(10.0) + 1e-9 for a, b in zip(loop, loop[1:]))
         assert all(math.hypot(b.x - a.x, b.y - a.y) <= 0.05 + 1e-6 for a, b in zip(loop, loop[1:]))
+
+
+def test_arriving_the_other_way_turns_into_it():
+    """A drive that would arrive facing the other way: a U-turn into it from beside it, no turn on the spot."""
+    space = TransitPlanner(Polygon(rect(0, 0, 10, 6)), 0.05)
+    route = _Route(PlannerConfig(**FORWARD), space, space, (8.0, 3.0), math.pi, None)
+    route.started = True
+    poses = route.drive_to((2.0, 3.0), 0.0)
+    assert (poses[-1].x, poses[-1].y) == pytest.approx((2.0, 3.0)) and _spins(poses, math.pi, 0.0) == 0
+    assert all(space.is_free([(p.x, p.y)]) for p in poses)
 
 
 def test_smooth_spins():
