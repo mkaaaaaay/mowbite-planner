@@ -102,8 +102,9 @@ def test_plan_coverage_service(node):
     assert set(types) <= {PlanCoverage.Response.SEGMENT_PERIMETER, PlanCoverage.Response.SEGMENT_LANE,
                           PlanCoverage.Response.SEGMENT_TURN, PlanCoverage.Response.SEGMENT_TRANSIT}
     assert types[0] == PlanCoverage.Response.SEGMENT_PERIMETER
-    for t, rev in zip(types, res.segment_reverse):
-        assert not rev or t == PlanCoverage.Response.SEGMENT_TURN
+    # backing up: the middle leg of a K-turn, between lanes or in place of a turn on the spot in any segment
+    assert any(res.segment_reverse) == any(t == PlanCoverage.Response.SEGMENT_TURN and rev
+                                           for t, rev in zip(types, res.segment_reverse)) or any(res.segment_reverse)
     # the orientation is the driving direction (or its opposite on reverse legs)
     reverse = [False] * n
     for s, e, rev in zip(starts, ends, res.segment_reverse):

@@ -31,8 +31,8 @@ from shapely.ops import nearest_points
 
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
-from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, join, omega,
-                        path_length, plan_turn, same_position, sample_arc, sample_straight)
+from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, join, k_point,
+                        omega, path_length, plan_turn, same_position, sample_arc, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -392,7 +392,9 @@ class CoveragePlan:
     # the geometry it was planned on, for checks and plots
     area: object = None  # outline as given (cleaned), obstacles not taken out
     free_space: object = None  # area minus obstacles: what gets mowed
-    robot_space: object = None  # where the mower's centre may go: free_space shrunk by centre_offset
+    # where the mower's centre may go: free_space shrunk by centre_offset (on recorded edges with the body checked
+    # grown by body_tolerance)
+    robot_space: object = None
     lane_region: object = None  # where the lane centres lie
     remaining: object = None  # free_space minus the strips the perimeter loops mow
     angles: List[float] = dataclasses.field(default_factory=list)  # of every set of lanes (crosshatch: 2)
@@ -1533,8 +1535,10 @@ def _spins(poses: Sequence[Pose2D], heading_in: Optional[float], heading_out: Op
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
     """Where the path turns on the spot by more than SPIN_LIMIT (a sharp corner of a loop, a drive arriving across
     a lane, a pivot), an omega (maneuvers.omega) of turn_radius (down to SMOOTH_RADII of it) in its place if it fits in
-    the space of the segment (the drivable areas for drives) and the body fits: the wheels keep rolling."""
-    inserts: Dict[Tuple[int, int], List[Pose2D]] = {}
+    the space of the segment (the drivable areas for drives) and the body fits: the wheels keep rolling. Where none
+    fits and it may back up (allow_reverse), a K-turn in place (maneuvers.k_point), forwards first or backwards first
+    (where it came from)."""
+    inserts: Dict[Tuple[int, int], List[Tuple[List[Pose2D], bool]]] = {}
     before: Optional[Pose2D] = None  # the last pose before the position the mower is at
     here: Optional[Tuple[Pose2D, int, int]] = None  # the pose it leaves this position with, where it is
 
@@ -1545,24 +1549,48 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
         turn = normalize_angle(p.yaw - before.yaw)
         if abs(turn) <= SPIN_LIMIT:
             return
+
         def straight(k: int) -> bool:
             return route.segments[k].kind == LANE and route.segments[k].maneuver not in ('ring', 'bend')
 
         if j == 0 and i > 0 and straight(i):  # where a lane starts: on the end of the segment before
             i, j = i - 1, len(route.segments[i - 1].poses)
-        if straight(i):  # (a lane keeps its heading)
+        if straight(i) or route.segments[i].reverse:  # (a lane keeps its heading)
             return
         fits = route.transit.is_free if route.segments[i].kind == TRANSIT else route.area.is_free
         at = Pose2D(p.x, p.y, before.yaw)
         for share in SMOOTH_RADII:
             r = share * cfg.turn_radius
-            if r < 1e-3:
-                return
-            loop = omega(at, turn, r, route.step)
-            if fits([(q.x, q.y) for q in loop]) and (route.body is None or route.body([before] + loop)):
-                inserts[(i, j)] = loop[:-1]
+            loop = omega(at, turn, r, route.step) if r >= 1e-3 else None
+            if loop and fits([(q.x, q.y) for q in loop]) and (route.body is None or route.body([before] + loop)):
+                inserts[(i, j)] = [(loop, False)]
                 route._count('spins_smoothed')
                 return
+        if not cfg.allow_reverse:
+            return
+        # where the body sticks out turning on the spot, one that sticks out no more is better still
+        fp = route.footprint
+        spin = fp.outside([before, at, p]) if fp is not None else 0.0
+        best = None
+        for share in SMOOTH_RADII + (0.2,):
+            for back_first in (False, True):
+                r = share * cfg.turn_radius
+                if r < 1e-3:
+                    continue
+                m = k_point(at, turn, r, route.step, back_first)
+                poses = [q for piece in m.pieces for q in piece.poses]
+                if not fits([(q.x, q.y) for q in poses]):
+                    continue
+                out = 0.0 if fp is None or fp.poses_fit([before] + poses) else fp.outside([before] + poses)
+                if out <= 1e-9 or out <= spin + 1e-9 and (best is None or out < best[0] - 1e-9):
+                    best = (out, m)
+                if out <= 1e-9:
+                    break
+            if best is not None and best[0] <= 1e-9:
+                break
+        if best is not None:
+            inserts[(i, j)] = [(piece.poses, piece.reverse) for piece in best[1].pieces]
+            route._count('spins_backed_up')
 
     for i, seg in enumerate(route.segments):
         for j, p in enumerate(seg.poses):
@@ -1573,8 +1601,19 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
                 continue
             smooth()
             before, here = (here[0] if here is not None else None), (p, i, j)
-    for (i, j), loop in sorted(inserts.items(), reverse=True):
-        route.segments[i].poses[j:j] = loop
+    for (i, j), pieces in sorted(inserts.items(), reverse=True):
+        seg = route.segments[i]
+        # (the last pose is where the segment goes on from: one pose there when they're put together, a backing up
+        # segment ends there)
+        if len(pieces) == 1:
+            seg.poses[j:j] = pieces[0][0]
+            continue
+        # backing up is a segment of its own
+        parts = ([dataclasses.replace(seg, poses=seg.poses[:j])] if j else []) + \
+            [dataclasses.replace(seg, poses=poses, reverse=reverse, maneuver='k_point' if reverse else seg.maneuver)
+             for poses, reverse in pieces] + \
+            ([dataclasses.replace(seg, poses=seg.poses[j:])] if j < len(seg.poses) else [])
+        route.segments[i:i + 1] = parts
 
 
 def _splice(ring: List[XY], other: List[XY], lead: float = 0.0) -> List[XY]:
@@ -1849,9 +1888,19 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 
+    # recorded edges are where the centre drove, give or take body_tolerance: with the body checked the centre may go
+    # that far past them as well (rounding a corner, a turn, a loop out), not into an area to keep out of. The loops
+    # and lanes still keep to robot_space
+    drive_space = robot_space
+    if cfg.body and cfg.edges == 'recorded' and cfg.body_tolerance > 0:
+        drive_space = robot_space.buffer(cfg.body_tolerance, QUAD_SEGS)
+        if keep_out:
+            drive_space = drive_space.difference(union(clean_polygon(k) for k in keep_out))
+        drive_space = polygonal(drive_space)
+
     # turns and loops stay inside the mowing area, so do the bends of lanes around obstacles
     edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
-    area_space = TransitPlanner(robot_space, cfg.transit_clearance, **edges)
+    area_space = TransitPlanner(drive_space, cfg.transit_clearance, **edges)
 
     # 3. lanes, for crosshatch a second time across them
     passes: List[Tuple[float, List[List[Lane]]]] = []
@@ -1897,7 +1946,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if start_xy is None:
         corner = list(polygons(area))[0].exterior.coords[0]
         start_xy = (corner[0], corner[1])
-    transit_space = robot_space
+    transit_space = drive_space
     extra_space = union(clean_polygon(d) for d in drivable)
     if not extra_space.is_empty:
         # drivable areas are recorded like outlines, the mower's centre may go anywhere in them, but not
@@ -1906,8 +1955,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         keep_off = away.buffer(max(centre, half), QUAD_SEGS) if not away.is_empty else None
         if keep_off is not None:
             extra_space = extra_space.difference(keep_off)
-        transit_space = polygonal(union([robot_space, extra_space]))
-    transit = area_space if transit_space is robot_space else TransitPlanner(transit_space, cfg.transit_clearance,
+        transit_space = polygonal(union([drive_space, extra_space]))
+    transit = area_space if transit_space is drive_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
     body_space = footprint = None
     if cfg.body:
@@ -2041,7 +2090,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         'lane_length': lengths[LANE],
         'turn_length': lengths[TURN],
         'transit_length': lengths[TRANSIT],
-        'perimeter_loops': sum(1 for s in segments if s.kind == PERIMETER),
+        'perimeter_loops': len({s.source for s in segments if s.kind == PERIMETER}),
         'loops': len(route.loops),
         'lanes': len(route.lanes),
         'cells': sum(len(cells) for _, cells in passes),
@@ -2057,7 +2106,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     return CoveragePlan(
         poses=poses, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=route.loops,
         lanes=route.lanes, stats=stats, warnings=route.warnings, area=area, free_space=free,
-        robot_space=robot_space, lane_region=lane_region, remaining=remaining,
+        robot_space=drive_space, lane_region=lane_region, remaining=remaining,
         angles=[a for a, _ in passes] or [angle], transit_space=transit_space, body_space=body_space, config=cfg,
         section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
 

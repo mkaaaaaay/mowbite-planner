@@ -210,6 +210,27 @@ def omega(at: Pose2D, turn: float, r: float, step: float) -> List[Pose2D]:
     return join(first, loop, last)
 
 
+def k_point(at: Pose2D, turn: float, r: float, step: float, back_first: bool = False) -> Maneuver:
+    """In place of turning on the spot at `at` by `turn` (rad, > 0 left), backing up once: an arc of r forwards by
+    turn / 2, straight backwards by 2 r sin(|turn| / 2), an arc forwards by turn / 2, back at the same point facing
+    at.yaw + turn (the second arc's centre is where the first one's would be after the turn). back_first: the same
+    the other way round in time, backing up first (to where it came from) and driving forwards once."""
+    if back_first:
+        m = k_point(Pose2D(at.x, at.y, normalize_angle(at.yaw + turn)), -turn, r, step)
+        return Maneuver('k_point', r, [Piece(p.poses[::-1], not p.reverse) for p in m.pieces[::-1]])
+    s = 1.0 if turn >= 0.0 else -1.0
+    half = 0.5 * turn
+    first = sample_arc(at.x, at.y, at.yaw, r, half, step)
+    h = first[-1].yaw
+    length = 2.0 * r * math.sin(0.5 * abs(turn))
+    end = (first[-1].x - length * math.cos(h), first[-1].y - length * math.sin(h))
+    # backing up the poses face the way the mower faces, against the way it drives
+    back = sample_straight(first[-1].x, first[-1].y, end[0], end[1], h, step)
+    last = sample_arc(end[0], end[1], h, r, s * abs(half), step)
+    last[-1] = Pose2D(at.x, at.y, normalize_angle(at.yaw + turn))
+    return Maneuver('k_point', r, [Piece(first), Piece(back, reverse=True), Piece(last)])
+
+
 def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
     c, s = math.cos(origin.yaw), math.sin(origin.yaw)
     pieces = []

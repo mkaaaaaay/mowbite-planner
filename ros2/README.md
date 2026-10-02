@@ -193,7 +193,7 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `angle_min_deg`, `angle_max_deg` | `.nan` | the lane direction stays in this range, both or neither |
 | `angle_step_deg` | 5.0 | between the directions `optimal` tries, 0.5..90 |
 | `turn_radius` | 0.25 | radius of the turns [m], 0..5 |
-| `allow_reverse` | true | K-turns |
+| `allow_reverse` | true | backing up: K-turns between lanes, and a K-turn in place where it would turn on the spot and no loop out fits (`smooth_spins`) |
 | `turn_types` | all | `[u_turn, bulb, k_turn, detour, pivot]`, the ones allowed, preferred first |
 | `lane_order` | `snake` | `snake` or `skip` |
 | `route_order` | `nearest` | cells `nearest` first, or `optimized`: the order with the shortest drives between them |

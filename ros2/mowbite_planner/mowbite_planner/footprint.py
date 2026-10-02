@@ -6,6 +6,7 @@ import math
 from typing import Sequence
 
 from shapely.geometry import LineString, Point, Polygon, box
+from shapely.ops import unary_union
 from shapely.prepared import prep
 
 from .mathutil import angle_diff, normalize_angle
@@ -84,6 +85,19 @@ class Footprint:
         """Indices of the poses (with .x, .y, .yaw) where the body sticks out: facing the pose's way, or turning on
         the spot where the heading jumps by more than SPIN from the pose before."""
         return list(self._bad(poses))
+
+    def outside(self, poses: Sequence) -> float:
+        """m2, how much of the body sticks out at the poses all together, turning on the spot where the heading jumps
+        by more than SPIN."""
+        bodies = []
+        for i, p in enumerate(poses):
+            if self.spins(poses, i):
+                turn = normalize_angle(p.yaw - poses[i - 1].yaw)
+                n = max(1, int(math.ceil(abs(turn) / TURN_STEP)))
+                bodies += [self.body(p.x, p.y, poses[i - 1].yaw + turn * k / n) for k in range(n + 1)]
+            elif not self._safe_at(p.x, p.y):
+                bodies.append(self.body(p.x, p.y, p.yaw))
+        return unary_union(bodies).difference(self.space).area if bodies else 0.0
 
     def poses_fit(self, poses: Sequence) -> bool:
         # all of them where the body fits whatever way it faces: one check for the lot

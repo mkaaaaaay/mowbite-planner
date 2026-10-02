@@ -578,8 +578,8 @@ def test_rpc_settings(planner):
     assert s['angle'] == {'value': None, 'default': None, 'stored': False, 'type': 'number', 'settable': True,
                           'nullable': True, 'unit': 'rad'}
     assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
-    for name in ('skip_lanes', 'allow_reverse'):
-        assert not s[name]['settable'] and s[name]['from'], name
+    assert not s['skip_lanes']['settable'] and s['skip_lanes']['from']
+    assert s['allow_reverse']['settable'] and s['allow_reverse']['value'] is False
     # mower_logic's until set here
     for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes'):
         assert s[name]['settable'] and s[name]['from'].startswith('/mower_logic/'), name
@@ -641,7 +641,7 @@ def test_rpc_settings_angle(planner):
     ({'turn_types': []}, 'turn_types must be some of'),
     ({'angle_min': 0.1}, 'angle_min and angle_max go together'),
     ({'mower_width': 0}, 'mower_width must be > 0.0'),
-    ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: allow_reverse'),
+    ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),
 ])
 def test_rpc_settings_set_refused(planner, params, message):

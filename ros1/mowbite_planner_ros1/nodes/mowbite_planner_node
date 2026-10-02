@@ -25,16 +25,17 @@ allow_reverse false and lane_order skip for OpenMower's forward only FTC control
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
 until the next start only), max_path_poses (at least 4), frame_id, service, map_topic, use_map, rpc. The request
 always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
-lane_overlap_passes, the skip flags and a concentric fill_pattern, settings can't change them (an area's planner
-property can). The angle too, unless settings has angle or
+lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an area's own
+outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless settings has
+angle or
 angle_strategy and the area has no angle of its own. Whether it has one comes from the saved map: a preview in
 the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just added or
 removed follows the saved area until the edit is saved.
 
 OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
-                        choices, settable. Not settable: what comes with mower_logic's request (from its
-                        parameters tool_width, outline_count, ...) and allow_reverse (FTC only drives forwards).
+                        choices, settable. Not settable: the skip flags of mower_logic's request. allow_reverse
+                        (backing up in K-turns) needs an FTC controller that backs up where the plan does.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH)
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
@@ -66,8 +67,7 @@ from mowbite_planner.mapfile import area_job, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
-FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
-         'allow_reverse': 'forwards only (FTC)'}
+FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic'}
 # come with every request of mower_logic (from its parameters, or the area's), unless set here (settings, stored)
 MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
                'perimeter_passes': '/mower_logic/outline_count',

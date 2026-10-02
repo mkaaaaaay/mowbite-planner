@@ -6,6 +6,7 @@ import random
 import sys
 import time
 from types import SimpleNamespace
+from typing import Dict, List
 
 import pytest
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
@@ -74,10 +75,11 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
     for s, t in zip(segs, segs[1:]):
         assert s.start < s.end
         assert t.start in (s.end, s.end + 1)
-    # every pose faces the way it's driven to the next one, backwards only on the reverse legs of K-turns
+    # every pose faces the way it's driven to the next one, backwards only on the reverse legs of K-turns (between
+    # lanes, or in place of a turn on the spot)
     backwards = [False] * (len(poses) - 1)
     for s in segs:
-        assert not s.reverse or (s.kind == TURN and s.maneuver == 'k_turn')
+        assert not s.reverse or (s.kind == TURN and s.maneuver == 'k_turn') or s.maneuver == 'k_point'
         for i in range(s.start, s.end):
             backwards[i] = s.reverse
     for i, (a, b) in enumerate(zip(poses, poses[1:])):
@@ -88,7 +90,7 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
         assert angle_diff(travel, facing) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:
-        if s.kind == LANE and s.maneuver not in ('ring', 'bend'):
+        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'k_point'):
             yaws = {poses[i].yaw for i in range(s.start, s.end)}
             assert len(yaws) == 1
             yaw = yaws.pop()
@@ -563,12 +565,16 @@ def test_perimeter_direction(direction, pattern):
     cfg = PlannerConfig(perimeter_direction=direction, fill_pattern=pattern)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg)
     check_invariants(plan, cfg, [TREE, BED])
-    # every loop the same way round, around the obstacles too (and concentric's rings)
-    loops = [s for s in plan.segments if s.kind == PERIMETER or s.maneuver == 'ring']
+    # every loop the same way round, around the obstacles too (and concentric's rings), a K-turn in it a part of it
+    loops: Dict[str, List[int]] = {}
+    for s in plan.segments:
+        if s.kind == PERIMETER or s.kind == LANE and s.maneuver in ('ring', 'k_point'):
+            span = loops.setdefault(s.source, [s.start, s.end])
+            span[0], span[1] = min(span[0], s.start), max(span[1], s.end)
     assert len(loops) >= 6
     sign = 1 if direction == 'ccw' else -1
-    for s in loops:
-        assert sign * signed_area(plan.poses[s.start:s.end + 1]) > 0
+    for start, end in loops.values():
+        assert sign * signed_area(plan.poses[start:end + 1]) > 0
 
 
 # body and blade --------------------------------------------------------------------------------------------
@@ -841,17 +847,23 @@ def test_arriving_the_other_way_turns_into_it():
 
 
 def test_smooth_spins():
-    """Turns on the spot by more than SPIN_LIMIT become an omega where there's room, the plan as well mowed."""
+    """Turns on the spot by more than SPIN_LIMIT become an omega where there's room, with allow_reverse a K-turn in
+    place where there isn't (backing up a segment of its own); the plan as well mowed."""
     def spins(plan):
         return sum(1 for a, b in zip(plan.poses, plan.poses[1:]) if angle_diff(a.yaw, b.yaw) > SPIN_LIMIT)
 
-    kw = dict(MOWER, **NX60I)
-    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(kw, smooth_spins=False)), start=(1, 1, 0.0))
-    cfg = PlannerConfig(**kw)
+    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, smooth_spins=False)), start=(1, 1, 0.0))
+    left = check_plan(plain)['left_m2']
+    cfg = PlannerConfig(**FORWARD)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
     check_invariants(plan, cfg, [TREE, BED])
-    assert spins(plan) < spins(plain) and plan.stats['path_length'] > plain.stats['path_length']
-    assert check_plan(plan)['left_m2'] == pytest.approx(check_plan(plain)['left_m2'], abs=0.02)
+    assert spins(plan) < spins(plain) / 2 and plan.stats['path_length'] > plain.stats['path_length']
+    assert not any(s.reverse for s in plan.segments) and check_plan(plan)['left_m2'] == pytest.approx(left, abs=0.02)
+    cfg = PlannerConfig(**dict(FORWARD, allow_reverse=True))
+    backing = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
+    check_invariants(backing, cfg, [TREE, BED])
+    assert spins(backing) == 0 and any(s.reverse and s.maneuver == 'k_point' for s in backing.segments)
+    assert check_plan(backing)['left_m2'] == pytest.approx(left, abs=0.02)
 
 
 def test_body_corner_rounding():
