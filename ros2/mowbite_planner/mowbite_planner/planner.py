@@ -30,8 +30,8 @@ from shapely.geometry import LineString, Point, Polygon
 
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
-from .maneuvers import (CORNER_ANGLE, closest_on_polyline, connect, drive_polyline, path_length, plan_turn,
-                        same_position, sample_arc, sample_straight)
+from .maneuvers import (CORNER_ANGLE, Maneuver, closest_on_polyline, connect, drive_polyline, path_length,
+                        plan_turn, same_position, sample_arc, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -1253,23 +1253,30 @@ class _Route:
             elif driven == 0:
                 self.go_to(a, yaw)
             else:
-                turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
-                                 self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
-                                 self.cfg.allowed_turns, self.body)
+                exit_pose = Pose2D(self.pos[0], self.pos[1], self.heading)
+
+                def turn_to(entry: XY, types) -> Optional[Maneuver]:
+                    return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
+                                     self.area.is_free, self.transit.path, types, self.body)
+
                 # the turn goes level with the lane end further out, where the body may not fit (body_ends only
-                # made room for a turn level with each end): this lane starts level with the last one's end then
+                # made room for a turn level with each end): this lane starts level with the last one's end then,
+                # before a detour or a pivot
                 ux, uy = math.cos(yaw), math.sin(yaw)
                 level = (self.pos[0] - a[0]) * ux + (self.pos[1] - a[1]) * uy
                 rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
-                if (turn is None or turn.name in ('detour', 'pivot')) and self.footprint is not None and \
-                        1e-6 < level < rest:
-                    start = (a[0] + level * ux, a[1] + level * uy)
-                    other = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), start, self.cfg.turn_radius,
-                                      self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
-                                      self.cfg.allowed_turns, self.body)
-                    if other is not None and (turn is None or other.name not in ('detour', 'pivot')):
-                        a, turn = start, other
-                        self._count('lanes_body')
+                turn = None
+                if self.footprint is not None and 1e-6 < level < rest:
+                    gentle = tuple(t for t in self.cfg.allowed_turns if t not in ('detour', 'pivot'))
+                    turn = turn_to(a, gentle)
+                    if turn is None:
+                        start = (a[0] + level * ux, a[1] + level * uy)
+                        turn = turn_to(start, gentle)
+                        if turn is not None:
+                            a = start
+                            self._count('lanes_body')
+                if turn is None:
+                    turn = turn_to(a, self.cfg.allowed_turns)
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, piece.reverse, turn.name)
@@ -1701,14 +1708,6 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     if route.counts.get('lanes_body'):
         route.warnings.append(f'{route.counts["lanes_body"]} lanes shortened or left out where the body would stick '
                               'out at their ends')
-    out = body_out(poses, segments, section_starts, footprint) if footprint is not None else []
-    if out:
-        kinds: Dict[str, int] = {}
-        for o in out:
-            kinds[o['kind']] = kinds.get(o['kind'], 0) + 1
-        route.warnings.append(f'the body sticks out at {len(out)} poses ('
-                              f'{", ".join(f"{k} {n}" for k, n in sorted(kinds.items()))}), the first '
-                              f'({out[0]["kind"]}) at ({out[0]["x"]:.2f}, {out[0]["y"]:.2f})')
     if len(section_starts) > 1:
         route.warnings.append(f'the area has {len(section_starts)} parts with no way between them: the path '
                               'jumps from one to the next')

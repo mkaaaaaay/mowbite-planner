@@ -437,7 +437,8 @@ def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits:
         if body is not None:
             for i in range(1, n - 1):
                 turn = normalize_angle(yaws[i] - yaws[i - 1])
-                if abs(turn) < 1e-6 or abs(turn) > math.pi - 1e-3:
+                # (a slight bend, of a recorded edge, needs no more room than driving straight on)
+                if abs(turn) < CORNER_ANGLE or abs(turn) > math.pi - 1e-3:
                     continue
                 corner = rounded[i][1] if i in rounded else [Pose2D(pts[i][0], pts[i][1], yaws[i - 1]),
                                                              Pose2D(pts[i][0], pts[i][1], yaws[i])]

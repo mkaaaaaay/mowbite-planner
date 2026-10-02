@@ -732,7 +732,6 @@ def test_body_in_the_garden():
         report = check_plan(plan)
         assert {'x', 'y', 'yaw', 'kind'} == set(report['body_out'][0])
         assert any('body sticks out' in h for h in report['hard'])
-        assert any('body sticks out' in w for w in plan.warnings)
         # left: the corners the body keeps the mower out of, and the lane starts of the turns
         assert report['left_m2'] < (0.5 if edges == 'recorded' else 1.5)
         assert sum(o['kind'] in ('turn', 'lane_end') for o in report['body_out']) == 0

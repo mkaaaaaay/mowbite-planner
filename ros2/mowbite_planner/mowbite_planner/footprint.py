@@ -5,7 +5,7 @@ the space it may take at poses, turning on the spot where the heading jumps."""
 import math
 from typing import Sequence
 
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.prepared import prep
 
 from .mathutil import angle_diff, normalize_angle
@@ -19,6 +19,8 @@ except ImportError:  # shapely 1.7 (ROS Noetic)
 SPIN = math.radians(30.0)
 # rad, a turn on the spot is checked with the body this far apart (its corners pass < 2 mm outside of them)
 TURN_STEP = math.radians(10.0)
+# m, squares of the map this big are looked up once whether all of them lies where the body fits whatever way it faces
+CELL = 0.1
 
 
 class Footprint:
@@ -34,6 +36,7 @@ class Footprint:
         self._safe = None if inner.is_empty else inner if contains_xy is not None else prep(inner)
         if self._safe is not None and contains_xy is not None:
             prepare(inner)
+        self._cells: dict = {}
 
     def body(self, x: float, y: float, yaw: float) -> Polygon:
         c, s = math.cos(yaw), math.sin(yaw)
@@ -44,7 +47,15 @@ class Footprint:
     def _safe_at(self, x: float, y: float) -> bool:
         if self._safe is None:
             return False
-        return bool(contains_xy(self._safe, x, y)) if contains_xy is not None else self._safe.covers(Point(x, y))
+        if contains_xy is not None:
+            return bool(contains_xy(self._safe, x, y))
+        # (shapely 1.7 makes a geometry of every point: most are in a square already known to be safe)
+        key = (math.floor(x / CELL), math.floor(y / CELL))
+        safe = self._cells.get(key)
+        if safe is None:
+            safe = self._cells[key] = self._safe.covers(box(key[0] * CELL, key[1] * CELL, (key[0] + 1) * CELL,
+                                                            (key[1] + 1) * CELL))
+        return safe or self._safe.covers(Point(x, y))
 
     def fits_pose(self, x: float, y: float, yaw: float) -> bool:
         return self._safe_at(x, y) or self._space.covers(self.body(x, y, yaw))
@@ -74,4 +85,8 @@ class Footprint:
         return list(self._bad(poses))
 
     def poses_fit(self, poses: Sequence) -> bool:
+        # all of them where the body fits whatever way it faces: one check for the lot
+        if len(poses) > 2 and self._safe is not None and \
+                self._safe.covers(LineString([(p.x, p.y) for p in poses])):
+            return True
         return next(self._bad(poses), None) is None
