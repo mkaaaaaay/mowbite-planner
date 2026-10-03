@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_angle,  # noqa: E402
                              plan_coverage, quaternion_to_yaw, swept_area, yaw_to_quaternion)
 from mowbite_planner.maneuvers import (bulb_turn, drive_polyline, dubins, k_turn, omega, path_length,  # noqa: E402
-                                       plan_turn, sample_straight, u_turn)
+                                       plan_turn, same_position, sample_straight, u_turn)
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
                                      SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
@@ -1019,6 +1019,47 @@ def test_earlier_only_where_mowed():
     turn, entry = route(0.2).round_earlier((9.2, 1.6), math.pi, 5.0)
     assert turn.name == 'u_turn' and entry[0] < 9.2 - 0.05
 
+
+
+def test_drive_into_lane_where_mowed():
+    """With min_turn_radius a drive arriving the other way round where a lane starts at the wall ends on a way into
+    the lane instead of turning on the spot, the lane starting a little further on, only where the loops along the
+    wall mow what that leaves of it; the lane goes on from where the drive ends, forwards."""
+    space = TransitPlanner(Polygon(rect(0, 0, 10, 4)))
+    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25))
+
+    def route(loops):
+        r = _Route(cfg, space, space, (3.0, 2.3), math.pi, None)
+        for x in loops:
+            r.add(PERIMETER, sample_straight(x, 0.5, x, 3.5, math.pi / 2, 0.05))
+        r.pos, r.heading = (3.0, 2.3), math.pi
+        return r
+
+    poses = route(()).drive_to((0.05, 2.0), 0.0, (8.0, 2.0))
+    assert _spins(poses, math.pi, 0.0) == 1 and (poses[-1].x, poses[-1].y) == pytest.approx((0.05, 2.0))
+    poses = route((0.05, 0.18, 0.31)).drive_to((0.05, 2.0), 0.0, (8.0, 2.0))
+    assert _spins(poses, math.pi, 0.0) == 0 and poses[-1].y == 2.0 and 0.1 < poses[-1].x <= 0.55
+    assert all(space.is_free([(p.x, p.y)]) for p in poses)
+    r = route((0.05, 0.18, 0.31))
+    r.drive_lanes([Lane(0, 0.05, 8.0, 2.0)], 1, 0.0, lambda x, y: (x, y))
+    drive, lane = r.segments[-2:]
+    assert drive.kind == TRANSIT and lane.kind == LANE and same_position(drive.poses[-1], lane.poses[0])
+    assert all(p.x < q.x for p, q in zip(lane.poses, lane.poses[1:]))
+
+
+def test_bent_lane_entered_on_its_first_piece():
+    """A lane bending round an obstacle starts later only on its first straight piece, not behind it."""
+    space = TransitPlanner(Polygon(rect(0, 0, 10, 4)).difference(Polygon(rect(0.62, 1.85, 0.95, 2.15))))
+    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25))
+    r = _Route(cfg, space, space, (3.0, 2.3), math.pi, None)
+    for x in (0.05, 0.18, 0.31):
+        r.add(PERIMETER, sample_straight(x, 0.5, x, 3.5, math.pi / 2, 0.05))
+    r.pos, r.heading = (3.0, 2.3), math.pi
+    lane = Lane(0, 0.05, 8.0, 2.0, ((0.2, 1.3, ((0.2, 2.0), (0.55, 2.3), (1.05, 2.3), (1.3, 2.0))),))
+    r.drive_lanes([lane], 1, 0.0, lambda x, y: (x, y))
+    ps = r.segments[-1].poses
+    assert ps[0].x <= 0.2 + 1e-9
+    assert all(angle_diff(math.atan2(q.y - p.y, q.x - p.x), p.yaw) < math.radians(90) for p, q in zip(ps, ps[1:]))
 
 def test_turns_where_lanes_end_at_a_slant():
     """With min_turn_radius, where the lanes end at a slant the turns between them are U-turns that way, the lanes

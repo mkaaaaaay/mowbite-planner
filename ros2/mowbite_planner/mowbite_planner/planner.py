@@ -146,8 +146,9 @@ class PlannerConfig:
     # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (a smaller turn_radius counts as this):
     # drives, loops out and K-turns turn on the spot instead, a turn between lanes where none of it fits is rounded as
     # wide as fits (at a slant where the lanes end at one, the lanes ending a little earlier for it where that's what
-    # it takes, else a loop into the next lane, see _Route.round_earlier), on the spot only where nothing does. 0: any
-    # (the corners of loops are rounded as before)
+    # it takes, else a loop into the next lane, see _Route.round_earlier), on the spot only where nothing does, a drive
+    # into a lane ending on a way into it where one fits (the lane starting later for it where that leaves nothing, see
+    # _Route.into_lane). 0: any (the corners of loops are rounded as before)
     min_turn_radius: float = 0.0
     allow_reverse: bool = True  # K-turns, which back up a little
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
@@ -940,16 +941,16 @@ class _Route:
             self.section += 1
             self.started = False
 
-    def go_to(self, target: XY, heading: Optional[float] = None) -> None:
-        """Drives to target, to arrive facing heading if given. Where there's no way there (can't happen
-        within a part of the area, but never leave anything out) the path goes on there as a new section."""
+    def go_to(self, target: XY, heading: Optional[float] = None, head: Optional[XY] = None) -> None:
+        """Drives to target, to arrive facing heading if given (head: see drive_to). Where there's no way there (can't
+        happen within a part of the area, but never leave anything out) the path goes on there as a new section."""
         if not self.started:
             self.pos = target
             return
         dist = math.hypot(target[0] - self.pos[0], target[1] - self.pos[1])
         if dist < 1e-6:
             return
-        poses = self.drive_to(target, heading)
+        poses = self.drive_to(target, heading, head)
         if poses is None:
             self.warnings.append(f'no way found from ({self.pos[0]:.2f}, {self.pos[1]:.2f}) to ({target[0]:.2f}, '
                                  f'{target[1]:.2f}): the path jumps there')
@@ -958,10 +959,11 @@ class _Route:
             return
         self.add(TRANSIT, poses)
 
-    def drive_to(self, target: XY, heading: Optional[float]) -> Optional[List[Pose2D]]:
+    def drive_to(self, target: XY, heading: Optional[float], head: Optional[XY] = None) -> Optional[List[Pose2D]]:
         """The drive from where the mower is to target, arriving facing heading: leaving and arriving on arcs where
         they fit. Where it would arrive the other way round (turning on the spot by more than SPIN_LIMIT there), via a
-        U-turn into it from beside it, like between lanes, if that turns on the spot less. None if there's no way."""
+        U-turn into it from beside it, like between lanes, if that turns on the spot less. Where it still would and a
+        lane starts there (straight to head), with min_turn_radius into_lane. None if there's no way."""
         r = self.cfg.turn_radius
 
         def drive(b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
@@ -991,7 +993,37 @@ class _Route:
                 spins = _spins(poses, self.heading, heading)
                 if spins < best_spins or spins == best_spins and path_length(poses) < path_length(best):
                     best, best_spins = poses, spins
+        if head is not None and self.cfg.min_turn_radius > 0 and angle_diff(best[-1].yaw, heading) > SPIN_LIMIT:
+            return self.into_lane(best, target, heading, head) or best
         return best
+
+    def into_lane(self, drive: List[Pose2D], a: XY, yaw: float, head: XY) -> Optional[List[Pose2D]]:
+        """In place of the drive's end turning on the spot into the lane from a (facing yaw, its straight piece ending
+        at head): Dubins' shortest way into it that fits from a pose of the drive's last 4 turn_radius (one every
+        turn_radius back, the latest first, its start too), where none does into the lane ROUND_STEP further on at a
+        time, up to 2 turn_radius, if the way or what's mowed already (the loops) mows what that leaves of the lane
+        (but EARLIER_LEFT). None where none fits."""
+        r = self.cfg.turn_radius
+        starts, way = [], 0.0
+        for k in range(len(drive) - 2, -1, -1):
+            way += math.hypot(drive[k + 1].x - drive[k].x, drive[k + 1].y - drive[k].y)
+            if way >= (len(starts) + 1) * r - 1e-9 or k == 0:
+                starts.append(k)
+        rest = min(2.0 * r, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
+        for i in range(int(max(0.0, rest) / ROUND_STEP + 1e-9) + 1):
+            entry = Pose2D(a[0] + i * ROUND_STEP * math.cos(yaw), a[1] + i * ROUND_STEP * math.sin(yaw), yaw)
+            for k in starts[:4]:
+                for m in dubins(drive[k], entry, r, self.step):
+                    poses = m.pieces[0].poses
+                    if not self.transit.is_free([(p.x, p.y) for p in poses]) or \
+                            self.body is not None and not self.body(poses):
+                        continue
+                    if i and subtract(self.blade([Pose2D(a[0], a[1], yaw), entry]), [
+                            self.blade(poses), self.blade([entry, Pose2D(head[0], head[1], yaw)]),
+                            self.mowed([(a[0], a[1], entry.x, entry.y)], self.segments)]).area > EARLIER_LEFT:
+                        return None  # (further on it leaves more)
+                    return join(drive[:k], poses)
+        return None
 
     def _distance(self, a: Optional[XY], b: XY) -> float:
         return 0.0 if a is None else math.hypot(b[0] - a[0], b[1] - a[1])
@@ -1377,17 +1409,16 @@ class _Route:
                         continue
                     a, b = piece
             yaw = normalize_angle(angle if direction > 0 else angle + math.pi)
-            head = b  # where the lane's first straight piece ends
+            pieces = lane.pieces()[::direction]  # (of a lane bending round obstacles: where its first piece ends)
+            head = to_map((pieces[0][1] if direction > 0 else pieces[0][0]) - back, y) if lane.bends else b
             if self.footprint is not None:
                 # the side the turns come from and go to (left of the lanes going +x is +y)
                 side = [0.0 if o is None else direction * math.copysign(1.0, o.y - lane.y)
                         for o in (lanes[i - 1] if driven else None, lanes[i + 1] if i + 1 < len(lanes) else None)]
                 if lane.bends:
                     # the straight pieces at its ends
-                    pieces = lane.pieces()[::direction]
-                    first = to_map((pieces[0][1] if direction > 0 else pieces[0][0]) - back, y)
                     last = to_map((pieces[-1][0] if direction > 0 else pieces[-1][1]) - back, y)
-                    ends = self.body_ends(a, first, yaw, side[0], 0.0), self.body_ends(last, b, yaw, 0.0, side[1])
+                    ends = self.body_ends(a, head, yaw, side[0], 0.0), self.body_ends(last, b, yaw, 0.0, side[1])
                     head = ends[0][1] if ends[0] is not None else head
                     ends = None if None in ends else (ends[0][0], ends[1][1])
                 else:
@@ -1395,6 +1426,7 @@ class _Route:
                 if ends is None:
                     continue
                 a, b = ends
+                head = head if lane.bends else b  # (where the body lets it end)
             name = f'lane-{len(self.lanes)}'
             self.source = name
             self.origins[name] = {'parent': self.cell_of.get(id(lane), ''),
@@ -1402,7 +1434,8 @@ class _Route:
             if driven == 0 and self._turn_into(a, yaw):
                 pass
             elif driven == 0:
-                self.go_to(a, yaw)
+                self.go_to(a, yaw, head)
+                a = a if same_position(self.pos, a) else self.pos  # (into_lane may start it further on)
             else:
                 exit_pose = Pose2D(self.pos[0], self.pos[1], self.heading)
 
@@ -1441,9 +1474,10 @@ class _Route:
                         self.add(TURN, piece.poses, piece.reverse, turn.name)
                     self._count('turns_' + turn.name)
                 else:
-                    poses = self.drive_to(a, yaw)
+                    poses = self.drive_to(a, yaw, head)
                     if poses is None:
                         return lanes[i:]
+                    a = a if same_position(poses[-1], a) else (poses[-1].x, poses[-1].y)
                     self.add(TRANSIT, poses, maneuver='turn_fallback')
                     self._count('turns_fallback')
             if lane.bends:
@@ -1477,11 +1511,6 @@ class _Route:
         types = tuple(t for t in self.cfg.allowed_turns if t != 'pivot' and (far or t != 'detour')) + ('pivot',)
         most_e = min(max(0.0, -dx) + r, length - self.cfg.min_lane_length)
         most_n = min(max(0.0, dx) + r, rest)
-        half, ahead, off = 0.5 * self.cfg.mower_width, self.cfg.blade_ahead, self.cfg.blade_offset
-
-        def blade(ps: Sequence[Pose2D]):
-            return LineString([(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
-                                p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in ps]).buffer(half, 4)
 
         def shortest(exit_pose: Pose2D, entry: XY, loops: bool) -> Optional[Maneuver]:
             # Dubins' shortest way that fits, the widest first
@@ -1498,22 +1527,8 @@ class _Route:
             # what of region isn't mowed already (but by the lane just mowed): the path near where the two lanes end
             # and start as far as they may get shorter, worked out once
             if not mowed:
-                m = half + abs(ahead) + abs(off) + self.step
-                ends = [(end.x - most_e * hx, end.y - most_e * hy, end.x, end.y),
-                        (a[0], a[1], a[0] + most_n * ux, a[1] + most_n * uy)]
-                boxes = [(min(x0, x1) - m, min(y0, y1) - m, max(x0, x1) + m, max(y0, y1) + m)
-                         for x0, y0, x1, y1 in ends]
-                runs: List[List[Pose2D]] = []
-                for seg in self.segments[:-1]:
-                    run: List[Pose2D] = []
-                    for p in seg.poses:
-                        if any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for x0, y0, x1, y1 in boxes):
-                            run.append(p)
-                        elif run:
-                            runs.append(run)
-                            run = []
-                    runs.append(run)
-                mowed.append(union(blade(run) for run in runs if len(run) >= 2))
+                mowed.append(self.mowed([(end.x - most_e * hx, end.y - most_e * hy, end.x, end.y),
+                                         (a[0], a[1], a[0] + most_n * ux, a[1] + most_n * uy)], self.segments[:-1]))
             return subtract(region, mowed)
 
         k = 0
@@ -1532,11 +1547,11 @@ class _Route:
             k += 1
             if turn is None:
                 continue
-            left = [blade([exit_pose, end])] if de > 1e-9 else []
-            left += [blade([Pose2D(a[0], a[1], yaw), Pose2D(entry[0], entry[1], yaw)])] if dn > 1e-9 else []
+            left = [self.blade([exit_pose, end])] if de > 1e-9 else []
+            left += [self.blade([Pose2D(a[0], a[1], yaw), Pose2D(entry[0], entry[1], yaw)])] if dn > 1e-9 else []
             if left:
-                there = subtract(union(left), [blade([p for piece in turn.pieces for p in piece.poses]),
-                                               blade([first, exit_pose])])
+                there = subtract(union(left), [self.blade([p for piece in turn.pieces for p in piece.poses]),
+                                               self.blade([first, exit_pose])])
                 if there.area > EARLIER_LEFT and unmowed(there).area > EARLIER_LEFT:
                     break  # (further in it leaves more)
             if de > 1e-9:
@@ -1547,6 +1562,28 @@ class _Route:
             return turn, entry
         turn = shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns else None
         return None if turn is None else (turn, a)
+
+    def blade(self, poses: Sequence[Pose2D]):
+        """Where the blade mows driving poses."""
+        half, ahead, off = 0.5 * self.cfg.mower_width, self.cfg.blade_ahead, self.cfg.blade_offset
+        return LineString([(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
+                            p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in poses]).buffer(half, 4)
+
+    def mowed(self, ends: List[Tuple[float, float, float, float]], segments: List[PathSegment]):
+        """What the blade mowed driving segments, of their poses near the lines in ends (x0, y0, x1, y1)."""
+        m = 0.5 * self.cfg.mower_width + abs(self.cfg.blade_ahead) + abs(self.cfg.blade_offset) + self.step
+        boxes = [(min(x0, x1) - m, min(y0, y1) - m, max(x0, x1) + m, max(y0, y1) + m) for x0, y0, x1, y1 in ends]
+        runs: List[List[Pose2D]] = []
+        for seg in segments:
+            run: List[Pose2D] = []
+            for p in seg.poses:
+                if any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for x0, y0, x1, y1 in boxes):
+                    run.append(p)
+                elif run:
+                    runs.append(run)
+                    run = []
+            runs.append(run)
+        return union(self.blade(run) for run in runs if len(run) >= 2)
 
     def body_ends(self, a: XY, b: XY, yaw: float, arrive: float, leave: float) -> Optional[Tuple[XY, XY]]:
         """The lane from a to b pulled back at its ends until the body fits there, and on the quarter arcs of
