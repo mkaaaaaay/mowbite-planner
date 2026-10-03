@@ -999,10 +999,10 @@ class _Route:
 
     def into_lane(self, drive: List[Pose2D], a: XY, yaw: float, head: XY) -> Optional[List[Pose2D]]:
         """In place of the drive's end turning on the spot into the lane from a (facing yaw, its straight piece ending
-        at head): Dubins' shortest way into it that fits from a pose of the drive's last 4 turn_radius (one every
-        turn_radius back, the latest first, its start too), where none does into the lane ROUND_STEP further on at a
-        time, up to 2 turn_radius, if the way or what's mowed already (the loops) mows what that leaves of the lane
-        (but EARLIER_LEFT). None where none fits."""
+        at head): Dubins' shortest way into it that fits, going round once at most on top of what it has to, from a pose
+        of the drive's last 4 turn_radius (one every turn_radius back, the latest first, its start too), where none
+        does into the lane ROUND_STEP further on at a time, up to 2 turn_radius, the first whose way or what's mowed
+        already (the loops) mows what it leaves of the lane (but EARLIER_LEFT). None where none fits."""
         r = self.cfg.turn_radius
         starts, way = [], 0.0
         for k in range(len(drive) - 2, -1, -1):
@@ -1010,18 +1010,26 @@ class _Route:
             if way >= (len(starts) + 1) * r - 1e-9 or k == 0:
                 starts.append(k)
         rest = min(2.0 * r, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
+        mowed = []
         for i in range(int(max(0.0, rest) / ROUND_STEP + 1e-9) + 1):
             entry = Pose2D(a[0] + i * ROUND_STEP * math.cos(yaw), a[1] + i * ROUND_STEP * math.sin(yaw), yaw)
             for k in starts[:4]:
                 for m in dubins(drive[k], entry, r, self.step):
                     poses = m.pieces[0].poses
+                    if sum(angle_diff(p.yaw, q.yaw) for p, q in zip(poses, poses[1:])) > \
+                            angle_diff(drive[k].yaw, yaw) + 2.0 * math.pi + 1e-6:
+                        continue
                     if not self.transit.is_free([(p.x, p.y) for p in poses]) or \
                             self.body is not None and not self.body(poses):
                         continue
-                    if i and subtract(self.blade([Pose2D(a[0], a[1], yaw), entry]), [
-                            self.blade(poses), self.blade([entry, Pose2D(head[0], head[1], yaw)]),
-                            self.mowed([(a[0], a[1], entry.x, entry.y)], self.segments)]).area > EARLIER_LEFT:
-                        return None  # (further on it leaves more)
+                    if i:
+                        if not mowed:  # (worked out once, as far as it may start later)
+                            mowed.append(self.mowed([(a[0], a[1], a[0] + rest * math.cos(yaw),
+                                                      a[1] + rest * math.sin(yaw))], self.segments))
+                        if subtract(self.blade([Pose2D(a[0], a[1], yaw), entry]), [
+                                self.blade(poses), self.blade([entry, Pose2D(head[0], head[1], yaw)]),
+                                mowed[0]]).area > EARLIER_LEFT:
+                            continue
                     return join(drive[:k], poses)
         return None
 
@@ -1344,21 +1352,27 @@ class _Route:
                 left.append(sorted(rest, key=lambda lane: lane.row))
         return left
 
-    def _turn_into(self, a: XY, yaw: float) -> bool:
+    def _turn_into(self, a: XY, yaw: float, head: XY) -> Optional[XY]:
         """The next cell's first lane right next to where the mower is and the other way round: that's a turn
-        between lanes, not a drive. True if a turn got there."""
+        between lanes, not a drive, round_earlier where it would turn on the spot. Where the lane starts then, None if
+        no turn got there."""
         if not self.started or self.heading is None or angle_diff(yaw, self.heading + math.pi) > 1e-3 or \
                 math.hypot(a[0] - self.pos[0], a[1] - self.pos[1]) > 4.0 * self.cfg.turn_radius:
-            return False
+            return None
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.cfg.allow_reverse, self.step, self.area.is_free, self.transit.path,
                          self.cfg.allowed_turns, self.body, self.cfg.min_turn_radius)
+        if (turn is None or turn.name == 'pivot') and self.cfg.min_turn_radius > 0:
+            earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
+            if earlier is not None:
+                turn, a = earlier
+                self._count('lanes_earlier')
         if turn is None:
-            return False
+            return None
         for piece in turn.pieces:
             self.add(TURN, piece.poses, piece.reverse, turn.name)
         self._count('turns_' + turn.name)
-        return True
+        return a
 
     def visit_order(self, lanes: List[Lane]) -> List[Lane]:
         """The cell's lanes (one per row, in row order) in the order they're mowed."""
@@ -1431,8 +1445,9 @@ class _Route:
             self.source = name
             self.origins[name] = {'parent': self.cell_of.get(id(lane), ''),
                                   'kind': 'bent' if lane.bends else 'straight', 'row': lane.row}
-            if driven == 0 and self._turn_into(a, yaw):
-                pass
+            start = self._turn_into(a, yaw, head) if driven == 0 else None
+            if start is not None:
+                a = start
             elif driven == 0:
                 self.go_to(a, yaw, head)
                 a = a if same_position(self.pos, a) else self.pos  # (into_lane may start it further on)

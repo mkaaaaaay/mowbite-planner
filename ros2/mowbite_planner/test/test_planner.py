@@ -1047,6 +1047,35 @@ def test_drive_into_lane_where_mowed():
     assert all(p.x < q.x for p, q in zip(lane.poses, lane.poses[1:]))
 
 
+def test_next_cell_beside_turned_into_earlier():
+    """The next cell's first lane right beside the lane just mowed and the other way round, at a wall where no turn
+    fits: the lane just mowed ends a little earlier for a U-turn into it, no turning on the spot."""
+    space = TransitPlanner(Polygon(rect(0, 0, 9.23, 4)))  # a wall 3 cm past the lane's end
+    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25, turn_types=('u_turn', 'pivot')))
+    r = _Route(cfg, space, space, (1.0, 1.0), 0.0, None)
+    r.add(PERIMETER, sample_straight(9.2, 0.2, 9.2, 3.0, math.pi / 2, 0.05))  # along the wall
+    r.add(LANE, sample_straight(1.0, 1.0, 9.2, 1.0, 0.0, 0.05))
+    r.lanes.append(((1.0, 1.0), (9.2, 1.0)))
+    r.drive_lanes([Lane(0, 1.0, 9.2, 1.6)], -1, 0.0, lambda x, y: (x, y))
+    before, turn, lane = r.segments[-3:]
+    assert turn.kind == TURN and turn.maneuver == 'u_turn' and lane.kind == LANE
+    assert before.poses[-1].x < 9.2 - 0.05
+
+
+def test_lanes_entered_without_turning_on_the_spot():
+    """Where the lanes end at a slant and obstacles split them into cells, the drives to the next cell and the turns
+    into it get into the lanes on a way, not turning on the spot where a lane starts."""
+    shape = [(0, 0), (8, 0), (8, 6), (0, 8)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', min_turn_radius=0.25, perimeter_passes=3,
+                               lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.6))
+    plan = plan_coverage(shape, [circle(3, 3, 0.8, 16), circle(6, 4.5, 0.6, 12)], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg)
+    poses = plan.poses
+    starts = [s.start for s in plan.segments if s.kind == LANE and s.start]
+    assert not [i for i in starts if angle_diff(poses[i - 1].yaw, poses[i].yaw) > SPIN_LIMIT]
+    assert check_plan(plan)['left_m2'] < 0.25
+
+
 def test_bent_lane_entered_on_its_first_piece():
     """A lane bending round an obstacle starts later only on its first straight piece, not behind it."""
     space = TransitPlanner(Polygon(rect(0, 0, 10, 4)).difference(Polygon(rect(0.62, 1.85, 0.95, 2.15))))
