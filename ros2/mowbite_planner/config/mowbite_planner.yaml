@@ -37,6 +37,9 @@
     # wheels: tighter, the inner wheel stands or turns backwards and scuffs the lawn), turning on the spot instead
     min_turn_radius: 0.0
     allow_reverse: true
+    # turning on the spot where the path would drive a loop (for lawns that take it): no bulb between lanes, a drive
+    # arriving on the spot rather than round a loop, the body fitting turning
+    turn_on_spot: false
     # the turns allowed, preferred first
     turn_types: [u_turn, bulb, k_turn, detour, pivot]
     lane_order: snake
@@ -48,20 +51,30 @@
     simplify_tolerance: 0.01
     min_lane_length: 0.10
     # the mower's body [m] around its centre (base_link): robot_width wide, robot_front ahead, robot_rear behind
-    # (negative: not set). With all three the turns, lane ends, loops and drives keep it in: on recorded edges
-    # (the outline and obstacles are where the centre drove) where it was when they were recorded, on hard ones
-    # (walls) not past them, the centre keeps robot_width / 2 off them. blade_offset: the blade's centre this far
-    # left of the mower's (negative: right), the loops then go round with the blade on their outer side
+    # (negative: not set). With all three the outline and obstacles are where the centre drove (edges doesn't count
+    # then): the turns, lane ends, loops and drives keep the body where it was while they were recorded, the margins
+    # off that. Without, hard edges (walls) keep the centre robot_width / 2 off them. blade_offset: the blade's
+    # centre this far left of the mower's (negative: right), the loops then go round with the blade on their outer
+    # side
     # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds): lanes
     # anyway, or loops further in there, the pieces they come apart into driven on the way round (with
     # fill_pattern concentric all the loops, a part in one go)
     narrow_parts: lanes
+    # clean stripes: in the lanes' field the path only runs straight along the lanes, the drives and turns go along the
+    # headland the loops mow (across the field only straight where that way is more than twice as long or there's none)
+    headland_turns: false
     robot_width: -1.0
     robot_front: -1.0
     robot_rear: -1.0
     edges: recorded
-    # how much further the body may reach than the edges allow [m] (a recorded edge is a few cm off)
+    # how much further out than the first loop a turn, a loop out or a drive may take the centre [m] (a recorded edge
+    # is a few cm off), the body keeping the margins
     body_tolerance: 0.05
+    # where the body would still stick out, the path goes another way there that fits (false: as planned)
+    body_fit: true
+    # how far the body keeps off the outline's and the obstacles' real edges [m], everywhere
+    edge_margin: 0.05
+    obstacle_margin: 0.10
     blade_offset: 0.0
     # the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels),
     # negative: behind it. The lanes start and end that much earlier

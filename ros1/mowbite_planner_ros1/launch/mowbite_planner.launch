@@ -11,8 +11,9 @@
          Lane spacing, loops and skip flags come with mower_logic's request, the angle too unless angle or
          angle_strategy is set here and the area has no angle of its own in the saved map (an editor preview
          of an angle just added or removed follows the saved area until the edit is saved). The edges are walls
-         until set otherwise (edges: recorded where the lines were driven with the mower's centre on them), the
-         planner works out the lane spacing until it's set to fixed -->
+         until set otherwise (edges: recorded where the lines were driven with the mower's centre on them, with the
+         body set, robot_width, robot_front and robot_rear, always), the planner works out the lane spacing until
+         it's set to fixed -->
     <rosparam param="settings">{turn_radius: 0.25, narrow_parts: loops, edges: hard, lane_spacing_mode: auto}</rosparam>
     <!-- the settings changed with the planner.settings.set RPC, on top of the ones above. Empty: until the next start -->
     <param name="settings_file" value="$(optenv ROS_HOME ~/.ros)/mowbite_planner_settings.json"/>

@@ -2,6 +2,7 @@
 
 import math
 import os
+import struct
 import sys
 
 import pytest
@@ -9,8 +10,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa: E402
-from mowbite_planner.mapfile import (area_job, area_settings, find_area, match_area, mow_areas,  # noqa: E402
-                                     openmower_angle, openmower_settings, settings_for)
+from mowbite_planner.mapfile import (area_job, area_settings, find_area, margins_for, match_area,  # noqa: E402
+                                     mow_areas, openmower_angle, openmower_settings, settings_for)
 
 
 def rect(x0, y0, x1, y1):
@@ -109,6 +110,26 @@ def test_match_area():
     assert match_area({'areas': [off, unmowed, a, b]}, rect(0, 0, 10, 6)) == 2
     assert match_area({'areas': [off, unmowed, b]}, rect(0, 0, 10, 6)) == 0
     assert match_area({'areas': [b, unmowed, off]}, rect(0, 0, 10, 6)) == 1
+
+
+def test_margins_for():
+    """An obstacle's or area's own margin, found by its outline as OpenMower sends it (float32, maybe closed). None for
+    an outline the map doesn't have, and where it's no number 0..1 (10 meant as cm: the default rather than no plan)."""
+    data = {'areas': [area('front', 'mow', rect(0, 0, 10, 6), planner={'edge_margin': 0.2, 'obstacle_margin': 0}),
+                      area('bed', 'obstacle', rect(4, 2, 5, 3), margin=0.3),
+                      area('tree', 'obstacle', rect(6, 2, 7, 3)),
+                      area('pond', 'mow', rect(1, 1, 2, 2), mowable=False, margin=0),
+                      area('odd', 'obstacle', rect(8, 2, 9, 3), margin=-0.1),
+                      area('far', 'obstacle', rect(8, 4, 9, 5), margin='far'),
+                      area('cm', 'obstacle', rect(8, 6, 9, 7), margin=10)]}
+    sent = [struct.unpack('<2f', struct.pack('<2f', x + 1e-7, y)) for x, y in rect(4, 2, 5, 3)]
+    outlines = [sent + sent[:1], rect(6, 2, 7, 3), rect(1, 1, 2, 2), rect(8, 2, 9, 3), rect(8, 4, 9, 5),
+                rect(4, 2, 5, 4), rect(8, 6, 9, 7)]
+    assert margins_for(data, outlines) == [0.3, None, 0.0, None, None, None, None]
+    assert margins_for(None, outlines[:1]) == [None] and margins_for(data, []) == []
+    # the area's own in its planner object
+    cfg = settings_for(PlannerConfig(), None, area_job(data, 'front'))
+    assert (cfg.edge_margin, cfg.obstacle_margin) == (0.2, 0.0)
 
 
 def test_area_job_without_dock_or_properties():
@@ -240,8 +261,13 @@ def test_area_settings():
     assert settings(angle=0.5, planner={'angle_strategy': 'optimal', 'angle': 0.2})['angle'] == 0.2
     # only the ones OpenMower doesn't know (and so doesn't send its planner)
     own = area_settings(area('a', 'mow', rect(0, 0, 1, 1), angle=0.5, outline_count=1, outline_offset=0.1,
-                             angle_min=0.1, angle_max=0.4, planner={'turn_radius': 0.3}), openmower=False)
-    assert own == {'angle_min': 0.1, 'angle_max': 0.4, 'turn_radius': 0.3}
+                             angle_min=0.1, angle_max=0.4, planner={'turn_radius': 0.3, 'headland_turns': True,
+                                                                    'turn_on_spot': True}),
+                        openmower=False)
+    assert own == {'angle_min': 0.1, 'angle_max': 0.4, 'turn_radius': 0.3, 'headland_turns': True,
+                   'turn_on_spot': True}
+    cfg = PlannerConfig().with_overrides(own)
+    assert cfg.headland_turns is cfg.turn_on_spot is True
 
 
 def test_settings_for_layers():

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple, Union
 
 from .geometry import clean_polygon
-from .planner import PlannerConfig, PlanningError
+from .planner import MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
 # a mowing area lies in another (is nested) with this share of it in there at least
@@ -97,30 +97,49 @@ def find_area(data: Mapping[str, Any], which: Union[str, int]) -> Mapping[str, A
     raise PlanningError(f'no mowing area {which!r} in the map (there are: {names})')
 
 
+def _outline(outline: Any, tolerance: float) -> Optional[List[XY]]:
+    """An outline's points without a closing one (tolerance apart from the first), None if it's broken."""
+    try:
+        pts = _points(outline)
+    except ValueError:
+        return None
+    if len(pts) > 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < tolerance:
+        pts = pts[:-1]
+    return pts
+
+
+def _same(area: Mapping[str, Any], pts: List[XY], tolerance: float) -> bool:
+    own = _outline(area.get('outline'), tolerance)
+    return own is not None and len(own) == len(pts) and all(
+        abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance for a, b in zip(own, pts))
+
+
 def match_area(data: Mapping[str, Any], outline: Any, tolerance: float = 1e-3) -> Optional[int]:
     """The index among the mowing areas of the one with this outline (as OpenMower sends an area's outline
     to its planner, float32): the first that isn't set to inactive or not mowable, else the first. None if
     no area has it. Areas with a broken outline are left out."""
-    def points(outline: Any) -> Optional[List[XY]]:
-        try:
-            pts = _points(outline)
-        except ValueError:
-            return None
-        if len(pts) > 1 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < tolerance:
-            pts = pts[:-1]
-        return pts
-
-    pts = points(outline)
+    pts = _outline(outline, tolerance)
     first = None
     for i, area in enumerate(mow_areas(data) if pts else []):
-        own = points(area.get('outline'))
-        if own is not None and len(own) == len(pts) and all(
-                abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance for a, b in zip(own, pts)):
+        if _same(area, pts, tolerance):
             if _props(area).get('active') is not False and _props(area).get('mowable') is not False:
                 return i
             if first is None:
                 first = i
     return first
+
+
+def margins_for(data: Optional[Mapping[str, Any]], outlines: Any, tolerance: float = 1e-3) -> List[Optional[float]]:
+    """The margin (m, its "margin" property, see PlannerConfig.obstacle_margin) of the map's obstacle or area with
+    each of these outlines (as OpenMower sends an obstacle to its planner, float32), None where none has one or it's
+    not 0..MAX_BLADE_OFFSET (one in cm doesn't stop the whole area)."""
+    own = [(a, _number(_props(a).get('margin'))) for a in _areas(data)]
+    own = [(a, m) for a, m in own if m is not None and 0.0 <= m <= MAX_BLADE_OFFSET]
+    out: List[Optional[float]] = []
+    for outline in outlines:
+        pts = _outline(outline, tolerance) if own else None
+        out.append(next((m for a, m in own if _same(a, pts, tolerance)), None) if pts else None)
+    return out
 
 
 def openmower_settings(params: Optional[Mapping[str, Any]], mower_width: float) -> Dict[str, Any]:

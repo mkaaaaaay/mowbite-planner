@@ -17,6 +17,8 @@ with it the one that's active and mowable):
   - the other lawns: the shortest way between parts of the area may go through them. Not the navigation
     areas: mower_logic mows a path from start to end, a part only reachable over them gets paths of its own.
   - the docking station: plans start on the loop next to it and end close to it.
+  - an obstacle's (or an area's to keep out of) own "margin" property (m): the body keeps that far off it in place of
+    obstacle_margin. The obstacles mower_logic sends are found in the map by their outline.
 The plan never depends on where the mower is, so the same map gives the same plan (mower_logic compares a
 digest of it to resume an interrupted mow).
 
@@ -79,7 +81,7 @@ import mowbite_planner
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, yaw_to_quaternion
 from mowbite_planner import planner as limits
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
-from mowbite_planner.mapfile import area_job, match_area, openmower_settings
+from mowbite_planner.mapfile import area_job, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
@@ -107,7 +109,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
-          'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET)}
+          'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET), 'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
+          'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET)}
 # plans kept, in memory and on disk (in plans_dir): the same request again (a preview, then the mow; mowing.plan, then
 # planner.plan) gets the plan at once
 CACHED_PLANS = 16
@@ -477,21 +480,24 @@ class MowbitePlannerRos1:
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
         return cfg.with_overrides({'angle_steps': self.angle['steps']})
 
-    def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=()):
+    def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
         given and the planner's code, the same again (to the last bit) is the same plan. allow_reverse only where the
         FTC controller backs up (BACK_UP_PARAM)."""
-        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out)[0]
+        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins)[0]
 
-    def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=()):
+    def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """(plan, whether it was kept from before), see plan_coverage."""
         if cfg.allow_reverse and not rospy.get_param(BACK_UP_PARAM, False):
             rospy.logwarn_throttle(600, 'MowBite Planner: allow_reverse left out, OpenMower\'s FTC controller doesn\'t '
                                    'back up (%s is not true)' % BACK_UP_PARAM)
             cfg = cfg.with_overrides({'allow_reverse': False})
-        # the obstacles in one order, every way there (the request, the map) gives the same
-        obstacles = sorted(canon(obstacles))
-        args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out))
+        # the obstacles in one order, every way there (the request, the map) gives the same, each with its margin
+        margins = list(margins) + [None] * (len(obstacles) + len(keep_out) - len(margins))
+        pairs = sorted(zip(canon(obstacles), canon(margins)), key=lambda pair: pair[0])
+        obstacles = [o for o, _ in pairs]
+        margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
+        args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
         key = hashlib.sha1((self.code + repr(args)).encode()).hexdigest()
         with self.plans_lock:
             plan = self.plans.get(key)
@@ -554,8 +560,10 @@ class MowbitePlannerRos1:
             cfg = self.settings(req, job)
             if job is not None and cfg.nested_areas:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
+            # the map's obstacles (areas to keep out of) with a margin of their own, by their outline
+            margins = margins_for(data, obstacles + keep_out)
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
-                                        keep_out=keep_out)
+                                        keep_out=keep_out, margins=margins)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res

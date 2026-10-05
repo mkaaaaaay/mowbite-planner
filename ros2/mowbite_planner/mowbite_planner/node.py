@@ -78,11 +78,23 @@ PARAMETERS = {
                      'anyway, or loops further in, the pieces they come apart into driven on the way round (with '
                      'fill_pattern concentric all the loops)',
                      lambda v: v in NARROW_PARTS, 'must be lanes or loops'),
-    'body_tolerance': (0.05, "how much further the mower's body may reach than the edges allow [m] (a recorded edge "
-                       'is a few cm off where the mower was)', lambda v: v >= 0.0, 'must be >= 0'),
+    'headland_turns': (False, "clean stripes: in the lanes' field the path only runs straight along the lanes, the "
+                       'drives and turns go along the headland the loops mow (across the field only straight where '
+                       'that way is more than twice as long or there is none)', None, ''),
+    'body_tolerance': (0.05, 'how much further out than the first loop a turn, a loop out or a drive may take the '
+                       "mower's centre [m] (a recorded edge is a few cm off where the mower was), the body keeping the "
+                       'margins', lambda v: v >= 0.0, 'must be >= 0'),
     'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may be where '
-              'it was then. hard: walls, the centre keeps robot_width / 2 off them',
+              'it was then. hard: walls, the centre keeps robot_width / 2 off them. With the body set (robot_width, '
+              'robot_front, robot_rear) always recorded',
               lambda v: v in EDGES, 'must be recorded or hard'),
+    'body_fit': (True, 'where the body would still stick out, the path goes another way there that fits, leaving a '
+                 'little of a loop or lane out where it has to. False: the path as planned', None, ''),
+    'edge_margin': (0.05, "how far the body keeps off the outline's real edge [m] (where the body was while its "
+                    'centre drove the line), everywhere: body_tolerance takes nothing off it. The first loop moves '
+                    'further in for it', lambda v: v >= 0.0, 'must be >= 0'),
+    'obstacle_margin': (0.10, "how far the body keeps off an obstacle's real edge [m], like edge_margin, the loops "
+                        'round it further out for it', lambda v: v >= 0.0, 'must be >= 0'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
     'blade_ahead': (0.0, "how far the blade's centre sits ahead of the mower's centre [m] (OpenMower's base_link "
@@ -121,6 +133,9 @@ PARAMETERS = {
     'allow_reverse': (True, 'K-turns (forward arc, a short way back, forward arc) where a forward turn of '
                       'turn_radius does not fit. Off for controllers that only drive forwards (OpenMower FTC)',
                       None, ''),
+    'turn_on_spot': (False, 'turning on the spot where the path would drive a loop (for lawns that take it): no bulb '
+                     'between lanes, a drive arriving on the spot rather than round a loop, the body fitting turning',
+                     None, ''),
     'turn_types': (list(TURN_TYPES), 'turns allowed between lanes, preferred first: ' + ', '.join(TURN_TYPES),
                    lambda v: all(t in TURN_TYPES for t in v), 'must be some of ' + ', '.join(TURN_TYPES)),
     'lane_order': ('snake', 'snake: lane after neighbouring lane. skip: lanes far enough apart for a forward '
@@ -160,6 +175,8 @@ RANGES = {
     'robot_width': (-1.0, 5.0),
     'robot_front': (-1.0, 5.0),
     'body_tolerance': (0.0, 1.0),
+    'edge_margin': (0.0, 1.0),
+    'obstacle_margin': (0.0, 1.0),
     'robot_rear': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),

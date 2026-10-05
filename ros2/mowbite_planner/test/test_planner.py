@@ -1,29 +1,31 @@
 """Tests of the planner without ROS (python3 -m pytest test/ in the package folder, shapely is enough)."""
 
 import dataclasses
+import itertools
 import math
 import os
 import random
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from typing import Dict, List
 
 import pytest
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import nearest_points, unary_union
 from shapely.prepared import prep
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, normalize_angle,  # noqa: E402
-                             plan_coverage, quaternion_to_yaw, swept_area, yaw_to_quaternion)
+from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, footprint, normalize_angle,  # noqa: E402
+                             plan_coverage, planner, quaternion_to_yaw, swept_area, transit, yaw_to_quaternion)
 from mowbite_planner.maneuvers import (bulb_turn, drive_polyline, dubins, k_turn, omega, path_length,  # noqa: E402
                                        plan_turn, same_position, sample_straight, u_turn)
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
-from mowbite_planner.planner import (LANE, PERIMETER, TRANSIT, TURN, Lane, _lane_cost, _Route,  # noqa: E402
-                                     SPIN_LIMIT, _spins, angle_in_range, best_order, longest_edge_angle,
-                                     plan_footprint, scan_lanes, split_cells)
+from mowbite_planner.planner import (FIT_PLACE, FIT_ROUND, FIT_START, FIT_TRIES, LANE, PERIMETER,  # noqa: E402
+                                     TRANSIT, TURN, Lane, _lane_cost, _Route, SPIN_LIMIT, _spins, angle_in_range,
+                                     best_order, longest_edge_angle, plan_footprint, scan_lanes, split_cells)
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
@@ -57,7 +59,8 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
     for i, p in enumerate(poses):
         assert math.isfinite(p.x) and math.isfinite(p.y) and math.isfinite(p.yaw)
         assert -math.pi < p.yaw <= math.pi
-        assert (drivable if i in in_transit else inside).covers(Point(p.x, p.y)), f'pose {p} outside the free space'
+        at = Point(p.x, p.y)
+        assert inside.covers(at) or i in in_transit and drivable.covers(at), f'pose {p} outside the free space'
     # no obstacle closer than the first loop's offset (minus what simplifying the input may move)
     cloud = MultiPoint([(p.x, p.y) for p in poses])
     for o in obstacles:
@@ -372,38 +375,41 @@ def test_obstacles_over_the_edge_or_outside():
 
 def test_no_way_over_keep_out_areas():
     """The way around the wall through the other lawn, but not over an inactive area or one not to mow in it: the
-    centre keeps off it like off an obstacle, nor does the body reach in (further than body_tolerance, like past a
-    wall)."""
+    centre keeps off it like off an obstacle, nor does the body reach in further than when it was recorded (half its
+    width or its reach turning at a corner, obstacle_margin less, away from the wall's own edge). (The places the path
+    leaves out at the outline's corners don't make parts of the area.)"""
     wall = rect(4.9, -1, 5.1, 7)
     keep = rect(3, 6.5, 7, 8)  # across the lawn's near half
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
     free = plan_coverage(rect(0, 0, 10, 6), [wall], cfg, drivable=[rect(1, 4, 9, 11)])
-    assert free.section_starts == [0] and any(6.5 < p.y < 8 and 3 < p.x < 7 for p in free.poses)
+    assert not any('parts' in w for w in free.warnings) and any(6.5 < p.y < 8 and 3 < p.x < 7 for p in free.poses)
     plan = plan_coverage(rect(0, 0, 10, 6), [wall], cfg, drivable=[rect(1, 4, 9, 11)], keep_out=[keep])
     check_invariants(plan, cfg, [wall])
-    assert plan.section_starts == [0] and max(p.y for p in plan.poses) > 8.0  # round it, further out
+    assert not any('parts' in w for w in plan.warnings) and max(p.y for p in plan.poses) > 8.0  # round it, further out
     away = Polygon(keep).buffer(cfg.centre_offset - 1e-6)
     assert not any(away.contains(Point(p.x, p.y)) for p in plan.poses)
-    assert plan.body_space.intersection(Polygon(keep).buffer(-cfg.body_tolerance, join_style=2)).area < 1e-6
+    reach = math.hypot(0.5 * cfg.robot_width, cfg.robot_front)  # (turning at its corners)
+    deep = Polygon(keep).buffer(cfg.obstacle_margin - reach, join_style=2).difference(Polygon(wall).buffer(0.5))
+    assert plan.body_space.intersection(deep).area < 1e-6
 
 
-@pytest.mark.parametrize('edges', ['recorded', 'hard'])
-def test_keep_out_areas_are_walls(edges):
-    """Next to an area to keep out of, the body stays out of it on the loops as well: the edge there is a wall, for
-    recorded edges too, the strip that leaves along it is reported. (Turning at a corner in front of it, the front
-    swings out a little, as in front of any wall.)"""
-    keep = rect(0, 6, 10, 9)  # the next lawn, inactive, right along the outline
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges=edges))
-    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, keep_out=[keep])
-    check_invariants(plan, cfg, [])
-    inside = Polygon(keep).buffer(-cfg.body_tolerance, join_style=2)
-    body = plan_footprint(plan).body
-    assert all(body(p.x, p.y, p.yaw).intersection(inside).area < 1e-9 for p in plan.poses if 1.0 < p.x < 9.0)
-    assert max(p.y for p in plan.poses) <= 6.0 - 0.5 * cfg.robot_width + cfg.body_tolerance + 1e-6
-    walled = [w for w in plan.warnings if 'along areas to keep out of' in w]
-    assert bool(walled) == (edges == 'recorded')  # hard edges keep the body that far off any edge anyway
-    other = plan_coverage(rect(0, 0, 10, 6), [], cfg)
-    assert max(p.y for p in other.poses) > max(p.y for p in plan.poses) - 1e-9
+def test_keep_out_areas_like_obstacles():
+    """An area to keep out of reaching into the lawn is recorded like an obstacle: the loops go round it obstacle_margin
+    off its line (and simplify_tolerance), the body keeps that far off its real edge (half its width inside the line),
+    hard edges or not: with the body checked the lines are where the centre drove."""
+    keep = rect(4, 4, 6, 9)  # the next lawn, not to mow, 2 m into this one
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0), keep_out=[keep])
+    check_invariants(plan, cfg, [keep])
+    assert check_plan(plan)['body_out'] == []
+    line = Polygon(keep).exterior
+    loops = [p for s in plan.segments if s.kind == PERIMETER for p in plan.poses[s.start:s.end + 1]]
+    assert min(line.distance(Point(p.x, p.y)) for p in loops) == pytest.approx(
+        cfg.obstacle_margin + cfg.simplify_tolerance, abs=0.01)
+    assert outside_room(plan, recorded_room(cfg, [rect(0, 0, 10, 6)], [keep], [cfg.obstacle_margin])) == []
+    hard = plan_coverage(rect(0, 0, 10, 6), [], dataclasses.replace(cfg, edges='hard'), start=(1, 1, 0.0),
+                         keep_out=[keep])
+    assert hard.poses == plan.poses
 
 
 @pytest.mark.parametrize('corridor', [False, True])
@@ -757,27 +763,95 @@ def test_footprint():
     # turning on the spot where the heading jumps from the pose before: half way round the rear corner sticks out
     poses = [Pose2D(9.4, 0.22, 0.0), Pose2D(9.5, 0.22, math.pi / 2), Pose2D(9.5, 0.32, math.pi / 2)]
     assert fp.bad_poses(poses) == [1] and fp.spins(poses, 1) and not fp.poses_fit(poses)
+    # about a half turn either way round (the front swings over the edge turning right), less the shorter way only
+    assert not fp.fits_turn(5, 0.45, 0.0, math.radians(175)) and fp.fits_turn(5, 0.45, 0.0, math.radians(160))
+    # where the heading turns by less than SPIN only the poses count
+    assert fp.poses_fit([Pose2D(9.5, 5, 0.0), Pose2D(9.5, 5.01, math.radians(25))])
+
+
+def test_footprint_fit(monkeypatch):
+    """fit() is fits_pose for every pose: all at once with shapely 2, one at a time with shapely 1.7 (their points at
+    once with numpy). Whether the body is in the room, also just off a corner of what's taken out of it, the front's
+    corner facing it, or the side of a half facing it."""
+    room = Polygon(rect(0, 0, 4, 3)).difference(Polygon(rect(1.5, 1, 2.5, 2)))
+    rng = random.Random(5)
+    poses = [Pose2D(rng.uniform(-0.2, 4.2), rng.uniform(-0.2, 3.2), rng.uniform(-math.pi, math.pi)) for _ in range(500)]
+    for (cx, cy), r, a in itertools.product(rect(1.5, 1, 2.5, 2), (0.465, 0.47), range(0, 360, 3)):
+        x, y = cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a))
+        poses.append(Pose2D(x, y, math.atan2(cy - y, cx - x) - math.atan2(0.2, 0.43)))
+    for (cx, cy), r, a in itertools.product(rect(1.5, 1, 2.5, 2), (0.24, 0.25), range(0, 360, 3)):
+        # (the front half's middle that far off the corner, the half's corner facing it)
+        x, y, h = cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a)), math.atan2(0.2, 0.1425)
+        poses.append(Pose2D(x - 0.2875 * math.cos(math.radians(a) + math.pi + h),
+                            y - 0.2875 * math.sin(math.radians(a) + math.pi + h), math.radians(a) + math.pi + h))
+    for mode in ('shapely 2', 'shapely 1.7', 'shapely 1.7 with numpy'):
+        if mode != 'shapely 2':
+            monkeypatch.setattr(footprint, 'contains_xy', None)
+            monkeypatch.setattr(footprint, 'contains_points', None if mode == 'shapely 1.7' else
+                                lambda prepared, x, y: footprint.numpy.array([prepared.context.contains(Point(p))
+                                                                              for p in zip(x, y)], bool))
+        fp = Footprint(room, 0.4, 0.43, 0.14)
+        fits = fp.fit(poses)
+        assert fits == [fp.fits_pose(p.x, p.y, p.yaw) for p in poses] and 50 < sum(fits[:500]) < 450
+        assert fits == [room.covers(fp.body(p.x, p.y, p.yaw)) for p in poses]
+
+
+def test_zones_keep_off():
+    """space.buffer(-d / KEEP_OFF, 4) keeps d off space's edge, also where it bends a little at every point (recorded)
+    and round corners of every angle (GEOS rounds them coarser than with 4 sides a quarter circle)."""
+    rng = random.Random(3)
+    outline = [(10 * math.cos(t) + rng.uniform(-0.03, 0.03), 6 * math.sin(t) + rng.uniform(-0.03, 0.03))
+               for t in (2 * math.pi * i / 900 for i in range(900))]
+    space = Polygon(outline, [circle(-4, 0, 0.5, 7)[::-1], rect(2, -1, 3, 1)[::-1],
+                              [(5, 2), (6.5, 2.2), (5.2, 2.6)]])
+    assert space.is_valid
+    for d in (0.2456, 0.4742, 1.0):
+        # (what's in the zone is no closer to the edge than the zone's own edge)
+        assert space.buffer(-d / footprint.KEEP_OFF, 4).boundary.distance(space.boundary) >= d
+
+
+def test_zone_has_points_for_sure(monkeypatch):
+    """A _Zone has a point only where it lies in it, on its edge at most (where the square of the map it's in does): on
+    and next to its edge, round its corners and holes, far out; and every point further in than a few squares."""
+    rng = random.Random(4)
+    geom = Polygon(circle(0, 0, 3, 50), [rect(-1, -1, 0.5, 0.3)[::-1], circle(1.5, 1, 0.4, 7)[::-1]])
+    edge = [geom.boundary.interpolate(rng.uniform(0, geom.boundary.length)) for _ in range(3000)]
+    pts = [(p.x + rng.gauss(0, 0.03), p.y + rng.gauss(0, 0.03)) for p in edge] + [(p.x, p.y) for p in edge]
+    pts += [(rng.uniform(-4, 4), rng.uniform(-4, 4)) for _ in range(5000)] + [(1e6, -1e6), (-3.0, 0.0)]
+    far = geom.buffer(-3 * max(footprint.RASTER, footprint.CELL))
+    for mode in ('shapely 2', 'shapely 1.7'):
+        if mode != 'shapely 2':
+            monkeypatch.setattr(footprint, 'contains_xy', None)
+        zone = footprint._Zone(geom)
+        has = [zone.has(x, y) for x, y in pts]
+        assert not any(h and not geom.covers(Point(p)) for p, h in zip(pts, has))
+        assert all(h for p, h in zip(pts, has) if far.contains(Point(p))) and sum(has) > 1500
 
 
 def test_body_turns_and_lane_ends_stay_inside():
     """The turns fit with the body: lane ends pulled back for the U-turns, no turn on the spot or replaced by a
-    drive, and the body nowhere it wasn't when the edges were recorded (driving along them, turning at the corners)
-    but for a few poses where the outer loop, its centre on the line (perimeter_offset 0), rounds a corner."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    drive, and the body nowhere it wasn't when the edges were recorded (driving along them, turning at the corners).
+    The outer loop, its centre on the line (perimeter_offset 0, no edge_margin), can't turn round a corner or get on
+    the line at a slant without its rear or front swinging out: the path gets off the line before a corner, turns
+    further in and gets back on after it, easing off and on, nowhere jumping."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, edge_margin=0.0))
     plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg)
-    plain = plan_coverage(rect(0, 0, 10, 6), [], PlannerConfig(**dict(MOWER, angle=0.0)), start=(1, 1, 0.0),
-                          end=(1, 1))
-    assert plan.stats['turns_u_turn'] == plain.stats['turns_u_turn'] + plain.stats['turns_pivot'] > 0
+    assert plan.stats['turns_u_turn'] == plan.stats['lanes'] - 1 > 0
     assert plan.stats['turns_pivot'] == plan.stats['turns_fallback'] == plan.stats['turns_detour'] == 0
-    out = check_plan(plan)['body_out']
-    assert len(out) <= 12 and {o['kind'] for o in out} <= {'loop', 'spin'}
-    edge = Polygon(rect(0, 0, 10, 6)).exterior
-    assert all(edge.distance(Point(o['x'], o['y'])) < 0.05 for o in out)  # (its corner arcs a few cm in)
+    report = check_plan(plan)
+    # (left: the corners, round them further in)
+    assert report['body_out'] == [] and report['left_m2'] < 0.5
+    fit = plan.stats['body_fit']
+    assert fit['jumps'] == [] and len(plan.section_starts) == 1
+    ways = [s for s in plan.segments if s.kind == TRANSIT and s.maneuver == 'body']
+    for cx, cy in rect(0, 0, 10, 6)[1:]:
+        assert any(min(math.hypot(p.x - cx, p.y - cy) for p in plan.poses[s.start:s.end + 1]) < 0.6 for s in ways)
     # the lanes end where the U-turn's arc keeps the front in: a turn of 0.25 reaches 0.62 past the end, the body
-    # may go 0.21 past the edge
-    ends = [x for a, b in plan.lanes for x in (a[0], b[0])]
-    assert max(ends) <= 10 + 0.21 - math.hypot(0.25 + 0.2, 0.43) + 0.02
+    # may go 0.2 past the edge
+    reach = math.hypot(0.25 + 0.2, 0.43)
+    ends = [plan.poses[i].x for s in plan.segments if s.maneuver == 'u_turn' for i in (s.start, s.end)]
+    assert min(ends) >= reach - 0.2 - 0.02 and max(ends) <= 10 + 0.2 - reach + 0.02
     assert any('lanes shortened' in w for w in plan.warnings)
 
 
@@ -790,11 +864,11 @@ def test_body_in_the_garden():
         # (where a lane end is far from the last one's, a drive rather than a turn leaving half the lane out)
         assert plan.stats['turns_fallback'] + plan.stats['turns_pivot'] <= 3
         report = check_plan(plan)
-        assert {'x', 'y', 'yaw', 'kind'} == set(report['body_out'][0])
-        assert any('body sticks out' in h for h in report['hard'])
-        # left: the corners the body keeps the mower out of, and the lane starts of the turns
-        assert report['left_m2'] < (0.5 if edges == 'recorded' else 1.5)
-        assert sum(o['kind'] in ('turn', 'lane_end') for o in report['body_out']) == 0
+        # where it would stick out the path goes another way
+        assert report['body_out'] == [] and not any('body sticks out' in h for h in report['hard'])
+        assert plan.stats['body_fit']['fixed'] > 0 and plan.stats['body_fit']['jumps'] == []
+        # left: the corners the body keeps the mower out of (rounded further in), and the lane starts of the turns
+        assert report['left_m2'] < 1.0
 
 
 def test_body_bent_lanes():
@@ -808,9 +882,362 @@ def test_body_bent_lanes():
     assert not [o for o in check_plan(plan)['body_out'] if o['kind'] in ('turn', 'lane_end')]
 
 
+def test_body_where_it_was_while_recording():
+    """The body may be where it was while the edges were recorded, its centre on them the way their points go: at a
+    corner it turned on the spot from one edge's heading to the next one's, its front ahead past the corner and its rear
+    behind (recorded the other way round, that's on the other side of the corner), but facing out of the corner its
+    front would be where it never was."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, edge_margin=0.0))
+    ccw = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0))
+    cw = plan_coverage(rect(0, 0, 10, 6)[::-1], [], cfg, start=(1, 1, 0.0))
+    fp = plan_footprint(ccw)
+    # (a mm more: right on the edge of the space floats may count it out)
+    room = ccw.body_space.buffer(1e-3)
+    assert all(room.covers(fp.body(0.0, 0.0, (k / 18 - 0.5) * math.pi)) for k in range(10))
+    assert not fp.fits_pose(0.0, 0.0, -0.75 * math.pi)
+    # at (10, 0) ccw arrived facing +x, cw facing -y
+    ahead, below = Point(10.4, -0.1), Point(10.1, -0.4)
+    assert ccw.body_space.contains(ahead) and not ccw.body_space.contains(below)
+    assert cw.body_space.contains(below) and not cw.body_space.contains(ahead)
+
+
+@pytest.mark.parametrize('deg', [0, 33, 101])
+def test_body_fits_at_any_angle(deg):
+    """Where the body would stick out the path goes another way, whatever the angle: nothing sticks out (also against
+    the real edges worked out here on their own), nowhere does it jump, the rest of the path is as planned, and stats
+    has every way in place. Left: where the loops along the lines don't turn round a corner or get on their line
+    without the body's rear or front swinging out, they get off it before the corner and back on after it."""
+    obstacles = [TREE, BED]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=math.radians(deg)))
+    plan = plan_coverage(GARDEN, obstacles, cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, obstacles)
+    # without it: what sticks out are loops, spins and drives, the turns and lane ends fit on their own
+    off = plan_coverage(GARDEN, obstacles, dataclasses.replace(cfg, body_fit=False), start=(1, 1, 0.0), end=(1, 1))
+    report, before = check_plan(plan), check_plan(off)
+    assert report['body_out'] == [] and report['left_m2'] <= before['left_m2'] + 0.8
+    assert outside_room(plan, recorded_room(cfg, [GARDEN], obstacles, [cfg.obstacle_margin] * 2)) == []
+    assert plan.stats['body_fit']['jumps'] == [] and len(plan.section_starts) == 1
+    out = before['body_out']
+    assert {'x', 'y', 'yaw', 'kind'} == set(out[0]) and not [o for o in out if o['kind'] in ('turn', 'lane_end')]
+    planned = {(p.x, p.y) for p in off.poses}
+    ways = [s for s in plan.segments if s.kind == TRANSIT and s.maneuver == 'body']
+    assert all((p.x, p.y) in planned for s in plan.segments if s not in ways for p in plan.poses[s.start:s.end + 1])
+    fit = plan.stats['body_fit']
+    assert fit['fixed'] == len(ways) > 0 and len(fit['places']) == fit['fixed'] + fit['left']
+    assert fit['skipped_m'] == pytest.approx(sum(m for _, _, m in fit['places']), abs=0.01)
+    for s, (x, y, _) in zip(ways, fit['places']):
+        p = plan.poses[(s.start + s.end) // 2]
+        assert (x, y) == (round(p.x, 2), round(p.y, 2))
+    lines = unary_union([Polygon(ring).exterior for ring in [GARDEN] + obstacles])
+    assert all(lines.distance(Point(x, y)) < 0.3 for x, y, _ in fit['places'][fit['fixed']:])
+    assert any('places left out' in w for w in plan.warnings) == (fit['left'] > 0)
+
+
+def test_body_fits_through_narrow_gaps():
+    """A table recorded 8 cm off the outline, a sunshade 18 cm: the loops between them and the outline turn where the
+    body doesn't fit, the path goes another way there, stats saying where and what that leaves out."""
+    table, shade = rect(3, 5.0, 5, 5.92), circle(8, 5.47, 0.35, 16)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, narrow_parts='loops', min_turn_radius=0.25,
+                               perimeter_passes=3))
+    plan = plan_coverage(rect(0, 0, 10, 6), [table, shade], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, [table, shade])
+    assert check_plan(plan)['body_out'] == []
+    fit = plan.stats['body_fit']
+    gap = Polygon(rect(7, 5.5, 9, 6))
+    assert sum(m for x, y, m in fit['places'] if gap.contains(Point(x, y))) > 0.5
+
+
+def test_body_drives_through_the_area():
+    """Where a drive finds no way through the transit space (to a lane's end a little out of it) it goes through the
+    mowing area (_Route.go_to), with the body checked up to body_tolerance further out: no finding of check_plan, the
+    body keeps the margins there (also against the real edges worked out here on their own). A pose 1 cm further out
+    is one."""
+    trees = [circle(4, 4, 0.4), circle(8, 4.3, 0.5)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=3, lane_overlap_passes=2))
+    plan = plan_coverage(rect(0, 0, 12, 8), trees, cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, trees)
+    transit_space = plan.transit_space.buffer(2e-3)
+    out = [i for s in plan.segments if s.kind == TRANSIT for i in range(s.start, s.end + 1)
+           if not transit_space.covers(Point(plan.poses[i].x, plan.poses[i].y))]
+    assert out
+    report = check_plan(plan)
+    assert report['body_out'] == [] and not any('poses outside' in h for h in report['hard'])
+    assert outside_room(plan, recorded_room(cfg, [rect(0, 0, 12, 8)], trees, [cfg.obstacle_margin] * 2)) == []
+    p = plan.poses[out[0]]
+    q = nearest_points(plan.robot_space.boundary, Point(p.x, p.y))[0]
+    d = math.hypot(q.x - p.x, q.y - p.y)
+    poses = list(plan.poses)
+    poses[out[0]] = p._replace(x=q.x + 0.01 * (q.x - p.x) / d, y=q.y + 0.01 * (q.y - p.y) / d)
+    report = check_plan(dataclasses.replace(plan, poses=poses))
+    assert '1 poses outside the space the mower may drive in' in report['hard']
+
+
+def test_body_fit_starts_later(monkeypatch):
+    """Where nothing fits FIT_START after the plan's (a section's) start at most, it starts later instead of jumping
+    there (or turning round, FIT_ROUND 0 here), the body fitting from there. At the plan's start, by the dock, that's no
+    place left out: the mower drives to its first pose on its own. Places left out further on still are, with a
+    warning."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    monkeypatch.setattr(planner, 'FIT_ROUND', 0)
+    plans = []
+    for start in (0.0, FIT_START):
+        monkeypatch.setattr(planner, 'FIT_START', start)
+        plans.append(plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1)))
+    jumped, later = (p.stats['body_fit'] for p in plans)
+    assert len(jumped['jumps']) == len(plans[0].section_starts) - 1 > 0 and later['jumps'] == []
+    assert jumped['left'] == len(jumped['jumps']) and any('places left out' in w for w in plans[0].warnings)
+    assert len(plans[1].section_starts) == 1 and plans[1].poses[0] != plans[0].poses[0]
+    assert plan_footprint(plans[1]).fits_pose(*plans[1].poses[0])
+    assert later['left'] == 0 and not any('places left out' in w for w in plans[1].warnings)
+    assert path_length(plans[1].poses) < path_length(plans[0].poses)
+    # nothing tried for a place: those further on are left out, the path jumping over them, the start still isn't one
+    monkeypatch.setattr(planner, 'FIT_PLACE', (0, 0))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    fit = plan.stats['body_fit']
+    assert plan.poses[0] == plans[1].poses[0] and fit['left'] == len(fit['jumps']) == len(plan.section_starts) - 1 > 0
+    assert any('places left out' in w for w in plan.warnings)
+
+
+def test_body_fit_late_start_left_out(monkeypatch):
+    """Where the body doesn't fit at the plan's start (its first poses here) it starts later, no place left out while
+    that leaves FIT_START m of loops and lanes out at most. With more it's a place left out like any other, a warning
+    saying so."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
+    planned = plan_coverage(lawn, [], dataclasses.replace(cfg, body_fit=False), start=dock, end=dock[:2])
+    fits_pose, fit = Footprint.fits_pose, Footprint.fit
+    for gone in (0.5 * FIT_START, 3.0):
+        k = next(k for k in range(len(planned.poses)) if path_length(planned.poses[:k + 1]) > gone)
+        head = {(p.x, p.y, p.yaw) for p in planned.poses[:k]}  # the body doesn't fit there
+        monkeypatch.setattr(Footprint, 'fits_pose', lambda fp, x, y, yaw: (x, y, yaw) not in head
+                            and fits_pose(fp, x, y, yaw))
+        monkeypatch.setattr(Footprint, 'fit', lambda fp, poses: [f and (p.x, p.y, p.yaw) not in head
+                                                                 for f, p in zip(fit(fp, poses), poses)])
+        planner._FITTED.clear()
+        plan = plan_coverage(lawn, [], cfg, start=dock, end=dock[:2])
+        fitted = plan.stats['body_fit']
+        assert plan.poses[0] == planned.poses[k] and fitted['jumps'] == [] and len(plan.section_starts) == 1
+        warned = any("places left out where the body doesn't fit" in w for w in plan.warnings)
+        if gone < FIT_START:
+            assert fitted['left'] == 0 and not warned
+            continue
+        mid = planned.poses[k // 2]
+        assert fitted['left'] == 1 and warned
+        assert fitted['places'][-1] == [round(mid.x, 2), round(mid.y, 2), pytest.approx(gone, abs=0.1)]
+    planner._FITTED.clear()
+
+
+def test_body_fit_turns_round():
+    """A dead end narrowing to a point, too narrow to turn round in at its end without backing up: the path drives in
+    only as far as it can still turn round and turns there, nowhere jumping, nothing sticking out (also against the real
+    edges worked out here on their own), stats saying where and what that leaves out."""
+    shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    plan = plan_coverage(shape, [], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg)
+    fit = plan.stats['body_fit']
+    assert fit['jumps'] == [] and len(plan.section_starts) == 1 and fit['left'] == 0
+    assert check_plan(plan)['body_out'] == [] and outside_room(plan, recorded_room(cfg, [shape], [], [])) == []
+    # (0.54 m between the lines there, the body's 0.4 and its margins: 1 m wide, room to turn round one way)
+    assert 6.0 < max(p.y for p in plan.poses) < 7.0
+    assert any(y > 4.0 and m > 0 for _, y, m in fit['places']) and any('driven another way' in w for w in plan.warnings)
+
+
+def test_body_fit_bounded(monkeypatch):
+    """A dead end too narrow to turn round in without backing up: the plan gets done, nothing sticking out, no more than
+    FIT_PLACE ways tried for a place (none: none tried), FIT_ROUND turning round there, nor FIT_TRIES for all. Where it
+    may try none it leaves out what doesn't fit and jumps over it, a warning saying where."""
+    shape = [(0, 0), (6, 0), (6, 3), (3.3, 3), (3.3, 13), (2.7, 13), (2.7, 3), (0, 3)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    for tries, place, turning in ((FIT_TRIES, FIT_PLACE, FIT_ROUND), (50, FIT_PLACE, FIT_ROUND),
+                                  (FIT_TRIES, (0, 0), 0)):
+        monkeypatch.setattr(planner, 'FIT_TRIES', tries)
+        monkeypatch.setattr(planner, 'FIT_PLACE', place)
+        monkeypatch.setattr(planner, 'FIT_ROUND', turning)
+        plan = plan_coverage(shape, [], cfg, start=(1, 1, 0.0))
+        check_invariants(plan, cfg)
+        fit = plan.stats['body_fit']
+        assert check_plan(plan)['body_out'] == [] and fit['tries'] <= tries and (fit['tries'] > 0) == (sum(place) > 0)
+        assert bool(fit['jumps']) == (tries == 50 or not turning) == (len(plan.section_starts) > 1)
+        if fit['jumps']:
+            assert all(y > 9 for _, y in fit['jumps'][-1:])
+            assert any('places left out' in w and f'({fit["jumps"][-1][0]:.2f}, {fit["jumps"][-1][1]:.2f})' in w
+                       for w in plan.warnings)
+        if tries == 50:
+            assert fit['tries'] == 50
+
+
+def recorded_room(cfg, outlines, holes, margins):
+    """Where the body keeps the margins off the real edges, worked out here on its own: the body every 5 cm along each
+    recorded ring the way its points go and turning on the spot at its points every 2 degrees, the outlines grown by
+    that and edge_margin in, the holes (obstacles, areas to keep out of) less that and each one's margin out."""
+    half, front, rear = 0.5 * cfg.robot_width, cfg.robot_front, cfg.robot_rear
+
+    def body(x, y, h):
+        c, s = math.cos(h), math.sin(h)
+        return Polygon([(x + c * dx - s * dy, y + s * dx + c * dy)
+                        for dx, dy in ((front, half), (-rear, half), (-rear, -half), (front, -half))])
+
+    def swept(ring):
+        bodies = []
+        for i, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1])):
+            c = ring[(i + 2) % len(ring)]
+            h, turn = math.atan2(b[1] - a[1], b[0] - a[0]), 0.0
+            n = max(1, int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.05)))
+            bodies += [body(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n, h) for k in range(n + 1)]
+            turn = normalize_angle(math.atan2(c[1] - b[1], c[0] - b[0]) - h)
+            m = max(1, int(math.ceil(abs(turn) / math.radians(2))))
+            bodies += [body(b[0], b[1], h + turn * k / m) for k in range(1, m)]
+        return unary_union(bodies)
+
+    outer = unary_union([Polygon(o).union(swept(list(o))) for o in outlines]).buffer(-cfg.edge_margin, 16)
+    return outer.difference(unary_union([Polygon(w).difference(swept(list(w))).buffer(m, 16)
+                                         for w, m in zip(holes, margins)]))
+
+
+def outside_room(plan, room, slack=1e-3):
+    """The poses whose body isn't in room (slack more), turning on the spot every 2 degrees where the heading jumps by
+    more than SPIN, both ways round about a half turn (TURN_STEP apart the corners may pass 2 mm further out)."""
+    fp, ok, turning = plan_footprint(plan), prep(room.buffer(slack, 16)), prep(room.buffer(slack + 2e-3, 16))
+    bad, starts = [], set(plan.section_starts)
+    for i, p in enumerate(plan.poses):
+        q = plan.poses[i - 1] if i not in starts else None
+        if q is None or angle_diff(p.yaw, q.yaw) <= footprint.SPIN:
+            if not ok.covers(fp.body(p.x, p.y, p.yaw)):
+                bad.append(i)
+            continue
+        turn = normalize_angle(p.yaw - q.yaw)
+        for t in (turn, turn - math.copysign(2 * math.pi, turn)) if abs(turn) > math.pi - footprint.TURN_STEP else \
+                (turn,):
+            n = int(math.ceil(abs(t) / math.radians(2)))
+            if not all(turning.covers(fp.body(p.x, p.y, q.yaw + t * k / n)) for k in range(n + 1)):
+                bad.append(i)
+                break
+    return bad
+
+
+def test_margins_kept():
+    """The body keeps edge_margin off the outline's real edge, obstacle_margin off an obstacle's and an area's to keep
+    out of, everywhere (body_tolerance doesn't count): against the real edges worked out here on their own, and along
+    the outline's straight edges against the line robot_width / 2 further out. The loops keep the margins themselves
+    (and simplify_tolerance), the first one further in, the ones round an obstacle further out."""
+    lawn, bed, keep = rect(0, 0, 10, 6), rect(4, 2, 6, 4), rect(7, 4, 11, 9)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, edge_margin=0.08, obstacle_margin=0.15))
+    plan = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), end=(1, 1), keep_out=[keep])
+    check_invariants(plan, cfg, [bed])
+    assert check_plan(plan)['body_out'] == []
+    assert outside_room(plan, recorded_room(cfg, [lawn], [bed, keep], [cfg.obstacle_margin] * 2)) == []
+    corners, fp = MultiPoint(lawn).buffer(1.0), plan_footprint(plan)
+    line = Polygon(lawn).buffer(0.5 * cfg.robot_width - cfg.edge_margin + 1e-3, join_style=2)
+    assert all(line.covers(fp.body(p.x, p.y, p.yaw)) for p in plan.poses if not corners.contains(Point(p.x, p.y)))
+    loops = [p for s in plan.segments if s.kind == PERIMETER for p in plan.poses[s.start:s.end + 1]]
+    for ring, margin in ((lawn, cfg.edge_margin), (bed, cfg.obstacle_margin), (keep, cfg.obstacle_margin)):
+        near = min(Polygon(ring).exterior.distance(Point(p.x, p.y)) for p in loops)
+        assert near == pytest.approx(margin + cfg.simplify_tolerance, abs=0.01)
+    free = plan_coverage(lawn, [bed], dataclasses.replace(cfg, edge_margin=0.0, obstacle_margin=0.0), start=(1, 1, 0.0),
+                         end=(1, 1), keep_out=[keep])
+    assert free.body_space.area > plan.body_space.area + 0.08 * 30 and free.stats['area'] > plan.stats['area']
+
+
+def test_margin_of_an_obstacle():
+    """An obstacle's own margin (an area's to keep out of) beats obstacle_margin: the loops round it go that much
+    further out, the body keeps that far off its real edge."""
+    a, b, keep = rect(2, 2, 3, 3), rect(6, 2, 7, 3), rect(4, 5, 5, 7)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    plan = plan_coverage(rect(0, 0, 10, 6), [a, b], cfg, start=(1, 1, 0.0), keep_out=[keep], margins=[0.3, None, 0.2])
+    check_invariants(plan, cfg, [a, b])
+    assert check_plan(plan)['body_out'] == []
+    loops = [p for s in plan.segments if s.kind == PERIMETER for p in plan.poses[s.start:s.end + 1]]
+    near = [min(Polygon(o).exterior.distance(Point(p.x, p.y)) for p in loops) for o in (a, b, keep)]
+    assert near == pytest.approx([0.3, cfg.obstacle_margin, 0.2], abs=0.01)
+    room = recorded_room(cfg, [rect(0, 0, 10, 6)], [a, b, keep], [0.3, cfg.obstacle_margin, 0.2])
+    assert outside_room(plan, room) == []
+    for margins, match in (([0.1] * 4, '4 margins'), ([-0.1], 'margin'), (['far'], 'margin'), ([math.nan], 'margin'),
+                           ([True], 'margin')):
+        with pytest.raises(PlanningError, match=match):
+            plan_coverage(rect(0, 0, 10, 6), [a, b], cfg, keep_out=[keep], margins=margins)
+    for kw in (dict(edge_margin=-0.1), dict(obstacle_margin=1.5), dict(edge_margin=math.nan)):
+        with pytest.raises(PlanningError, match='margin'):
+            PlannerConfig(**kw).validate()
+
+
+def field_turns(plan, field):
+    """The poses of drives in field whose heading changes from the pose before (on an arc, turning on the spot)."""
+    return [i for s in plan.segments if s.kind == TRANSIT for i in range(s.start + 1, s.end + 1)
+            if angle_diff(plan.poses[i].yaw, plan.poses[i - 1].yaw) > 1e-6
+            and field.contains(Point(plan.poses[i].x, plan.poses[i].y))]
+
+
+def lanes_field(plan, cfg):
+    """The lanes' field worked out here on its own: the lanes of the plan's cells 2 turn_radius shorter at either end
+    and half a lane spacing wide each side, but for the strips the loops mow (2 cm less all round: a drive along its
+    edge may turn there)."""
+    strips, trim = [], 2 * cfg.turn_radius
+    for a, cells in plan.cells:
+        for lane in (lane for cell in cells for lane in cell if lane.x1 - lane.x0 > 2 * trim):
+            line = LineString(Lane(lane.row, lane.x0 + trim, lane.x1 - trim, lane.y).ends(a))
+            strips.append(line.buffer(0.5 * plan.lane_spacing, cap_style=2))
+    reach = cfg.blade_loop_offset + (cfg.passes - 1) * plan.lane_spacing + 0.5 * cfg.mower_width
+    return unary_union(strips).intersection(plan.free_space.buffer(-reach)).buffer(-0.02)
+
+
+def far_turns_in(plan, field, apart):
+    """The turns between lanes more than apart from each other that go into field."""
+    def far(s):
+        a, b = plan.poses[s.start], plan.poses[s.end]
+        return abs((b.y - a.y) * math.cos(a.yaw) - (b.x - a.x) * math.sin(a.yaw)) > apart
+
+    return [s for s in plan.segments if s.kind == TURN and far(s)
+            and any(field.contains(Point(p.x, p.y)) for p in plan.poses[s.start:s.end + 1])]
+
+
+def test_headland_turns():
+    """headland_turns: in the lanes' field (worked out here on its own) no drive turns, not even on the spot: they go
+    along the headland, across the field only straight (there's no way round the tree in the middle), along a lane's
+    line where that's not much longer. Nor does a turn between lanes far apart go in there. Without, they do. stats
+    says how often the path crosses the field and that a drive turns in it nowhere; as well mowed, nothing sticking
+    out."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3))
+    plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    clean = dataclasses.replace(cfg, headland_turns=True)
+    plan = plan_coverage(GARDEN, [TREE, BED], clean, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, clean, [TREE, BED])
+    before = lanes_field(plain, cfg)
+    assert len(field_turns(plain, before)) > 50 and far_turns_in(plain, before, 4 * cfg.turn_radius)
+    assert 'headland_turns' not in plain.stats
+    field = lanes_field(plan, clean)
+    assert field_turns(plan, field) == [] and far_turns_in(plan, field, 4 * cfg.turn_radius) == []
+    across = [p for s in plan.segments if s.kind == TRANSIT for p in plan.poses[s.start:s.end + 1]
+              if field.contains(Point(p.x, p.y))]
+    assert across and any(angle_diff(2 * p.yaw, 2 * plan.angle) < 1e-9 for p in across)
+    found = plan.stats['headland_turns']
+    assert found['turns_in_field'] == 0 and found['places'] == [] and found['crossings'] > 0
+    assert not any("lanes' field" in w for w in plan.warnings)
+    report = check_plan(plan)
+    assert report['body_out'] == [] and report['left_m2'] <= check_plan(plain)['left_m2'] + 0.05
+    with pytest.raises(PlanningError, match='headland_turns'):
+        PlannerConfig(headland_turns=1).validate()
+
+
+def test_headland_turns_where_nothing_fits(monkeypatch):
+    """Where no drive along the headland (nor across the field) fits, it goes the way it would without: stats and a
+    warning say where it turns in the lanes' field."""
+    monkeypatch.setattr(planner._Route, 'headland_way', lambda self, target, heading, head: None)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3, headland_turns=True))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg, [TREE, BED])
+    found = plan.stats['headland_turns']
+    assert found['turns_in_field'] == len(found['places']) > 0 and found['crossings'] == 0
+    x, y = found['places'][0]
+    assert any("turns in the lanes' field" in w and f'({x:.2f}, {y:.2f})' in w for w in plan.warnings)
+    assert len(field_turns(plan, lanes_field(plan, cfg))) > 0
+
+
 def test_narrow_parts_loops():
     """A winding path 0.5 to 0.8 m wide: narrower than the U-turns need, loops go on in there instead of lanes, the
-    pieces they come apart into driven on the way round: shorter, as well mowed, hardly any drives between."""
+    pieces they come apart into driven on the way round: shorter, as well mowed (but for what the body doesn't get to
+    at the bends and the ends with the margin kept, turning round before an end, the same either way), hardly any
+    drives between."""
     left = [(0.4 * math.sin(0.125 * i), 0.25 * i) for i in range(49)]
     path = left + [(x + 0.65 + 0.15 * math.sin(1.3 * y), y) for x, y in left][::-1]
     kw = dict(MOWER, **NX60I, angle=math.pi / 2, perimeter_passes=3)
@@ -818,9 +1245,10 @@ def test_narrow_parts_loops():
     cfg = PlannerConfig(**dict(kw, narrow_parts='loops'))
     loops = plan_coverage(path, [], cfg)
     check_invariants(loops, cfg)
-    assert coverage(loops, cfg) > 0.99
+    assert coverage(loops, cfg) > max(0.92, coverage(lanes, cfg) - 0.005)
     assert loops.stats['path_length'] < 0.85 * lanes.stats['path_length']
-    assert loops.stats['transit_length'] < 2.0 and loops.stats['lanes'] == 0
+    drives = [s for s in loops.segments if s.kind == TRANSIT and s.maneuver != 'body']  # (not the ways in place)
+    assert sum(path_length(loops.poses[s.start:s.end + 1]) for s in drives) < 2.0 and loops.stats['lanes'] == 0
     # a wide area keeps its lanes
     wide = plan_coverage(rect(0, 0, 10, 6), [], cfg)
     assert wide.stats['lanes'] > 10
@@ -831,26 +1259,34 @@ def test_narrow_parts_loops():
 def test_passes_worked_out():
     """perimeter_passes -1: as many loops as the lanes' turns need, the strip along the edges they leave mowed."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1))
-    assert cfg.passes == 4  # a U-turn of 0.25 reaches 0.62 past the lane end, 0.25 past the edge may be the body's
-    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_radius=0.4)).passes == 5
+    # a U-turn of 0.25 reaches 0.62 past the lane end, 0.15 past the edge may be the body's (robot_width / 2,
+    # edge_margin less)
+    assert cfg.passes == 5
+    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_radius=0.5)).passes == 6
     assert PlannerConfig(**dict(MOWER, perimeter_passes=-1)).passes == 3  # no body: the turn's radius
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
-    assert plan.stats['perimeter_loops'] >= 4 and check_plan(plan)['left_m2'] < 0.5
+    # (left: the corners, the outer loop turns round them further in)
+    assert plan.stats['perimeter_loops'] >= 5 and check_plan(plan)['left_m2'] < 0.9
     with pytest.raises(PlanningError, match='perimeter_passes'):
         PlannerConfig(perimeter_passes=-2).validate()
 
 
-def test_lane_spacing_auto():
+def test_lane_spacing_auto(monkeypatch):
     """lane_spacing_mode auto: the widest spacing that leaves nothing unmowed, the same every time, off again with
-    fixed; stats['chosen'] says what it planned with."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, lane_spacing_mode='auto'))
+    fixed; stats['chosen'] says what it planned with. What the plan leaves isn't worked out where the next spacing's
+    loops and lanes leave no less."""
+    # (what's left is at the corners the outer loop turns round further in, see
+    # test_body_turns_and_lane_ends_stay_inside)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, lane_spacing_mode='auto', edge_margin=0.0))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, plan.config)
     chosen = plan.stats['chosen']
     assert chosen['mode'] == 'auto' and chosen['lane_spacing'] == pytest.approx(0.85 * 0.18)
-    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 0.1
+    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 0.8
+    swept = []
+    monkeypatch.setattr(planner, 'swept_area', lambda *args: swept.append(args) or swept_area(*args))
     again = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
-    assert [(p.x, p.y) for p in again.poses] == [(p.x, p.y) for p in plan.poses]
+    assert [(p.x, p.y) for p in again.poses] == [(p.x, p.y) for p in plan.poses] and not swept
     fixed = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I)), start=(1, 1, 0.0), end=(1, 1))
     assert fixed.stats['chosen'] == {'lane_spacing': 0.13, 'perimeter_passes': 4, 'mode': 'fixed'}
     # a range of one spacing plans that one
@@ -870,6 +1306,90 @@ def test_omega():
         assert loop[-1].yaw == pytest.approx(normalize_angle(0.3 + math.radians(deg)))
         assert all(angle_diff(a.yaw, b.yaw) <= math.radians(10.0) + 1e-9 for a, b in zip(loop, loop[1:]))
         assert all(math.hypot(b.x - a.x, b.y - a.y) <= 0.05 + 1e-6 for a, b in zip(loop, loop[1:]))
+
+
+def test_mowed_near_lane_ends():
+    """mowed() skips the poses whose box is far from the lines asked about: the same as looking at every pose, also
+    where they come back near them."""
+    space = TransitPlanner(Polygon(rect(-1, -1, 31, 11)), 0.05)
+    cfg = PlannerConfig(**MOWER)
+    route = _Route(cfg, space, space, None, None, None)
+    for k in range(6):
+        line = [(0.1 * i, 5 + 4 * math.sin(0.2 * i + k)) for i in range(300)]
+        route.add(LANE, [Pose2D(x, y, 0.0) for x, y in (line if k % 2 else line[::-1])])
+    ends = [(10, 4, 12, 4.5), (20, 2, 20.3, 1)]
+    m = 0.5 * cfg.mower_width + cfg.blade_ahead + cfg.waypoint_spacing
+    boxes = [(min(x0, x1) - m, min(y0, y1) - m, max(x0, x1) + m, max(y0, y1) + m) for x0, y0, x1, y1 in ends]
+    runs = []
+    for seg in route.segments:
+        run = []
+        for p in seg.poses + [None]:
+            if p is not None and any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for x0, y0, x1, y1 in boxes):
+                run.append(p)
+            elif len(run) > 1:
+                runs.append(run)
+                run = []
+            else:
+                run = []
+    assert len(runs) > 8 and route.mowed(ends, route.segments).wkb == unary_union([route.blade(r) for r in runs]).wkb
+
+
+def test_body_space_kept(monkeypatch):
+    """The body space of the last plans is taken as it is for the same area again (another angle), by every thread:
+    the plan is the same as with it worked out afresh, and gets a copy of it. Another margin works it out again. Each
+    thread has its own Footprint (shapely's prepared geometries aren't for two threads at once): plans in two at the
+    same time are the same."""
+    lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
+    first = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    kept = planner._BODY_SPACE.last
+    cfg = dataclasses.replace(cfg, angle=0.5)
+    again = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    assert planner._BODY_SPACE.last is kept and again.body_space is not first.body_space
+    del planner._BODY_SPACE.last
+    planner._BODY_SPACES.clear()
+    planner._FITTED.clear()
+    fresh = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    assert planner._BODY_SPACE.last is not kept
+    assert fresh.poses == again.poses and fresh.body_space.equals(first.body_space)
+    other = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), margins=[0.2])
+    assert not other.body_space.equals(fresh.body_space)
+    done, worked_out = [], []
+    driven = planner._driven
+    monkeypatch.setattr(planner, '_driven', lambda *args: worked_out.append(args) or driven(*args))
+
+    def plan():
+        done.append((plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0)).poses, planner._BODY_SPACE.last))
+
+    threads = [threading.Thread(target=plan) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert [poses for poses, _ in done] == [fresh.poses] * 2 and not worked_out
+    assert len({id(own) for _, own in done} | {id(planner._BODY_SPACE.last)}) == 3
+
+
+def test_body_fit_kept(monkeypatch):
+    """Where _fit_body got to is kept every FIT_KEEP poses: a plan at another angle goes on from where its path (the
+    loops) was still the same, the same plan as worked out afresh. Other settings of it start afresh."""
+    monkeypatch.setattr(planner, 'FIT_KEEP', 50)
+    lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
+    planner._FITTED.clear()
+    plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    (key, (_, _, _, first)), = planner._FITTED.items()
+    cfg = dataclasses.replace(cfg, angle=0.5)
+    again = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    kept = planner._FITTED[key][3]
+    assert list(planner._FITTED) == [key] and len(first) > 5 and kept[0] is first[0] and kept != first
+    planner._FITTED.clear()
+    fresh = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    assert (fresh.poses, fresh.segments, fresh.stats['body_fit']) == (again.poses, again.segments,
+                                                                     again.stats['body_fit'])
+    monkeypatch.setattr(planner, 'FIT_DRIVE', 0.3)
+    plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    assert len(planner._FITTED) == 2
 
 
 def test_arriving_the_other_way_turns_into_it():
@@ -900,6 +1420,34 @@ def test_smooth_spins():
     check_invariants(backing, cfg, [TREE, BED])
     assert spins(backing) == 0 and any(s.reverse and s.maneuver == 'k_point' for s in backing.segments)
     assert check_plan(backing)['left_m2'] == pytest.approx(left, abs=0.02)
+
+
+def test_turn_on_spot():
+    """turn_on_spot: where the path would drive a loop (a bulb between lanes, a loop out, a drive into a lane round a
+    loop or crossing its own way) it turns on the spot instead, the body fitting turning; as well mowed but for a
+    little at the lanes' ends. Without, turns and drives cross themselves."""
+    def loops(plan):
+        # pieces of turns and drives crossing a later piece of their own
+        found = 0
+        for s in plan.segments:
+            if s.kind in (TURN, TRANSIT):
+                pts = [(p.x, p.y) for p in plan.poses[s.start:s.end + 1]]
+                lines = [LineString(pts[k:k + 2]) for k in range(len(pts) - 1)]
+                found += sum(1 for k, a in enumerate(lines) if any(a.crosses(b) for b in lines[k + 2:]))
+        return found
+
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3))
+    plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    spot = dataclasses.replace(cfg, turn_on_spot=True)
+    plan = plan_coverage(GARDEN, [TREE, BED], spot, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, spot, [TREE, BED])
+    assert loops(plain) > 0 and plain.stats['turns_bulb'] > 0
+    assert loops(plan) == 0 and plan.stats['turns_bulb'] == 0 and plan.stats['turns_pivot'] > 0
+    report = check_plan(plan)
+    assert report['body_out'] == [] and len(plan.section_starts) == 1
+    assert report['left_m2'] <= check_plan(plain)['left_m2'] + 0.2
+    with pytest.raises(PlanningError, match='turn_on_spot'):
+        PlannerConfig(turn_on_spot=1).validate()
 
 
 def test_min_turn_radius():
@@ -963,14 +1511,17 @@ def test_angle_increment():
 
 def test_rounded_where_min_turn_radius_doesnt_fit():
     """Lanes 0.27 m apart with a least radius of 0.3: a U-turn as wide as fits (half the way across) before turning
-    on the spot, which comes only where that doesn't fit either; without pivots allowed nothing."""
+    on the spot, which comes only where that doesn't fit either (spin False: none then); without pivots allowed
+    nothing."""
     exit_pose, entry = Pose2D(0.0, 0.0, 0.0), (0.0, 0.27)
     free = lambda pts: True  # noqa: E731
-    turn = plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn', 'pivot'), least=0.3)
-    assert turn.name == 'u_turn'
-    assert max(p.x for p in turn.pieces[0].poses) == pytest.approx(0.135, abs=0.01)
+    for spin in (True, False):
+        turn = plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn', 'pivot'), least=0.3, spin=spin)
+        assert turn.name == 'u_turn'
+        assert max(p.x for p in turn.pieces[0].poses) == pytest.approx(0.135, abs=0.01)
     room = lambda pts: all(x <= 0.05 for x, _ in pts)  # noqa: E731 - a wall 5 cm ahead
     assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3).name == 'pivot'
+    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3, spin=False) is None
     assert plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn',), least=0.3) is None
 
 
@@ -978,7 +1529,7 @@ def test_rounded_where_min_turn_radius_doesnt_fit():
 def test_dubins():
     """Dubins' ways end on the entry facing its way, no arc tighter than the radius. Between lanes square to the edge
     the shortest is the U-turn, where the next lane starts further on a U-turn at a slant, shorter than carrying on
-    straight first; loops only with loops."""
+    straight first; loops only with loops. With turning the same ways but those turning further."""
     exit_pose = Pose2D(0.0, 0.0, 0.0)
     ways = dubins(exit_pose, Pose2D(0.0, 0.6, math.pi), 0.25, 0.05)
     assert ways[0].name == 'u_turn' and path_length(ways[0].pieces[0].poses) == pytest.approx(0.25 * math.pi + 0.1,
@@ -1000,6 +1551,12 @@ def test_dubins():
             for p, q in zip(ps, ps[1:]):
                 d = math.hypot(q.x - p.x, q.y - p.y)
                 assert 1e-7 < d <= 0.05 + 1e-6 and angle_diff(p.yaw, q.yaw) <= 2.0 * math.asin(d / 0.5) + 1e-6
+        turning = rng.uniform(0.5, 3.0 * math.pi)
+        few = [m.pieces[0].poses for m in dubins(a, b, 0.25, 0.05, turning=turning)]
+        assert few == [m.pieces[0].poses for m in ways if m.pieces[0].poses in few]
+        for ps in (m.pieces[0].poses for m in ways):
+            turned = sum(angle_diff(p.yaw, q.yaw) for p, q in zip(ps, ps[1:]))
+            assert turned <= turning + 1e-3 if ps in few else turned > turning - 1e-3
 
 
 def test_earlier_only_where_mowed():
@@ -1067,13 +1624,16 @@ def test_lanes_entered_without_turning_on_the_spot():
     into it get into the lanes on a way, not turning on the spot where a lane starts."""
     shape = [(0, 0), (8, 0), (8, 6), (0, 8)]
     cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', min_turn_radius=0.25, perimeter_passes=3,
-                               lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.6))
+                               lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.6,
+                               obstacle_margin=0.05))
     plan = plan_coverage(shape, [circle(3, 3, 0.8, 16), circle(6, 4.5, 0.6, 12)], cfg, start=(1, 1, 0.0))
     check_invariants(plan, cfg)
     poses = plan.poses
     starts = [s.start for s in plan.segments if s.kind == LANE and s.start]
     assert not [i for i in starts if angle_diff(poses[i - 1].yaw, poses[i].yaw) > SPIN_LIMIT]
-    assert check_plan(plan)['left_m2'] < 0.25
+    # (and the corners of the walls the body doesn't get into without backing up: the loops leave them out)
+    report = check_plan(plan)
+    assert report['left_m2'] < 1.0 and report['body_out'] == []
 
 
 def test_bent_lane_entered_on_its_first_piece():
@@ -1101,7 +1661,10 @@ def test_turns_where_lanes_end_at_a_slant():
     check_invariants(plan, cfg)
     st = plan.stats
     assert st['turns_fallback'] <= 1 and st['turns_pivot'] == 0 and st['turns_bulb'] > 0
-    assert check_plan(plan)['left_m2'] < 0.2
+    # (and the corners of the walls the body doesn't get into without backing up: the loops turn round them further
+    # in)
+    report = check_plan(plan)
+    assert report['left_m2'] < 1.1 and report['body_out'] == []
 
 def test_body_corner_rounding():
     """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
@@ -1441,12 +2004,13 @@ def test_with_overrides():
     (dict(perimeter_order='last', perimeter_direction='cw'), (-0.3, 3.0)),
     (dict(angle_strategy='optimal', angle_min=0.1, angle_max=0.5), None),
     (dict(turn_types=('k_turn', 'bulb', 'pivot'), lane_order='skip'), (6.0, -0.5)),
+    (dict(MOWER, **NX60I), (1.0, 1.0)),
 ])
 def test_deterministic_new_settings(kw, end):
     cfg = PlannerConfig(**kw)
     a = plan_coverage(GARDEN, [TREE, BED], cfg, end=end)
     b = plan_coverage(list(GARDEN), [list(TREE), list(BED)], PlannerConfig(**kw), end=end)
-    assert a.poses == b.poses and a.segments == b.segments
+    assert a.poses == b.poses and a.segments == b.segments and a.stats.get('body_fit') == b.stats.get('body_fit')
 
 
 def test_timings():
@@ -1575,6 +2139,18 @@ def test_transit_across_parts_and_through_a_narrow_passage():
     assert tp.path((1, 1), (9, 1)) is None
     assert tp.part((1, 1)) != tp.part((9, 1)) and tp.part((5, 1)) is None
     assert tp._graphs is None  # no graph needed for that
+
+
+def test_transit_corners_all_at_once(monkeypatch):
+    """Which corners a corner sees, worked out for all of them at once (shapely 2): the same ways as one at a time."""
+    obstacles = [circle(2 + 3 * i, 2 + 3 * j, 0.5, 24) for i in range(4) for j in range(3)]
+    space = Polygon(rect(0, 0, 13, 10)).difference(unary_union([Polygon(o) for o in obstacles])).buffer(-0.11, 9)
+    ends = [((0.5, 0.5 + 0.9 * k), (12.5, 9.5 - 0.9 * k)) for k in range(10)]
+    tp = TransitPlanner(space, clearance=0.05)
+    at_once = [tp.path(a, b) for a, b in ends]
+    monkeypatch.setattr(transit, 'covers', None)
+    tp = TransitPlanner(space, clearance=0.05)
+    assert [tp.path(a, b) for a, b in ends] == at_once and sum(len(way) > 2 for way in at_once) > 5
 
 
 def test_transit_with_many_round_obstacles_is_quick():

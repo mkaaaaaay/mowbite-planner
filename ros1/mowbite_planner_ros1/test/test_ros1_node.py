@@ -387,6 +387,40 @@ def test_obstacles_come_with_the_request(planner):
     assert inside(planner.handle(request(holes=[])), BED)
 
 
+def test_margins_of_the_map_obstacles(planner, monkeypatch):
+    """An obstacle's own margin in the map: the node finds mower_logic's hole (float32) by its outline, the loops keep
+    that much further off it. The plan is kept for the holes in any order, each with its margin; an obstacle the map
+    doesn't have (an edit not saved yet) keeps obstacle_margin."""
+    pond = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
+    send_map(the_map(areas=[area('pond', pond, type='obstacle', margin=0.4)]))
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14})
+    got, real = [], node_module.plan_coverage
+    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: got.append(args) or real(*args, **kw))
+
+    def sent(holes):
+        r = request()
+        r.holes = [polygon(h, True) for h in holes]
+        return r
+
+    def near(res, rect):  # how close the poses come to it
+        (x0, y0), (x1, y1) = rect[0], rect[2]
+        return min(math.hypot(max(x0 - p.position.x, 0.0, p.position.x - x1), max(y0 - p.position.y, 0.0,
+                                                                                  p.position.y - y1))
+                   for p in poses(res))
+
+    res = planner.handle(sent([BED, pond]))
+    check(res)
+    margins = {o[0]: m for o, m in zip(got[-1][1], got[-1][7])}
+    assert margins == {BED[0]: None, pond[0]: 0.4}
+    cfg = got[-1][2]
+    for rect, margin in ((BED, cfg.obstacle_margin), (pond, 0.4)):  # (a drive or turn body_tolerance closer)
+        assert margin - cfg.body_tolerance - 1e-3 <= near(res, rect) <= margin + 0.01
+    assert check(planner.handle(sent([pond, BED]))) is None and len(got) == 1
+    moved = [(x + 0.5, y) for x, y in pond]
+    planner.handle(sent([BED, moved]))
+    assert got[-1][7] == (None, None)
+
+
 def test_backing_up_only_where_the_ftc_controller_does(planner, monkeypatch):
     # allow_reverse counts only with OpenMower's FTC controller backing up where the plan does, else it would hold the
     # mower at every backing up leg until it times out
@@ -619,6 +653,11 @@ def test_rpc_settings(planner):
     assert s['lane_spacing_mode']['choices'] == ['fixed', 'auto'] and s['lane_spacing_mode']['value'] == 'fixed'
     assert s['lane_spacing_min']['nullable'] and s['lane_spacing_min']['unit'] == 'm'
     assert s['transit_edge_cost']['unit'] == ''
+    for name, value in (('headland_turns', False), ('turn_on_spot', False), ('body_fit', True)):
+        assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'boolean', 'settable': True}
+    for name, value in (('edge_margin', 0.05), ('obstacle_margin', 0.1)):
+        assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'number', 'settable': True,
+                           'unit': 'm', 'min': 0.0, 'max': 1.0}, name
 
 
 def test_rpc_settings_set(planner):
@@ -646,6 +685,16 @@ def test_rpc_settings_set(planner):
         assert json.load(f) == {'fill_pattern': 'crosshatch', 'turn_types': ['u_turn', 'pivot']}
 
 
+def test_rpc_settings_set_body(planner):
+    # the body's and the turns' settings, the next plan uses them
+    body = {'edge_margin': 0.2, 'obstacle_margin': 0.3, 'body_fit': False, 'headland_turns': True, 'turn_on_spot': True}
+    result, error = rpc('planner.settings.set', body)
+    assert error is None and {n: result['settings'][n]['value'] for n in body} == body
+    assert all(result['settings'][n]['stored'] for n in body)
+    cfg = planner.settings(request(), None)
+    assert {n: getattr(cfg, n) for n in body} == body
+
+
 def test_rpc_settings_angle(planner):
     # an angle or angle_strategy stored: the lanes go that way unless the area has an angle of its own
     result, _ = rpc('planner.settings.set', {'angle_strategy': 'min_width'})
@@ -664,6 +713,9 @@ def test_rpc_settings_angle(planner):
     ({'turn_types': []}, 'turn_types must be some of'),
     ({'angle_min': 0.1}, 'angle_min and angle_max go together'),
     ({'mower_width': 0}, 'mower_width must be > 0.0'),
+    ({'edge_margin': 1.01}, 'edge_margin must be <= 1.0'),
+    ({'obstacle_margin': -0.1}, 'obstacle_margin must be >= 0.0'),
+    ({'body_fit': 1}, 'body_fit must be true or false'),
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),
 ])

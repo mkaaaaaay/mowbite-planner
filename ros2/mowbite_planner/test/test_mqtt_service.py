@@ -77,7 +77,8 @@ def service():
 
 @pytest.fixture
 def planned(monkeypatch):
-    """What plan_coverage() got: (boundary, obstacles, config, start, end, drivable, keep_out) of every call."""
+    """What plan_coverage() got: (boundary, obstacles, config, start, end, drivable, keep_out, margins) of every
+    call."""
     calls, real = [], mqtt_service.plan_coverage
 
     def spy(*args):
@@ -180,8 +181,8 @@ def test_nested_area_mowed_on_its_own(service, planned):
 def test_plan_area_of_the_map(service, planned):
     res = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
     assert res['area_id'] == 'front'
-    _, obstacles, _, start, end, drivable, keep_out = planned[0]
-    assert keep_out == []
+    _, obstacles, _, start, end, drivable, keep_out, margins = planned[0]
+    assert keep_out == [] and margins == [None]
     assert start == (-3.0, 1.0, math.pi) and end == (-3.0, 1.0)  # from the dock and back
     # the bed; the other lawn, not the path: the mower mows a path from start to end
     assert obstacles == [[tuple(p) for p in rect(4, 2, 5, 3)]] and drivable == [[tuple(p) for p in rect(0, 8, 6, 12)]]
@@ -202,6 +203,23 @@ def test_plan_area_of_the_map(service, planned):
     # an angle_strategy in the request's settings works the angle out, the area's angle doesn't count then
     res = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'settings': {'angle_strategy': 'min_width'}})
     assert planned[-1][2].angle is None and res['angle'] == pytest.approx(0.0)  # across the 6 m
+
+
+def test_plan_with_the_margins_of_the_map(planned):
+    """An obstacle's or area's own margin comes from the map, a request's obstacle has it if its outline is the
+    map's. With the body checked the answer says where the body keeps to."""
+    s = PlannerService(PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14))
+    bed, pond = rect(4, 2, 5, 3), rect(7, 3, 8, 4)
+    s.on_map(json.dumps(dict(MAP, areas=[MAP['areas'][0], area('bed', 'obstacle', bed, margin=0.3),
+                                         area('pond', 'mow', pond, mowable=False, margin=0.2)])))
+    res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'front'})
+    assert planned[-1][1] == [[tuple(p) for p in bed]] and planned[-1][6] == [[tuple(p) for p in pond]]
+    assert planned[-1][7] == [0.3, 0.2]
+    assert [len(res['body_space'][k]) for k in ('outlines', 'holes')] == [1, 2]
+    moved = [[x + 0.5, y] for x, y in bed]
+    for obstacles, margins in (([bed], [0.3]), ([moved], [None])):
+        result(s, 'ext.mowbite_planner.plan', {'outline': rect(0, 0, 10, 6), 'obstacles': obstacles})
+        assert planned[-1][7] == margins
 
 
 def test_plan_like_the_mower(planned):

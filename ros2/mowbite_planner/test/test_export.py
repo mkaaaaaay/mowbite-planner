@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from shapely.geometry import Polygon
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
@@ -196,6 +197,25 @@ def test_to_openmower_json():
     full = to_openmower_json(plan, tolerance=0.0, max_poses=500)
     assert len(full['paths']) == len(plan_pieces(plan, 500))
     assert all(p['pose_index'] == list(range(p['poses'])) for p in full['paths'])
+
+
+def test_body_edges_of_the_answer():
+    """With the body checked the answer says where it keeps to: body_space's rings, 1 cm simpler and in mm, the outline
+    of the lawn where it was while its centre drove the recorded line, edge_margin off (all of it, body_tolerance
+    doesn't count), and the bed's hole inside it."""
+    assert 'body_space' not in to_openmower_json(plan_of())
+    plan = plan_of(robot_width=0.4, robot_front=0.43, robot_rear=0.14, perimeter_offset=0.0)
+    edges = to_openmower_json(plan)['body_space']
+    assert json.loads(json.dumps(edges)) == edges and [len(edges['outlines']), len(edges['holes'])] == [1, 1]
+    assert all(round(c, 3) == c for ring in edges['outlines'] + edges['holes'] for p in ring for c in p)
+    space = Polygon(edges['outlines'][0], edges['holes'])
+    assert space.symmetric_difference(plan.body_space).area < 0.01 * plan.body_space.length
+    cfg = plan.config
+    out = 0.5 * cfg.robot_width - cfg.edge_margin
+    outline = Polygon(edges['outlines'][0])
+    assert Polygon(AREA).buffer(out - 0.02).within(outline)
+    assert outline.within(Polygon(AREA).buffer(out + 0.3, join_style=2))  # (the front past the corners)
+    assert Polygon(edges['holes'][0]).within(Polygon(BED))
 
 
 # Planner Studio --------------------------------------------------------------------------------------------

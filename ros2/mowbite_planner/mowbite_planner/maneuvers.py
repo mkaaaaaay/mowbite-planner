@@ -353,11 +353,12 @@ def connect(a: XY, heading_a: Optional[float], b: XY, heading_b: Optional[float]
     return join(leave, drive_polyline(pts, step, radius, fits, body=body), arrive)
 
 
-def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool = True) -> List[Maneuver]:
+def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool = True,
+           turning: float = math.inf) -> List[Maneuver]:
     """Dubins' ways from exit_pose to entry, forwards on arcs of r and straight lines: arc, straight, arc (the two the
     same way round or not) and three arcs (the middle one the other way round), shortest first. 'u_turn' where they
     turn half round at most (a U-turn, at a slant where the lanes end at one), 'bulb' where they loop. loops False:
-    only the U-turn, both arcs towards entry."""
+    only the U-turn, both arcs towards entry. turning: none whose arcs turn by more than that (rad) all together."""
 
     def centre(p: Pose2D, s: float) -> XY:
         return p.x - s * r * math.sin(p.yaw), p.y + s * r * math.cos(p.yaw)
@@ -395,14 +396,16 @@ def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool 
                              (turn(h2, entry.yaw, s1), 0.0)])
     out = []
     for way in ways:
+        if sum(abs(arc) for arc, _ in way) > turning:
+            continue
         poses = [exit_pose]
         for arc, length in way:
             p = poses[-1]
             if abs(arc) > _EPS:
-                poses = join(poses, sample_arc(p.x, p.y, p.yaw, r, arc, step))
+                extend(poses, sample_arc(p.x, p.y, p.yaw, r, arc, step))
             elif length > _EPS:
-                poses = join(poses, sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw),
-                                                    p.y + length * math.sin(p.yaw), p.yaw, step))
+                extend(poses, sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw), p.y + length * math.sin(p.yaw),
+                                              p.yaw, step))
         end = poses[-1]
         if len(poses) < 2 or math.hypot(end.x - entry.x, end.y - entry.y) > 1e-3 or \
                 abs(normalize_angle(end.yaw - entry.yaw)) > 1e-3:
@@ -422,12 +425,13 @@ def max_heading_jump(poses: Sequence[Pose2D]) -> float:
 def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, step: float,
               fits: Fits, route: Optional[Route] = None,
               types: Sequence[str] = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'),
-              body: Body = None, least: float = 0.0) -> Optional[Maneuver]:
+              body: Body = None, least: float = 0.0, spin: bool = True) -> Optional[Maneuver]:
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
     detours. types: the kinds allowed, preferred first; larger radii always come before smaller ones,
     detours and pivots after all radii. body: the turn's poses have to pass it too. least: no arc tighter than that,
-    but for a U-turn where none fits, as wide as fits, before a pivot. None if nothing allowed fits."""
+    but for a U-turn where none fits, as wide as fits, before a pivot (spin False: that U-turn, no pivot). None if
+    nothing allowed fits."""
 
     def ok(m: Maneuver) -> bool:
         return fits(m.points()) and (body is None or body([exit_pose] + [p for pc in m.pieces for p in pc.poses]))
@@ -466,6 +470,8 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
                     m = _to_map(local, exit_pose, side)
                     if ok(m):
                         return m
+            if not spin:
+                continue
             m = _to_map(pivot_turn(d, dx, step), exit_pose, side)
             if ok(m):
                 return m
@@ -558,12 +564,17 @@ def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits:
         if body is not None:
             for i in range(1, n - 1):
                 turn = normalize_angle(yaws[i] - yaws[i - 1])
-                # (a slight bend, of a recorded edge, needs no more room than driving straight on)
-                if abs(turn) < CORNER_ANGLE or abs(turn) > math.pi - 1e-3:
+                if abs(turn) > math.pi - 1e-3 or abs(turn) < CORNER_ANGLE and i not in rounded:
                     continue
-                corner = rounded[i][1] if i in rounded else [Pose2D(pts[i][0], pts[i][1], yaws[i - 1]),
-                                                             Pose2D(pts[i][0], pts[i][1], yaws[i])]
-                if body(corner):
+                sharp = [Pose2D(pts[i][0], pts[i][1], yaws[i - 1]), Pose2D(pts[i][0], pts[i][1], yaws[i])]
+                if body(rounded[i][1] if i in rounded else sharp):
+                    continue
+                # (turning on the spot at the corner, where it was turned at while the edge was recorded)
+                if i in rounded and body(sharp):
+                    del rounded[i]
+                    continue
+                # (a slight bend, of a recorded edge, needs no more room than driving straight on)
+                if abs(turn) < CORNER_ANGLE:
                     continue
                 tan_half = math.tan(abs(turn) / 2.0)
                 most = 0.5 * min(lengths[i - 1], lengths[i]) / tan_half

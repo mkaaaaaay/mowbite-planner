@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Point, Polygon
 
-from .geometry import polygons
+from .geometry import polygons, rings
 from .mathutil import Pose2D
 from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
 from .report import check_plan
@@ -103,12 +103,24 @@ def _mm(v: float) -> float:
     return round(v, 3)
 
 
+def body_edges(plan: CoveragePlan, tolerance: float = SIMPLIFY) -> Optional[Dict[str, List[List[List[float]]]]]:
+    """Where the mower's body keeps to (body_space: the real edges, the margins off them): {'outlines':
+    [[[x, y], ...], ...], 'holes': [...]}, the rings simplified to tolerance and rounded to mm, the holes the obstacles
+    and areas to keep out of. None without the body checked."""
+    if plan.body_space is None:
+        return None
+    out: Dict[str, List[List[List[float]]]] = {'outlines': [], 'holes': []}
+    for kind, ring in rings(plan.body_space.simplify(tolerance, preserve_topology=True)):
+        out['outlines' if kind == 'outline' else 'holes'].append([[_mm(x), _mm(y)] for x, y in ring])
+    return out
+
+
 def to_openmower_json(plan: CoveragePlan, area_id: Optional[str] = None,
                       max_poses: int = MAX_PATH_POSES, tolerance: float = SIMPLIFY) -> Dict[str, Any]:
     """The result of OpenMower's mowing.plan RPC: {area_id, angle, paths: [{is_outline, points,
     pose_index}]}, points simplified (pose_index says which pose of the full path each one is) and rounded
     to mm. On top: every path's segments (kind, first and last pose, reverse, maneuver), the
-    fingerprint, warnings and stats."""
+    fingerprint, warnings and stats, with the body checked where it keeps to (body_space, see body_edges)."""
     paths = []
     for is_outline, start, end in plan_pieces(plan, max_poses):
         pts = [(p.x, p.y) for p in plan.poses[start:end + 1]]
@@ -126,7 +138,7 @@ def to_openmower_json(plan: CoveragePlan, area_id: Optional[str] = None,
             'poses': end - start + 1,
             'segments': segments,
         })
-    return {
+    out: Dict[str, Any] = {
         'area_id': area_id,
         'angle': plan.angle,
         'angles': plan.angles,
@@ -136,6 +148,10 @@ def to_openmower_json(plan: CoveragePlan, area_id: Optional[str] = None,
         'warnings': list(plan.warnings),
         'stats': {k: (round(v, 4) if isinstance(v, float) else v) for k, v in plan.stats.items()},
     }
+    edges = body_edges(plan, tolerance)
+    if edges is not None:
+        out['body_space'] = edges
+    return out
 
 
 def to_poses_json(plan: CoveragePlan) -> Dict[str, Any]:

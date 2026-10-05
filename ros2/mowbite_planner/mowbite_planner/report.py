@@ -36,9 +36,12 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     width = cfg.mower_width if cfg else 0.0
     step = cfg.waypoint_spacing if cfg else 0.0
 
-    # where the mower's centre may go: the area shrunk (robot_space), on transits the drivable areas too
+    # where the mower's centre may go: the area shrunk (robot_space), on transits the drivable areas too, or robot_space
+    # where there's no way through them (planner._Route.go_to: with the body checked that's body_tolerance further out
+    # than transit_space has it, the body checked there)
     inside = prep(plan.robot_space.buffer(TOLERANCE)) if plan.robot_space is not None else None
-    drivable = prep(plan.transit_space.buffer(TOLERANCE)) if plan.transit_space is not None else inside
+    drivable = prep(union([plan.transit_space, plan.robot_space]).buffer(TOLERANCE)) \
+        if plan.transit_space is not None else inside
     jumps = {s - 1 for s in plan.section_starts[1:]}
     outside = 0
     for seg in plan.segments:
@@ -76,7 +79,7 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
             edge = plan.free_space.area - target.area
             out['edge_left_m2'] = round(edge, 3)
             soft.append(f'{edge:.2f} m2 along the edges left on purpose: the blade keeps {margin:.2f} m off them '
-                        '(perimeter_offset, robot_width)')
+                        '(perimeter_offset, robot_width, edge_margin)')
         if pieces:
             biggest = max(pieces, key=lambda p: p.area)
             c = biggest.representative_point()

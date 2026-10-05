@@ -19,6 +19,16 @@ What comes on top, without touching `mower_logic`:
   beds), the loops go on in instead, and the pieces they come apart into are driven on the way round
   (`narrow_parts: loops` in the launch file's settings, `lanes` plans lanes there too). Areas without such
   parts keep their plan.
+- **Clean stripes.** With `headland_turns: true` (off by default, for all areas with `planner.settings.set`, for
+  one in its `planner` property) the path runs only straight along the lanes in the lanes' field: the drives between
+  cells and parts, the turns between lanes far apart and the ways round the body go along the headland the loops
+  mow, across the field only straight where that way is more than twice as long or there's none. Where nothing
+  does it goes the way it would without: `stats.headland_turns` of a plan says where a drive turns in the field
+  (`places` [x, y], also a warning) and how often it crosses it (`crossings`).
+- **Turning on the spot.** With `turn_on_spot: true` (off by default, like `headland_turns` for all areas or one)
+  the mower turns on the spot where the path would drive a loop: no loops out (`smooth_spins`), no bulbs between
+  lanes, drives arriving on the spot rather than round a loop, for lawns that take it. The body keeps its margins
+  turning, like everywhere.
 - **Settings per area.** The node reads OpenMower's map from `/mower_map_service/json_map` and finds the
   area of each request by its outline. An area's `planner` property can hold any MowBite Planner setting,
   for example:
@@ -35,7 +45,8 @@ What comes on top, without touching `mower_logic`:
   `mower_map` drops the properties it doesn't know when it reads the map, so they never reach the planner
   and are gone after the next save. The patch below keeps them.
 - **Obstacles** come with the request, like for slic3r: a `mowing.plan` preview of an edited obstacle
-  shows the edit.
+  shows the edit. One with a `margin` property in the map (m, found by its outline) keeps the body that far off
+  it in place of `obstacle_margin`, an area set to not mowable or inactive too.
 - **Shortest ways** between the parts of an area, also through the other lawns. Not over navigation
   areas or areas set to not mowable: `mower_logic` mows a path from start to end, so a transit over a
   driveway would run with the blade on.
@@ -186,7 +197,7 @@ image, no registry has it.
   other two OS from the config file, then restart).
 - **The official image:** `sudo cp compose.yaml.official compose.yaml && sudo cp .env.official .env &&
   sudo docker compose up -d`. Its `mower_map` drops the area properties it doesn't know (`planner`,
-  `angle_min`, `angle_max`, `mow_around`) and saves the map without them next time: keep a map backup.
+  `angle_min`, `angle_max`, `mow_around`, `margin`) and saves the map without them next time: keep a map backup.
 
 Every switch changes the plans, an interrupted mow then starts its area again.
 
@@ -238,8 +249,12 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   without `/move_base_flex/FTCPlanner/back_up_with_plan` true the node leaves `allow_reverse` out and logs that,
   `planner.settings` says which in `can_back_up`. `mower_width` is the
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
-  the middle of the drive wheels) and `edges` (`recorded`, `hard`), the blade: `blade_ahead`, `blade_offset`
-  (both may be negative).
+  the middle of the drive wheels) and `edges` (`recorded`, `hard`, with the body set always `recorded`),
+  `edge_margin` and `obstacle_margin` (m the body keeps off the real edges, an area's own in its `planner` property),
+  with `body_fit` (on) the path goes another way where the body would stick out (`stats.body_fit` of a plan says
+  where, `body_space` the edges it keeps to), at a place too narrow to turn round in it turns round before it (the
+  rest left out) instead of leaving the bit to `mower_logic`, the blade: `blade_ahead`, `blade_offset` (both may be
+  negative).
 - `angle_increment` (rad, 0: off) turns the lanes on every `angle_increment_every` finished mows (`mower_logic`'s
   `JOB_COMPLETE` event), within an area's `angle_min`..`angle_max` (bouncing back at the ends); for one area in its
   `planner` property. The steps so far are kept next to the settings file, `planner.settings` says `angle_steps`,

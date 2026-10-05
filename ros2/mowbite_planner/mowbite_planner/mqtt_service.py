@@ -27,7 +27,7 @@ import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .export import to_openmower_json, to_poses_json, to_studio_payload, to_trace_json
-from .mapfile import AreaJob, _number, area_job, area_settings, settings_for
+from .mapfile import AreaJob, _number, area_job, area_settings, margins_for, settings_for
 from .planner import PlannerConfig, PlanningError, plan_coverage
 from .report import check_plan
 
@@ -175,11 +175,11 @@ class PlannerService:
         """ext.mowbite_planner.plan: {area_id} of the mower's map or {outline, obstacles, nav_areas}, angle,
         outline_count, ... in place of the area's properties (like OpenMower's mowing.plan), settings (any
         planner setting), start, end, poses, report (check_plan), trace (stages and lineage). Planned with the
-        settings the ROS 1 node would use."""
+        settings the ROS 1 node would use, the margins of the map's obstacles and areas too."""
         props = {k: p[k] for k in AREA_PROPERTIES if k in p}
         area_id, start, end = None, None, None
+        data = self.map  # the network thread may replace it meanwhile
         if p.get('area_id') is not None:
-            data = self.map  # the network thread may replace it meanwhile
             if data is None:
                 raise PlanningError('no map from the mower yet (map/json)')
             # like the mower: only the other lawns for ways between the parts, a path is mowed from start to end
@@ -204,7 +204,10 @@ class PlannerService:
         start = _pose(p['start'], 'start') if p.get('start') is not None else start
         end = _pose(p['end'], 'end') if p.get('end') is not None else end
         obstacles = job.obstacles + job.nested if cfg.nested_areas else job.obstacles
-        plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out)
+        # an obstacle's or area's own margin, from the map by its outline (an obstacle the request changed has none)
+        margins = margins_for(data, obstacles + job.keep_out)
+        plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
+                                               margins)
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))
