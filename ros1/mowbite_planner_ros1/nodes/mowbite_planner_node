@@ -39,7 +39,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
                         choices, settable. Not settable: the skip flags of mower_logic's request. allow_reverse
                         (backing up in K-turns) needs an FTC controller that backs up where the plan does.
-                        mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH)
+                        mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
+                        type is points ([[x, y], ...])
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
@@ -101,6 +102,8 @@ AUTO_VALUES = {'perimeter_passes': -1}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle', 'angle_increment')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
 SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
+# [[x, y], ...] in m: the body's outline round base_link (x ahead, y to the left)
+POINTS = ('robot_outline',)
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
@@ -272,7 +275,8 @@ class MowbitePlannerRos1:
         for name in PlannerConfig.names():
             default = PlannerConfig.__dataclass_fields__[name].default
             kind = ('boolean' if isinstance(default, bool) else 'integer' if isinstance(default, int)
-                    else 'string' if isinstance(default, str) else 'list' if isinstance(default, tuple) else 'number')
+                    else 'string' if isinstance(default, str) else 'list' if isinstance(default, tuple)
+                    else 'points' if name in POINTS else 'number')
             blade = name == 'mower_width'
             entry = {'value': current.mower_width if blade else getattr(current.base, name),
                      'default': defaults.mower_width if blade else getattr(defaults.base, name),
@@ -293,6 +297,8 @@ class MowbitePlannerRos1:
                 entry['unit'] = 'rad' if name in RAD else '' if name in ('overlap', 'transit_edge_cost') else 'm'
                 if name not in SIGNED:
                     entry['min'] = 0.0
+            elif kind == 'points':
+                entry['unit'] = 'm'
             if name in RANGES:
                 entry['min'], hi = RANGES[name]
                 if hi is not None:

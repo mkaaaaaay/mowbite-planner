@@ -261,14 +261,17 @@ def test_area_settings():
     assert settings(angle=0.5, planner={'angle_strategy': 'optimal'}) == {'angle': None, 'angle_strategy': 'optimal'}
     assert settings(angle=0.5, planner={'angle_strategy': 'optimal', 'angle': 0.2})['angle'] == 0.2
     # only the ones OpenMower doesn't know (and so doesn't send its planner)
+    body = [[0.4, 0.2], [-0.1, 0.2], [-0.1, -0.2], [0.4, -0.2]]
     own = area_settings(area('a', 'mow', rect(0, 0, 1, 1), angle=0.5, outline_count=1, outline_offset=0.1,
                              angle_min=0.1, angle_max=0.4, planner={'turn_radius': 0.3, 'headland_turns': True,
-                                                                    'headland_corners': 'sharp', 'turn_on_spot': True}),
+                                                                    'headland_corners': 'sharp', 'turn_on_spot': True,
+                                                                    'robot_outline': body}),
                         openmower=False)
     assert own == {'angle_min': 0.1, 'angle_max': 0.4, 'turn_radius': 0.3, 'headland_turns': True,
-                   'headland_corners': 'sharp', 'turn_on_spot': True}
+                   'headland_corners': 'sharp', 'turn_on_spot': True, 'robot_outline': body}
     cfg = PlannerConfig().with_overrides(own)
     assert cfg.headland_turns is cfg.turn_on_spot is True and cfg.headland_corners == 'sharp'
+    assert cfg.robot_outline == tuple(map(tuple, body)) and cfg.body
 
 
 def test_settings_for_layers():

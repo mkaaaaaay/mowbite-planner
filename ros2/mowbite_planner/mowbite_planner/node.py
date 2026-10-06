@@ -74,6 +74,10 @@ PARAMETERS = {
                     math.isfinite, 'must be a number'),
     'robot_rear': (-1.0, "how far the mower's body reaches behind its centre [m], negative: not set", math.isfinite,
                    'must be a number'),
+    'robot_outline': (Parameter.Type.DOUBLE_ARRAY, "the mower's body as its outline round its centre (x ahead, y to "
+                      'the left) [m], [x0, y0, x1, y1, ...], in place of the rectangle of robot_width, robot_front and '
+                      'robot_rear. Not set or empty: that rectangle', lambda v: not len(v) or outline_ok(v),
+                      'must be x, y of 3 points at least round base_link, the outline not crossing itself'),
     'narrow_parts': ('lanes', 'where the lanes would lie in a part narrower than their turns need (a path): lanes '
                      'anyway, or loops further in, the pieces they come apart into driven on the way round (with '
                      'fill_pattern concentric all the loops)',
@@ -208,6 +212,14 @@ def invalid(name: str, value) -> Optional[str]:
     return None
 
 
+def outline_ok(flat: Sequence[float]) -> bool:
+    try:
+        PlannerConfig(robot_outline=tuple(pairs(flat))).validate()
+    except ValueError:  # PlanningError too
+        return False
+    return True
+
+
 def parse_polygon(text: str) -> List[XY]:
     """'x0,y0; x1,y1; ...' (any of , ; and spaces between the numbers) -> [(x0, y0), (x1, y1), ...]."""
     nums = [float(t) for t in re.split(r'[\s,;]+', text.strip()) if t]
@@ -272,7 +284,8 @@ class MowbitePlannerNode(Node):
                     descriptor.integer_range = [IntegerRange(from_value=lo, to_value=hi, step=1)]
                 else:
                     descriptor.floating_point_range = [FloatingPointRange(from_value=lo, to_value=hi, step=0.0)]
-            # the default gives the type: NaN is a double, the turn types (not empty) a string array
+            # the default gives the type: NaN is a double, the turn types (not empty) a string array; robot_outline's
+            # is its type, it's not set
             self.declare_parameter(name, default, descriptor)
         # lists without a default: declared with their type, an empty default would come out as a byte array
         self.declare_parameter('boundary_polygon', Parameter.Type.DOUBLE_ARRAY, ParameterDescriptor(
@@ -299,7 +312,8 @@ class MowbitePlannerNode(Node):
         return SetParametersResult(successful=True)
 
     def _param(self, name: str):
-        return self.get_parameter(name).value
+        p = self.get_parameter_or(name, None)  # (robot_outline may not be set)
+        return None if p is None else p.value
 
     def _list_param(self, name: str) -> list:
         p = self.get_parameter_or(name, None)
@@ -313,7 +327,8 @@ class MowbitePlannerNode(Node):
             p = Parameter.from_parameter_msg(msg)
             if p.name not in PARAMETERS:
                 raise ValueError(f'no parameter {p.name!r}')
-            declared = self.get_parameter(p.name).type_
+            default = PARAMETERS[p.name][0]
+            declared = default if isinstance(default, Parameter.Type) else self.get_parameter(p.name).type_
             if p.type_ != declared:
                 raise ValueError(f'{p.name} must be of type {declared.name.lower()}')
             reason = invalid(p.name, p.value)
@@ -338,6 +353,7 @@ class MowbitePlannerNode(Node):
                    robot_width=None if values['robot_width'] < 0.0 else values['robot_width'],
                    robot_front=None if values['robot_front'] < 0.0 else values['robot_front'],
                    robot_rear=None if values['robot_rear'] < 0.0 else values['robot_rear'],
+                   robot_outline=tuple(pairs(values['robot_outline'])) if values['robot_outline'] else None,
                    turn_types=tuple(values['turn_types']))
         cfg.update(overrides)
         return PlannerConfig(**cfg)

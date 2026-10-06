@@ -743,11 +743,38 @@ def test_body_and_blade_settings_out_of_range():
     assert PlannerConfig().with_overrides({'robot_front': 1}).robot_front == 1.0
 
 
-# the body (robot_width, robot_front, robot_rear) -----------------------------------------------------------
+# the body (robot_width, robot_front, robot_rear or robot_outline) ------------------------------------------
 
 NX60I = dict(robot_width=0.40, robot_front=0.43, robot_rear=0.14)
+BODY = PlannerConfig(**NX60I).body_outline  # (its corners)
 MOWER = dict(FORWARD, mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0, blade_ahead=0.17,
              perimeter_passes=4, lane_overlap_passes=1)
+
+
+def rounded(width, front, rear, r=0.17):
+    """The corners of the rectangle with its front corners rounded: arcs of r, a point every 10 degrees."""
+    arc = [(front - r + r * math.cos(math.radians(a)), 0.5 * width - r + r * math.sin(math.radians(a)))
+           for a in range(0, 91, 10)]
+    return [(x, -y) for x, y in arc[::-1]] + arc + [(-rear, 0.5 * width), (-rear, -0.5 * width)]
+
+
+# outlines of the body (robot_outline): BODY with its front corners rounded, two measured from photos (a YardForce NX60
+# scaled to 0.41 x 0.43 / 0.18, a Classic 500B, +-1 cm), one with wheels standing out at the front and the back (lines
+# along the heading cross it twice there), a round one (no part further from the centre than the circles round its
+# halves)
+ROUNDED = rounded(0.40, 0.43, 0.14)
+NX60 = [(0.43, 0.047), (0.428, 0.057), (0.398, 0.134), (0.389, 0.148), (0.371, 0.165), (0.203, 0.191), (0.021, 0.205),
+        (-0.079, 0.204), (-0.114, 0.194), (-0.137, 0.173), (-0.171, 0.097), (-0.18, 0.055), (-0.18, -0.055),
+        (-0.171, -0.097), (-0.137, -0.173), (-0.114, -0.194), (-0.079, -0.204), (0.021, -0.205), (0.203, -0.191),
+        (0.371, -0.165), (0.389, -0.148), (0.398, -0.134), (0.428, -0.057), (0.43, -0.047)]
+MEASURED = [(0.47, 0.058), (0.455, 0.12), (0.43, 0.167), (0.415, 0.18), (0.363, 0.19), (0.132, 0.212), (0.066, 0.212),
+            (-0.043, 0.194), (-0.075, 0.182), (-0.1, 0.07), (-0.1, -0.07), (-0.075, -0.182), (-0.043, -0.194),
+            (0.066, -0.212), (0.132, -0.212), (0.363, -0.19), (0.415, -0.18), (0.43, -0.167), (0.455, -0.12),
+            (0.47, -0.058)]
+WHEELS = [(0.4, -0.18), (0.4, 0.18), (0.34, 0.18), (0.34, 0.22), (0.26, 0.22), (0.26, 0.18), (0.02, 0.18), (0.02, 0.22),
+          (-0.12, 0.22), (-0.12, 0.18), (-0.15, 0.18), (-0.15, -0.18), (-0.12, -0.18), (-0.12, -0.22), (0.02, -0.22),
+          (0.02, -0.18), (0.26, -0.18), (0.26, -0.22), (0.34, -0.22), (0.34, -0.18)]
+ROUND = circle(0, 0, 0.25)
 
 
 def test_robot_width_alone_changes_nothing_on_recorded_edges():
@@ -758,7 +785,7 @@ def test_robot_width_alone_changes_nothing_on_recorded_edges():
 
 
 def test_footprint():
-    fp = Footprint(Polygon(rect(0, 0, 10, 10)), 0.4, 0.43, 0.14)
+    fp = Footprint(Polygon(rect(0, 0, 10, 10)), BODY)
     assert fp.fits_pose(5, 5, 0.0) and fp.fits_pose(9.5, 5, 0.0) and not fp.fits_pose(9.6, 5, 0.0)
     assert fp.fits_pose(0.2, 5, 0.0) and not fp.fits_pose(0.1, 5, 0.0)  # the rear
     assert fp.fits_turn(0.5, 0.5, 0.0, math.pi) and not fp.fits_turn(0.2, 5, 0.0, math.pi / 2)
@@ -783,7 +810,7 @@ def test_footprint_spin_margin(monkeypatch):
     only. Poses that don't turn keep the margins as before. Where it turns whatever way it faces lies that much further
     in. With shapely 1.7 the same, a turn at a time."""
     room = Polygon(rect(0, 0, 10, 10))
-    plain, spin = Footprint(room, 0.4, 0.43, 0.14), Footprint(room, 0.4, 0.43, 0.14, 0.05)
+    plain, spin = Footprint(room, BODY), Footprint(room, BODY, 0.05)
     rear = math.hypot(0.14, 0.2)
     for off, fits in ((0.03, (True, False)), (0.12, (True, False)), (0.16, (True, True))):
         assert (plain.fits_turn(rear + off, 5, 0.0, math.pi / 2), spin.fits_turn(rear + off, 5, 0.0, math.pi / 2)) \
@@ -799,7 +826,7 @@ def test_footprint_spin_margin(monkeypatch):
     turns = [(rng.uniform(0.2, 1.0), rng.uniform(0.2, 1.0), rng.uniform(-3, 3), rng.uniform(-3, 3)) for _ in range(300)]
     fits = [spin.fits_turn(*t) for t in turns]
     monkeypatch.setattr(footprint, 'contains_xy', None)
-    assert [Footprint(room, 0.4, 0.43, 0.14, 0.05).fits_turn(*t) for t in turns] == fits and 30 < sum(fits) < 270
+    assert [Footprint(room, BODY, 0.05).fits_turn(*t) for t in turns] == fits and 30 < sum(fits) < 270
 
 
 def test_footprint_out_by(monkeypatch):
@@ -814,28 +841,29 @@ def test_footprint_out_by(monkeypatch):
              (None, Pose2D(3, 3, 1.0)), (Pose2D(0.2, 3, 0.0), Pose2D(0.3, 3, math.pi / 2))]
     rear = math.hypot(0.14, 0.2)
     want = [0.03, 0.03 * math.sqrt(0.5), 0.02, 0.0, 0.05 + rear - 0.2]
-    got = Footprint(space, 0.4, 0.43, 0.14, 0.05).out_by(turns)
+    got = Footprint(space, BODY, 0.05).out_by(turns)
     assert [d for d, _ in got] == pytest.approx(want, abs=1.5e-3)
     assert got[0][1][0] == pytest.approx(10.03) and got[1][1] == pytest.approx((5, 5.2), abs=3e-3)
     assert got[2][1] == pytest.approx((7.02, 5.01), abs=2e-3) and got[3][1] is None
     assert got[4][1][0] == pytest.approx(0.2 - rear, abs=0.01)
     # (the edge every step, the corners exact: in steps of 2 cm the front still)
-    assert Footprint(space, 0.4, 0.43, 0.14, 0.05).out_by(turns[:1], 0.02)[0][0] == 0.03
+    assert Footprint(space, BODY, 0.05).out_by(turns[:1], 0.02)[0][0] == 0.03
     monkeypatch.setattr(footprint, 'contains_xy', None)
     monkeypatch.setattr(footprint, 'contains_points', lambda prepared, x, y: footprint.numpy.array(
         [prepared.context.contains(Point(p)) for p in zip(x, y)], bool))
-    old = Footprint(space, 0.4, 0.43, 0.14, 0.05).out_by(turns)
+    old = Footprint(space, BODY, 0.05).out_by(turns)
     assert [d for d, _ in old] == pytest.approx([d for d, _ in got], abs=1e-3)
     assert [at for _, at in old if at is not None] == pytest.approx([at for _, at in got if at is not None], abs=1e-3)
     monkeypatch.setattr(footprint, 'contains_points', None)
-    plain = [d for d, _ in Footprint(space, 0.4, 0.43, 0.14, 0.05).out_by(turns)]
+    plain = [d for d, _ in Footprint(space, BODY, 0.05).out_by(turns)]
     assert plain[0] == want[0] and 0.01 < plain[1] < got[1][0] and plain[2:] == pytest.approx(want[2:], abs=1.5e-3)
 
 
-def test_footprint_fit(monkeypatch):
+@pytest.mark.parametrize('corners', [BODY, ROUNDED, WHEELS, ROUND], ids=['rectangle', 'rounded', 'wheels', 'round'])
+def test_footprint_fit(monkeypatch, corners):
     """fit() is fits_pose for every pose: all at once with shapely 2, one at a time with shapely 1.7 (their points at
     once with numpy). Whether the body is in the room, also just off a corner of what's taken out of it, the front's
-    corner facing it, or the side of a half facing it."""
+    corner facing it, or the side of a half facing it; whatever its outline."""
     room = Polygon(rect(0, 0, 4, 3)).difference(Polygon(rect(1.5, 1, 2.5, 2)))
     rng = random.Random(5)
     poses = [Pose2D(rng.uniform(-0.2, 4.2), rng.uniform(-0.2, 3.2), rng.uniform(-math.pi, math.pi)) for _ in range(500)]
@@ -853,7 +881,7 @@ def test_footprint_fit(monkeypatch):
             monkeypatch.setattr(footprint, 'contains_points', None if mode == 'shapely 1.7' else
                                 lambda prepared, x, y: footprint.numpy.array([prepared.context.contains(Point(p))
                                                                               for p in zip(x, y)], bool))
-        fp = Footprint(room, 0.4, 0.43, 0.14)
+        fp = Footprint(room, corners)
         fits = fp.fit(poses)
         assert fits == [fp.fits_pose(p.x, p.y, p.yaw) for p in poses] and 50 < sum(fits[:500]) < 450
         assert fits == [room.covers(fp.body(p.x, p.y, p.yaw)) for p in poses]
@@ -963,6 +991,122 @@ def test_body_where_it_was_while_recording():
     ahead, below = Point(10.4, -0.1), Point(10.1, -0.4)
     assert ccw.body_space.contains(ahead) and not ccw.body_space.contains(below)
     assert cw.body_space.contains(below) and not cw.body_space.contains(ahead)
+
+
+def test_robot_outline_settings():
+    """robot_outline: [[x, y], ...] (JSON) as tuples, the body checked without robot_width, robot_front and robot_rear
+    (it beats them), counter-clockwise whichever way round it's given, a closing point once; None: the rectangle again.
+    The loops perimeter_passes -1 works out: one less where the rounded front reaches less far out turning."""
+    square = [[0.4, 0.2], [-0.1, 0.2], [-0.1, -0.2], [0.4, -0.2]]
+    cfg = PlannerConfig().with_overrides({'robot_outline': square})
+    cfg.validate()
+    assert cfg.robot_outline == tuple(map(tuple, square)) and cfg.body and cfg.robot_width is None
+    assert cfg.body_outline == cfg.robot_outline and cfg.with_overrides({'robot_outline': None}).robot_outline is None
+    cw = cfg.with_overrides({'robot_outline': [[0.4, -0.2], [-0.1, -0.2], [-0.1, 0.2], [0.4, 0.2], [0.4, -0.2]]})
+    assert cw.body_outline == ((0.4, -0.2), (0.4, 0.2), (-0.1, 0.2), (-0.1, -0.2))
+    diamond = PlannerConfig().with_overrides({'robot_outline': [[1, 0], [0, 1], [-1, 0], [0, -1]]})
+    diamond.validate()
+    assert diamond.body_outline == ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
+    assert PlannerConfig(**NX60I, robot_outline=ROUNDED).body_outline == tuple(ROUNDED)
+    auto = dict(MOWER, perimeter_passes=-1)
+    assert PlannerConfig(**auto, robot_outline=BODY).passes == PlannerConfig(**dict(auto, **NX60I)).passes == 5
+    assert PlannerConfig(**auto, robot_outline=ROUNDED).passes == 4
+
+
+@pytest.mark.parametrize('outline', [
+    [[0.4, 0.2], [-0.1, 0.2]], [[0.4, 0.2], [-0.1, -0.2], [-0.1, 0.2], [0.4, -0.2]],
+    [[1.0, 0.2], [0.5, 0.2], [0.5, -0.2], [1.0, -0.2]], [[0.4, 0.2], [-0.1, 'a'], [-0.1, -0.2]],
+    [[0.4, 0.2], [-0.1, True], [-0.1, -0.2]], [[0.4, 0.2], [-0.1, math.nan], [-0.1, -0.2]],
+    [[0.4, 0.2], [-0.1, math.inf], [-0.1, -0.2]], [[0.4, 0.2, 0.0], [-0.1, 0.2, 0.0], [-0.1, -0.2, 0.0]],
+    [None, None, None], [[0.4, 0.2], 5, [-0.1, -0.2]], [], 0.4, 'square',
+])
+def test_robot_outline_refused(outline):
+    """Fewer than 3 points, no numbers, crossing itself, base_link not in it."""
+    with pytest.raises(PlanningError, match='robot_outline must be'):
+        PlannerConfig().with_overrides({'robot_outline': outline}).validate()
+
+
+def forget_bodies():
+    """No body spaces nor _fit_body's checkpoints kept from plans before."""
+    planner._FITTED.clear()
+    planner._BODY_SPACES.clear()
+    planner._BODY_SPACE.__dict__.pop('last', None)
+
+
+def test_robot_outline_of_the_rectangle_plans_the_same():
+    """robot_outline the corners of the rectangle of robot_width, robot_front and robot_rear: the same plans to the
+    last bit (poses, segments, stats, warnings, body space), at other angles, with headland_turns, concentric with the
+    loops worked out, in a dead end; given on its own or with them (as JSON gives it)."""
+    shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
+    garden = dict(start=(1, 1, 0.0), end=(1, 1))
+    cases = [(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, angle=math.radians(33))), garden),
+             (GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, robot_width=0.41, robot_front=0.43, robot_rear=0.18,
+                                                        angle=0.4, headland_turns=True, perimeter_passes=-1)), garden),
+             (SHADE_LAWN, [SHADE_TABLE, SHADE], PlannerConfig(**dict(SHADE_MOWER, edge_margin=0.04,
+                                                                     obstacle_margin=0.04)),
+              dict(start=(0.54, 9.5, 0.0), end=(0.54, 9.5))),
+             (shape, [], PlannerConfig(**dict(MOWER, **NX60I)), dict(start=(1, 1, 0.0)))]
+    for i, (lawn, obstacles, cfg, ends) in enumerate(cases):
+        corners = [list(p) for p in cfg.body_outline]
+        outline = cfg.with_overrides({'robot_outline': corners}) if i % 2 else \
+            dataclasses.replace(cfg, robot_width=None, robot_front=None, robot_rear=None, robot_outline=corners)
+        plans = []
+        for c in (cfg, outline):
+            forget_bodies()
+            plans.append(plan_coverage(lawn, obstacles, c, **ends))
+        a, b = ({k: v for k, v in p.stats.items() if k not in ('planning_time', 'timings')} for p in plans)
+        assert plans[0].poses == plans[1].poses and plans[0].segments == plans[1].segments and a == b
+        assert plans[0].warnings == plans[1].warnings and plans[0].body_space.wkb == plans[1].body_space.wkb
+        assert plans[1].config.robot_outline is not None and a['body_fit']['fixed'] > 0
+
+
+def test_robot_outline_rounded_front():
+    """The front corners rounded: turning on the spot the body reaches 4 cm less far from the centre, a turn by a wall
+    the rectangle's front corner swings over fits. The real edges are where the rounded body was while they were
+    recorded, less than the rectangle's. In a dead end too narrow to turn round in at its end the path drives a metre
+    further in before it turns round, leaving less unmowed, nothing sticking out (also against the real edges worked
+    out here on their own with the rounded body)."""
+    room = Polygon(rect(0, 0, 10, 10))
+    box, front = Footprint(room, BODY), Footprint(room, ROUNDED)
+    assert box.reach == math.hypot(0.43, 0.2) and front.reach < box.reach - 0.04
+    assert (box.front, box.rear, box.half) == (0.43, 0.14, 0.2)
+    assert (front.front, front.rear, front.half) == pytest.approx((0.43, 0.14, 0.2), abs=1e-12)
+    assert front.fits_turn(9.55, 5, 0.0, math.pi / 2) and not box.fits_turn(9.55, 5, 0.0, math.pi / 2)
+    shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
+    plans = [plan_coverage(shape, [], PlannerConfig(**dict(MOWER, **body)), start=(1, 1, 0.0))
+             for body in (NX60I, dict(robot_outline=ROUNDED))]
+    assert plans[0].body_space.buffer(1e-6).covers(plans[1].body_space)
+    assert plans[1].body_space.area < plans[0].body_space.area - 0.05
+    plan, cfg = plans[1], plans[1].config
+    check_invariants(plan, cfg)
+    assert plan.stats['body_fit']['jumps'] == [] and check_plan(plan)['body_out'] == []
+    assert outside_room(plan, recorded_room(cfg, [shape], [], []), spin=cfg.spin_margin) == []
+    assert max(p.y for p in plan.poses) > max(p.y for p in plans[0].poses) + 1.0
+    assert check_plan(plan)['left_m2'] < check_plan(plans[0])['left_m2'] - 1.5
+
+
+@pytest.mark.parametrize('corners, pieces', [(BODY, 1), (ROUNDED, 1), (NX60, 1), (MEASURED, 1), (WHEELS, 5)],
+                         ids=['rectangle', 'rounded', 'nx60', 'measured', 'wheels'])
+def test_driven_sweeps_the_outline(corners, pieces):
+    """_driven: along an edge the body sweeps from where it was at the edge's start to where it was at its end, whatever
+    its outline (the wheels' cut into pieces every line along the heading crosses once): what the body every mm along
+    the edges covers (and turning at the points like there), a hair more between them (where a corner of it is the
+    leftmost or rightmost)."""
+    corners = PlannerConfig(robot_outline=corners).body_outline
+    ring = [(0.0, 0.0), (1.0, 0.0), (1.4, 0.7), (0.2, 0.5)]
+    swept = planner._driven([ring], corners)
+    bodies = []
+    for i, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1])):
+        h, n = math.atan2(b[1] - a[1], b[0] - a[0]), int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.001))
+        turn = normalize_angle(math.atan2(ring[(i + 2) % 4][1] - b[1], ring[(i + 2) % 4][0] - b[0]) - h)
+        m = int(math.ceil(abs(turn) / footprint.TURN_STEP))
+        for x, y, yaw in [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n, h) for k in range(n + 1)] + \
+                [(b[0], b[1], h + turn * k / m) for k in range(1, m)]:
+            c, s = math.cos(yaw), math.sin(yaw)
+            bodies.append(Polygon([(x + c * dx - s * dy, y + s * dx + c * dy) for dx, dy in corners]))
+    sampled = unary_union(bodies)
+    assert swept.is_valid and sampled.difference(swept).area < 1e-9 and swept.difference(sampled).area < 1e-4
+    assert len(planner._rows(corners)) == pieces
 
 
 def sticks_out(room, shape):
@@ -1124,7 +1268,7 @@ def test_body_fit_place_where_it_sticks_out_most():
     the corner, not where it starts sticking out, stats['body_fit']['poses'] saying how far (Footprint.out_by of the
     worst of the poses there that don't fit) and that it turns on the spot there."""
     room = Polygon(rect(0, 0, 10, 10))
-    transit, fp = TransitPlanner(room, 0.05), Footprint(room, 0.4, 0.43, 0.14)
+    transit, fp = TransitPlanner(room, 0.05), Footprint(room, BODY)
     route = _Route(PlannerConfig(**dict(MOWER, **NX60I)), transit, transit, None, None, None, fp)
     loop = join(straight(1, 9.45, 6, 9.85), straight(6, 9.85, 8, 8))
     poses, infos = planner._assemble([PathSegment(PERIMETER, loop)])
@@ -1257,6 +1401,47 @@ def test_spin_margin_kept():
     assert outside_room(plans[1], room, spin=0.05)
 
 
+@pytest.mark.parametrize('corners', [NX60, MEASURED, WHEELS], ids=['nx60', 'measured', 'wheels'])
+def test_robot_outline_kept_off_the_edges(corners):
+    """With the body's outline (robot_outline) round the sunshade and the table: nowhere jumping, nothing sticking out,
+    the margins kept off the real edges (worked out here on their own with that outline), turning on the spot
+    spin_margin further off them; stats has every way in place at the pose where the body sticks out the most there,
+    as far as it does (check_places)."""
+    cfg = PlannerConfig(**dict(SHADE_MOWER, edge_margin=0.04, obstacle_margin=0.04, robot_outline=corners))
+    ends = dict(start=(0.54, 9.5, 0.0), end=(0.54, 9.5))
+    plan = plan_coverage(SHADE_LAWN, [SHADE_TABLE, SHADE], cfg, **ends)
+    check_invariants(plan, cfg, [SHADE_TABLE, SHADE])
+    assert plan.stats['body_fit']['jumps'] == [] and check_plan(plan)['body_out'] == []
+    room = recorded_room(cfg, [SHADE_LAWN], [SHADE_TABLE, SHADE], [0.04, 0.04])
+    assert outside_room(plan, room, spin=cfg.spin_margin) == []
+    check_places(plan, plan_coverage(SHADE_LAWN, [SHADE_TABLE, SHADE], dataclasses.replace(cfg, body_fit=False),
+                                     **ends))
+
+
+# the south end of a path (part of a garden's outline, simplified to 1 cm), too narrow at its end to turn round in
+PATH_END = [(6.809, -4.12), (6.631, -4.748), (6.553, -4.971), (6.358, -5.828), (6.239, -6.169), (6.083, -6.829),
+            (5.968, -7.125), (5.875, -7.465), (5.825, -7.915), (5.729, -8.381), (5.544, -8.883), (5.352, -9.856),
+            (5.249, -10.178), (5.131, -10.633), (4.868, -11.356), (4.874, -11.459), (4.841, -11.58), (4.787, -11.678),
+            (4.717, -11.897), (4.325, -12.735), (4.247, -12.814), (4.15, -12.846), (3.92, -12.877), (3.806, -12.852),
+            (3.734, -12.778), (3.73, -12.671), (3.839, -12.144), (3.957, -11.963), (4.121, -11.539), (4.343, -10.892),
+            (4.434, -10.565), (4.659, -9.941), (4.787, -9.32), (4.991, -8.654), (5.402, -7.768), (5.467, -7.563),
+            (5.515, -7.12), (5.599, -6.808), (5.615, -6.69), (5.687, -6.013), (5.694, -5.768), (5.932, -4.71),
+            (5.925, -4.491), (5.967, -4.188), (5.973, -4.0), (6.881, -4.0)]
+
+
+def test_body_fit_turns_round_further_to_the_side():
+    """Where the loops go round the end of the path a front rounded a little fits facing their way closer to its edge
+    than it turns round there: where nothing else fits the path turns round further to the side, nowhere jumping,
+    nothing sticking out (also against the real edges worked out here on their own)."""
+    cfg = PlannerConfig(**dict(SHADE_MOWER, fill_pattern='lanes', perimeter_passes=3, edge_margin=0.04,
+                               obstacle_margin=0.04, robot_outline=rounded(0.41, 0.43, 0.18, 0.15)))
+    plan = plan_coverage(PATH_END, [], cfg, start=(5.973, -4.3, -1.57), end=(5.973, -4.3))
+    check_invariants(plan, cfg)
+    assert plan.stats['body_fit']['jumps'] == [] and len(plan.section_starts) == 1
+    assert check_plan(plan)['body_out'] == []
+    assert outside_room(plan, recorded_room(cfg, [PATH_END], [], []), spin=cfg.spin_margin) == []
+
+
 def test_body_fit_drives_on():
     """A strip between a table and the outline, closed at its end by a sunshade: where the body doesn't get round
     there and no other way fits nor turning round, the path drives on (through the transit space) to where it fits
@@ -1337,23 +1522,24 @@ def test_body_fit_bounded(monkeypatch):
             assert fit['tries'] == 50
 
 
-def recorded_room(cfg, outlines, holes, margins):
-    """Where the body keeps the margins off the real edges, worked out here on its own: the body every 5 cm along each
-    recorded ring the way its points go and turning on the spot at its points every 2 degrees, the outlines grown by
-    that and edge_margin in, the holes (obstacles, areas to keep out of) less that and each one's margin out."""
-    half, front, rear = 0.5 * cfg.robot_width, cfg.robot_front, cfg.robot_rear
+def recorded_room(cfg, outlines, holes, margins, step=0.05):
+    """Where the body keeps the margins off the real edges, worked out here on its own: the body (its corners as the
+    settings give them) every step m along each recorded ring the way its points go and turning on the spot at its
+    points every 2 degrees, the outlines grown by that and edge_margin in, the holes (obstacles, areas to keep out of)
+    less that and each one's margin out."""
+    half, front, rear = 0.5 * (cfg.robot_width or 0.0), cfg.robot_front, cfg.robot_rear
+    corners = cfg.robot_outline or ((front, half), (-rear, half), (-rear, -half), (front, -half))
 
     def body(x, y, h):
         c, s = math.cos(h), math.sin(h)
-        return Polygon([(x + c * dx - s * dy, y + s * dx + c * dy)
-                        for dx, dy in ((front, half), (-rear, half), (-rear, -half), (front, -half))])
+        return Polygon([(x + c * dx - s * dy, y + s * dx + c * dy) for dx, dy in corners])
 
     def swept(ring):
         bodies = []
         for i, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1])):
             c = ring[(i + 2) % len(ring)]
             h, turn = math.atan2(b[1] - a[1], b[0] - a[0]), 0.0
-            n = max(1, int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.05)))
+            n = max(1, int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / step)))
             bodies += [body(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n, h) for k in range(n + 1)]
             turn = normalize_angle(math.atan2(c[1] - b[1], c[0] - b[0]) - h)
             m = max(1, int(math.ceil(abs(turn) / math.radians(2))))
@@ -1534,7 +1720,7 @@ def corner_route(space, pieces, **kw):
     or none)] put together like a plan's, for _round_corners and _turn_at."""
     transit = TransitPlanner(space, 0.05)
     route = _Route(PlannerConfig(**dict(MOWER, **NX60I, **kw)), transit, transit, None, None, None,
-                   Footprint(Polygon(rect(-50, -50, 50, 50)), 0.4, 0.43, 0.14))
+                   Footprint(Polygon(rect(-50, -50, 50, 50)), BODY))
     return (route,) + planner._assemble([PathSegment(piece[0], piece[1], section=piece[2] if piece[2:] else 0)
                                          for piece in pieces])
 
@@ -1843,6 +2029,9 @@ def test_body_space_kept(monkeypatch):
         thread.join()
     assert [poses for poses, _ in done] == [fresh.poses] * 2 and not worked_out
     assert len({id(own) for _, own in done} | {id(planner._BODY_SPACE.last)}) == 3
+    # (another outline of the body: another space)
+    rounded = plan_coverage(lawn, [bed], dataclasses.replace(cfg, robot_outline=ROUNDED), start=(1, 1, 0.0))
+    assert not rounded.body_space.equals(fresh.body_space) and planner._BODY_SPACE.last[2].corners == tuple(ROUNDED)
 
 
 def test_body_fit_kept(monkeypatch):
@@ -1867,6 +2056,9 @@ def test_body_fit_kept(monkeypatch):
     plan_coverage(lawn, [bed], dataclasses.replace(cfg, spin_margin=0.0), start=(1, 1, 0.0))
     plan_coverage(lawn, [bed], dataclasses.replace(cfg, headland_corners='sharp'), start=(1, 1, 0.0))
     assert len(planner._FITTED) == 4
+    before = set(planner._FITTED)
+    plan_coverage(lawn, [bed], dataclasses.replace(cfg, robot_outline=ROUNDED), start=(1, 1, 0.0))
+    assert set(planner._FITTED) - before
 
 
 def test_body_fit_kept_drive_on(monkeypatch):
@@ -2173,7 +2365,7 @@ def test_turns_where_lanes_end_at_a_slant():
 def test_body_corner_rounding():
     """A loop 0.13 m in from a recorded edge: the body doesn't fit round its corner with the corner radius, it does
     with a larger one."""
-    fp = Footprint(Polygon(rect(0, 0, 10, 10)).buffer(0.21, 8, join_style=2), 0.4, 0.43, 0.14)
+    fp = Footprint(Polygon(rect(0, 0, 10, 10)).buffer(0.21, 8, join_style=2), BODY)
     loop = [(0.13, 0.13), (9.87, 0.13), (9.87, 5.0)]
     plain = drive_polyline(loop, 0.05, 0.15, lambda pts: True, 1, 0.054)
     rounded = drive_polyline(loop, 0.05, 0.15, lambda pts: True, 1, 0.054, body=fp.poses_fit)
@@ -2509,6 +2701,7 @@ def test_with_overrides():
     (dict(angle_strategy='optimal', angle_min=0.1, angle_max=0.5), None),
     (dict(turn_types=('k_turn', 'bulb', 'pivot'), lane_order='skip'), (6.0, -0.5)),
     (dict(MOWER, **NX60I), (1.0, 1.0)),
+    (dict(MOWER, robot_outline=ROUNDED), (1.0, 1.0)),
 ])
 def test_deterministic_new_settings(kw, end):
     cfg = PlannerConfig(**kw)

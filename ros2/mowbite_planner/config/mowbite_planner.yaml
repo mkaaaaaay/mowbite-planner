@@ -70,6 +70,9 @@
     robot_width: -1.0
     robot_front: -1.0
     robot_rear: -1.0
+    # or its outline instead of that rectangle [m]: [x0, y0, x1, y1, ...] round the centre (x ahead, y to the left), 3
+    # points at least, not crossing itself. Not set: the rectangle
+    # robot_outline: [0.43, -0.03, 0.43, 0.03, 0.26, 0.205, -0.18, 0.205, -0.18, -0.205, 0.26, -0.205]
     edges: recorded
     # how much further out than the first loop a turn, a loop out or a drive may take the centre [m] (a recorded edge
     # is a few cm off), the body keeping the margins

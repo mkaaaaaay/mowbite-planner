@@ -698,6 +698,33 @@ def test_rpc_settings_set_body(planner):
     assert {n: getattr(cfg, n) for n in body} == body
 
 
+def test_rpc_settings_robot_outline(planner):
+    """robot_outline: points [[x, y], ...] in m round base_link, set over RPC (stored as such) or in ~settings (the
+    launch file), the next plan uses it: another plan than the rectangle's, kept for it; null: the rectangle again."""
+    s = rpc('planner.settings')[0]['settings']['robot_outline']
+    assert s == {'value': None, 'default': None, 'stored': False, 'type': 'points', 'settable': True, 'nullable': True,
+                 'unit': 'm'}
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14})
+    send_map(the_map())
+    rectangle, _ = rpc('planner.plan', {'area_id': 'a'})
+    outline = [[0.43, -0.03], [0.43, 0.03], [0.26, 0.2], [-0.14, 0.2], [-0.14, -0.2], [0.26, -0.2]]
+    result, error = rpc('planner.settings.set', {'robot_outline': outline})
+    assert error is None and result['settings']['robot_outline']['value'] == outline
+    assert result['settings']['robot_outline']['stored']
+    with open(stored_file()) as f:
+        assert json.load(f)['robot_outline'] == outline
+    assert planner.settings(request(), None).robot_outline == tuple(map(tuple, outline))
+    cut, _ = rpc('planner.plan', {'area_id': 'a'})
+    assert cut['fingerprint'] != rectangle['fingerprint'] and not cut['kept']
+    assert rpc('planner.plan', {'area_id': 'a'})[0]['kept']
+    result, _ = rpc('planner.settings.set', {'robot_outline': None})
+    assert result['settings']['robot_outline']['value'] is None
+    again, _ = rpc('planner.plan', {'area_id': 'a'})
+    assert again['fingerprint'] == rectangle['fingerprint'] and again['kept']
+    rospy.params = {'~settings': {'robot_outline': outline}}
+    assert node_module.MowbitePlannerRos1().base.robot_outline == tuple(map(tuple, outline))
+
+
 def test_rpc_settings_angle(planner):
     # an angle or angle_strategy stored: the lanes go that way unless the area has an angle of its own
     result, _ = rpc('planner.settings.set', {'angle_strategy': 'min_width'})
@@ -720,6 +747,7 @@ def test_rpc_settings_angle(planner):
     ({'obstacle_margin': -0.1}, 'obstacle_margin must be >= 0.0'),
     ({'spin_margin': 1.5}, 'spin_margin must be <= 1.0'),
     ({'headland_corners': 'round'}, 'headland_corners must be one of rounded, sharp'),
+    ({'robot_outline': [[1.0, 0.2], [0.5, 0.2], [0.5, -0.2]]}, 'robot_outline must be'),
     ({'body_fit': 1}, 'body_fit must be true or false'),
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),

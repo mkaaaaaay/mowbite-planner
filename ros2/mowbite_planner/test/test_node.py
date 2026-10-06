@@ -416,6 +416,24 @@ def test_headland_corners_parameter(node):
     assert node.config(node.values()).headland_corners == 'sharp'
 
 
+def test_robot_outline_parameter(node):
+    """robot_outline [x0, y0, x1, y1, ...]: the body's outline in place of the rectangle of robot_width, robot_front and
+    robot_rear, also as a request's override; refused where it's no outline round base_link; empty: the rectangle."""
+    assert node.config(node.values()).robot_outline is None
+    flat = [0.43, -0.03, 0.43, 0.03, 0.26, 0.2, -0.14, 0.2, -0.14, -0.2, 0.26, -0.2]
+    assert node.set_parameters([Parameter('robot_outline', value=flat)])[0].successful
+    cfg = node.config(node.values())
+    assert cfg.robot_outline == tuple(zip(flat[0::2], flat[1::2])) and cfg.body
+    for bad in ([0.4, 0.2, -0.1], [1.0, 0.2, 0.5, 0.2, 0.5, -0.2], [0.4, 0.2, -0.1, -0.2, -0.1, 0.2, 0.4, -0.2]):
+        assert not node.set_parameters([Parameter('robot_outline', value=bad)])[0].successful
+    assert node.set_parameters([Parameter('robot_outline', Parameter.Type.DOUBLE_ARRAY, [])])[0].successful
+    assert node.config(node.values()).robot_outline is None
+    res = call_plan_coverage(node, boundary=LAWN, obstacles=[], overrides=[override('robot_outline', flat)])
+    assert res.success, res.message
+    res = call_plan_coverage(node, boundary=LAWN, obstacles=[], overrides=[override('robot_outline', [1.0, 0.2])])
+    assert not res.success and 'robot_outline' in res.message
+
+
 def test_parsing():
     assert parse_polygon('1,2; 3,4;5 6') == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
     assert pairs([0.0, 1.0, 2.0, 3.0]) == [(0.0, 1.0), (2.0, 3.0)]

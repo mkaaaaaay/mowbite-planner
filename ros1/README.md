@@ -252,7 +252,9 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   without `/move_base_flex/FTCPlanner/back_up_with_plan` true the node leaves `allow_reverse` out and logs that,
   `planner.settings` says which in `can_back_up`. `mower_width` is the
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
-  the middle of the drive wheels) and `edges` (`recorded`, `hard`, with the body set always `recorded`),
+  the middle of the drive wheels), or its outline `robot_outline` (`type` `points`: `[[x, y], ...]` m round
+  `base_link`, x ahead, y to the left, 3 at least; beats the three, null: the rectangle) and `edges` (`recorded`,
+  `hard`, with the body set always `recorded`),
   `edge_margin` and `obstacle_margin` (m the body keeps off the real edges, an area's own in its `planner` property),
   `spin_margin` (m it keeps further off them turning on the spot and at a kink of more than 15°, anywhere on the last
   0.1 m of the way in, where FTC turns; 0: only at the point), with `body_fit` (on) the path goes another way where the
