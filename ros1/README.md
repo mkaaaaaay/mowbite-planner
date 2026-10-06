@@ -24,7 +24,10 @@ What comes on top, without touching `mower_logic`:
   cells and parts, the turns between lanes far apart and the ways round the body go along the headland the loops
   mow, across the field only straight where that way is more than twice as long or there's none. Where nothing
   does it goes the way it would without: `stats.headland_turns` of a plan says where a drive turns in the field
-  (`places` [x, y], also a warning) and how often it crosses it (`crossings`).
+  (`places` [x, y], also a warning) and how often it crosses it (`crossings`). With the body set, `headland_corners`
+  `rounded` (the default) rounds the corners of the drives along the headland where the body fits on an arc (into the
+  field only where none fits out of it, 12 cm deep at most: `arcs_in_field`, `arc_depth`), `sharp` turns on the spot
+  there like before.
 - **Turning on the spot.** With `turn_on_spot: true` (off by default, like `headland_turns` for all areas or one)
   the mower turns on the spot where the path would drive a loop: no loops out (`smooth_spins`), no bulbs between
   lanes, drives arriving on the spot rather than round a loop, for lawns that take it. The body keeps its margins
@@ -251,10 +254,13 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   blade and beats `OM_BLADE_WIDTH`. The body: `robot_width`, `robot_front`, `robot_rear` (m from `base_link`,
   the middle of the drive wheels) and `edges` (`recorded`, `hard`, with the body set always `recorded`),
   `edge_margin` and `obstacle_margin` (m the body keeps off the real edges, an area's own in its `planner` property),
-  with `body_fit` (on) the path goes another way where the body would stick out (`stats.body_fit` of a plan says
-  where, `body_space` the edges it keeps to), at a place too narrow to turn round in it turns round before it (the
-  rest left out) instead of leaving the bit to `mower_logic`, the blade: `blade_ahead`, `blade_offset` (both may be
-  negative).
+  `spin_margin` (m it keeps further off them turning on the spot and at a kink of more than 15°, anywhere on the last
+  0.1 m of the way in, where FTC turns; 0: only at the point), with `body_fit` (on) the path goes another way where the
+  body would stick out (`stats.body_fit` of a plan says where, `poses` the pose there it sticks out the most at and how
+  far, `body_space` the edges it keeps to), at a place too narrow to turn round in it turns round before it (the rest
+  left out) instead of leaving the bit to `mower_logic`, the blade: `blade_ahead`, `blade_offset` (both may be
+  negative). With the body set the corners of drives and of the ways round the body get arcs where the body fits on
+  one, and a pose 2.5 cm before every turn on the spot left lets FTC turn at the point.
 - `angle_increment` (rad, 0: off) turns the lanes on every `angle_increment_every` finished mows (`mower_logic`'s
   `JOB_COMPLETE` event), within an area's `angle_min`..`angle_max` (bouncing back at the ends); for one area in its
   `planner` property. The steps so far are kept next to the settings file, `planner.settings` says `angle_steps`,

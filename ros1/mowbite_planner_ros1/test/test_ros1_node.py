@@ -655,7 +655,9 @@ def test_rpc_settings(planner):
     assert s['transit_edge_cost']['unit'] == ''
     for name, value in (('headland_turns', False), ('turn_on_spot', False), ('body_fit', True)):
         assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'boolean', 'settable': True}
-    for name, value in (('edge_margin', 0.05), ('obstacle_margin', 0.1)):
+    assert s['headland_corners'] == {'value': 'rounded', 'default': 'rounded', 'stored': False, 'type': 'string',
+                                     'settable': True, 'choices': ['rounded', 'sharp']}
+    for name, value in (('edge_margin', 0.05), ('obstacle_margin', 0.1), ('spin_margin', 0.05)):
         assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'number', 'settable': True,
                            'unit': 'm', 'min': 0.0, 'max': 1.0}, name
 
@@ -687,7 +689,8 @@ def test_rpc_settings_set(planner):
 
 def test_rpc_settings_set_body(planner):
     # the body's and the turns' settings, the next plan uses them
-    body = {'edge_margin': 0.2, 'obstacle_margin': 0.3, 'body_fit': False, 'headland_turns': True, 'turn_on_spot': True}
+    body = {'edge_margin': 0.2, 'obstacle_margin': 0.3, 'spin_margin': 0.0, 'body_fit': False, 'headland_turns': True,
+            'headland_corners': 'sharp', 'turn_on_spot': True}
     result, error = rpc('planner.settings.set', body)
     assert error is None and {n: result['settings'][n]['value'] for n in body} == body
     assert all(result['settings'][n]['stored'] for n in body)
@@ -715,6 +718,8 @@ def test_rpc_settings_angle(planner):
     ({'mower_width': 0}, 'mower_width must be > 0.0'),
     ({'edge_margin': 1.01}, 'edge_margin must be <= 1.0'),
     ({'obstacle_margin': -0.1}, 'obstacle_margin must be >= 0.0'),
+    ({'spin_margin': 1.5}, 'spin_margin must be <= 1.0'),
+    ({'headland_corners': 'round'}, 'headland_corners must be one of rounded, sharp'),
     ({'body_fit': 1}, 'body_fit must be true or false'),
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),

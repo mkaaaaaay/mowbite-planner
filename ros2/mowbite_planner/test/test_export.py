@@ -218,6 +218,18 @@ def test_body_edges_of_the_answer():
     assert Polygon(edges['holes'][0]).within(Polygon(BED))
 
 
+def test_body_fit_of_the_answer():
+    """The answer's stats say where the path goes another way for the body and leaves out what (body_fit): its places
+    [x, y, m left out] and their poses [x, y, yaw, m the body sticks out there, 1 where it turns on the spot there] one
+    for one, the place where its pose is."""
+    plan = plan_of(robot_width=0.4, robot_front=0.43, robot_rear=0.14, perimeter_offset=0.0)
+    fit = json.loads(json.dumps(to_openmower_json(plan)['stats']['body_fit']))
+    assert fit == plan.stats['body_fit'] and len(fit['poses']) == len(fit['places']) == fit['fixed'] + fit['left'] > 0
+    for (x, y, _), (px, py, yaw, d, spin) in zip(fit['places'], fit['poses']):
+        assert abs(x - px) <= 0.0051 and abs(y - py) <= 0.0051 and -math.pi <= yaw <= math.pi and d >= 0
+        assert spin in (0, 1) and round(d, 3) == d
+
+
 # Planner Studio --------------------------------------------------------------------------------------------
 
 

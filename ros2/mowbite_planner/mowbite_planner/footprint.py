@@ -3,17 +3,19 @@ wheels): a rectangle robot_front ahead of it, robot_rear behind, robot_width wid
 the space it may take at poses, turning on the spot where the heading jumps."""
 
 import math
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
-from shapely.geometry import Polygon, box
-from shapely.ops import unary_union
+from shapely.geometry import MultiPoint, Point, Polygon, box
+from shapely.ops import clip_by_rect, polylabel, unary_union
 from shapely.prepared import prep
 
+from .geometry import QUAD_SEGS, polygons as pieces
 from .mathutil import angle_diff, normalize_angle
 
 try:  # shapely 2 tests points without making a geometry of each and bodies all at once, much quicker
     import numpy
-    from shapely import contains_xy, covers, get_coordinates, polygons, segmentize
+    from shapely import (contains_xy, convex_hull, covers, distance, get_coordinates, multipoints, points, polygons,
+                         segmentize)
     contains_points = None
 except ImportError:  # shapely 1.7 (ROS Noetic)
     contains_xy = None
@@ -23,13 +25,23 @@ except ImportError:  # shapely 1.7 (ROS Noetic)
     except ImportError:
         contains_points = None
 
-# rad, a heading that changes more than this from one pose to the next is a turn on the spot there
-SPIN = math.radians(30.0)
+# rad, a heading that changes more than this from one pose to the next is a turn on the spot there: at a kink that sharp
+# OpenMower's FTC turns the same way, over the way from the pose before (in a simulation of it the body swung out over
+# the real edge at one of 29 degrees, at gentler ones a few cm into its margins at most)
+SPIN = math.radians(15.0)
 # rad, a turn on the spot is checked with the body this far apart (its corners pass < 2 mm outside of them)
 TURN_STEP = math.radians(10.0)
+# m, with a spin_margin a turn on the spot is checked anywhere on this much of the way in to it: OpenMower's FTC turns
+# over the way from the pose before (waypoint_spacing), halfway round the mower was up to 7 cm before the point
+SPIN_BACK = 0.1
 # outside(): at most about this many bodies along the poses, turning on the spot one every this many rad
 OUTSIDE_BODIES = 12
 OUTSIDE_TURN = math.radians(20.0)
+# m, out_by() looks at points this far apart along the body's edge (turning on the spot along the way its corners go,
+# OUT_ARC apart at least: how far out they are changes smoothly there), at the space's edges OUT_NEAR round them first
+OUT_STEP = 0.004
+OUT_ARC = 0.01
+OUT_NEAR = 0.15
 # m, with shapely 1.7 squares of the map this big are looked up once whether all of them lies in a _Zone
 CELL = 0.1
 # m, with shapely 2 a _Zone knows of every square this big at once whether all of it lies in it
@@ -87,7 +99,7 @@ class _Zone:
 
 
 class Footprint:
-    def __init__(self, space, width: float, front: float, rear: float):
+    def __init__(self, space, width: float, front: float, rear: float, spin_margin: float = 0.0, back: float = 0.0):
         self.half = 0.5 * width
         self.front, self.rear = front, rear
         self._corners = ((front, self.half), (-rear, self.half), (-rear, -self.half), (front, -self.half))
@@ -100,17 +112,58 @@ class Footprint:
         quarter = 0.25 * (front + rear)
         self._middles = (front - quarter, quarter - rear)  # m ahead of the centre
         radius = math.hypot(quarter, self.half)
-        halves = space.buffer(-radius / KEEP_OFF, 4)
+        # (back: the zones that much further in, a centre in one fits anywhere within back of it, see turning)
+        self.back = back
+        halves = space.buffer(-(radius + back) / KEEP_OFF, 4)
         self._halves = None if halves.is_empty else _Zone(halves)
         # a centre in here fits whatever way it faces, reach off the edges (that much less off the zone above, quicker
         # than off the edges themselves)
         self.anywhere = halves.buffer(-(self.reach - radius) / KEEP_OFF, 4)
         self._safe = None if self.anywhere.is_empty else _Zone(self.anywhere)
+        # turning on the spot (fits_turn) the body keeps spin_margin further off the edges, from SPIN_BACK before on
+        self.spin_margin = spin_margin
+        self.turning = Footprint(space.buffer(-spin_margin, QUAD_SEGS), width, front, rear, back=SPIN_BACK) \
+            if spin_margin > 0 else self
+        self._edge = None  # (space's boundary, see out_by)
 
     def body(self, x: float, y: float, yaw: float) -> Polygon:
         c, s = math.cos(yaw), math.sin(yaw)
         corners = [(x + c * dx - s * dy, y + s * dx + c * dy) for dx, dy in self._corners]
         return polygons(corners) if contains_xy is not None else Polygon(corners)  # (shapely 2's class is slower)
+
+    @staticmethod
+    def _turns(yaw0: float, yaw1: float) -> List[List[float]]:
+        """The headings turning on the spot from yaw0 to yaw1, TURN_STEP apart: the shorter way round, both ways where
+        they're within TURN_STEP as long (about a half turn: the mower may take either)."""
+        turn = normalize_angle(yaw1 - yaw0)
+        turns = (turn, turn - math.copysign(2.0 * math.pi, turn)) if abs(turn) > math.pi - TURN_STEP else (turn,)
+        return [[yaw0 + t * i / n for i in range(n + 1)] for t in turns
+                for n in [max(1, int(math.ceil(abs(t) / TURN_STEP)))]]
+
+    def _corners_at(self, x: float, y: float, yaws: Sequence, dx: float, dy: float):
+        """The body's corners facing each of yaws at (x, y) and (dx, dy) back from there, 8 a heading one after the
+        other (with shapely 2 an array, all at once)."""
+        if contains_xy is None:
+            return [(x - k * dx + math.cos(h) * fx - math.sin(h) * fy, y - k * dy + math.sin(h) * fx + math.cos(h) * fy)
+                    for h in yaws for k in (0, 1) for fx, fy in self._corners]
+        h = numpy.array(yaws, float)[:, None]
+        (fx, fy), c, s = numpy.array(self._corners).T, numpy.cos(h), numpy.sin(h)
+        corners = numpy.stack([x + c * fx - s * fy, y + s * fx + c * fy], -1)
+        return numpy.concatenate([corners, corners - (dx, dy)], 1).reshape(-1, 2)
+
+    def _hulls(self, x: float, y: float, turns: Sequence, dx: float, dy: float) -> list:
+        """The hull of the body facing a and b of each (a, b) of turns, at (x, y) and (dx, dy) back from there."""
+        corners = self._corners_at(x, y, [h for turn in turns for h in turn], dx, dy)
+        if contains_xy is None:
+            return [MultiPoint(corners[16 * k:16 * k + 16]).convex_hull for k in range(len(turns))]
+        return list(convex_hull(multipoints(corners.reshape(len(turns), 16, 2))))
+
+    def _turned(self, x: float, y: float, turns: Sequence, dx: float, dy: float) -> bool:
+        """Whether the body fits turning from a to b of each (a, b) of turns, anywhere from (x, y) to (dx, dy) back:
+        the hulls of it facing a and b at both ends."""
+        hulls = self._hulls(x, y, turns, dx, dy)
+        return bool(covers(self.space, hulls).all()) if contains_xy is not None else \
+            all(self._space.covers(hull) for hull in hulls)
 
     def _safe_at(self, x: float, y: float) -> bool:
         return self._safe is not None and self._safe.has(x, y)
@@ -148,12 +201,21 @@ class Footprint:
 
     def fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
         """Turning on the spot here from yaw0 to yaw1, the shorter way round (body poses TURN_STEP apart), both ways
-        round where they're within TURN_STEP as long (about a half turn: the mower may take either)."""
-        turn = normalize_angle(yaw1 - yaw0)
-        turns = (turn, turn - math.copysign(2.0 * math.pi, turn)) if abs(turn) > math.pi - TURN_STEP else (turn,)
-        for turn in turns:
-            n = max(1, int(math.ceil(abs(turn) / TURN_STEP)))
-            if not all(self.fits_pose(x, y, yaw0 + turn * i / n) for i in range(n + 1)):
+        round where they're within TURN_STEP as long (about a half turn: the mower may take either). With a
+        spin_margin the body keeps that much further off the edges, turning anywhere on the last SPIN_BACK of the way
+        in (facing yaw0), checked from one of those poses to the next (the hull of both: between them a corner may
+        get closer to an edge than at either)."""
+        fp = self.turning
+        if fp._safe_at(x, y):
+            return True
+        dx, dy = fp.back * math.cos(yaw0), fp.back * math.sin(yaw0)
+        for yaws in self._turns(yaw0, yaw1):
+            if fp is self:
+                if not all(self._halves_at(x, y, yaw) or self._space.covers(self.body(x, y, yaw)) for yaw in yaws):
+                    return False
+                continue
+            rest = [(a, b) for a, b in zip(yaws, yaws[1:]) if not (fp._halves_at(x, y, a) and fp._halves_at(x, y, b))]
+            if rest and not fp._turned(x, y, rest, dx, dy):
                 return False
         return True
 
@@ -196,6 +258,74 @@ class Footprint:
         swept = unary_union(bodies)
         # (only the space around them: the whole of it can be a big polygon)
         return swept.difference(self.space.intersection(box(*swept.bounds))).area
+
+    def out_by(self, turns: Sequence, step: float = OUT_STEP, around: Optional[Sequence[float]] = None) -> List[Tuple]:
+        """(m, (x, y)) for each pose of turns ((the pose before, None where a section starts, the pose)): how far the
+        body's farthest point lies out of the space and where (0, None: it's in it), turning on the spot where the
+        heading jumps by more than SPIN: out of the space spin_margin smaller, anywhere on the last SPIN_BACK of the way
+        in (like fits_turn). Of points `step` apart along its edges (turning: facing the way in and out, at the point
+        and back, its corners every OUT_ARC round at least), step / 2 short of the farthest at most; around (x, y, r):
+        of those within r of there only. Where none of those lies out of it (or without numpy) of the corners and the
+        middle of what does."""
+        got: List[Tuple] = [(0.0, None)] * len(turns)
+        spin = [before is not None and angle_diff(p.yaw, before.yaw) > SPIN for before, p in turns]
+        if contains_xy is not None or contains_points is not None:
+            # (the ends of the edges the points lie on, whose: the bodies not turning all at once)
+            still = [k for k, turning in enumerate(spin) if not turning]
+            x, y, h = numpy.array([(turns[k][1].x, turns[k][1].y, turns[k][1].yaw) for k in still]).reshape(-1, 3).T
+            (fx, fy), cos, sin = numpy.array(self._corners).T, numpy.cos(h)[:, None], numpy.sin(h)[:, None]
+            c = numpy.stack([x[:, None] + cos * fx - sin * fy, y[:, None] + sin * fx + cos * fy], -1)
+            ends, owner = [(c.reshape(-1, 2), numpy.roll(c, -1, 1).reshape(-1, 2))], [numpy.repeat(still, 4)]
+            for k in (k for k, turning in enumerate(spin) if turning):
+                (before, p), yaw0 = turns[k], turns[k][0].yaw
+                dx, dy = self.turning.back * math.cos(yaw0), self.turning.back * math.sin(yaw0)
+                for c in (self._corners_at(p.x, p.y, [yaw0], dx, dy), self._corners_at(p.x, p.y, [p.yaw], dx, dy)):
+                    ends += [(c[:4], numpy.roll(c[:4], -1, 0)), (c[4:], numpy.roll(c[4:], -1, 0)), (c[:4], c[4:])]
+                for t in self._turns(yaw0, p.yaw):  # (its corners turning either way it may)
+                    n = int(math.ceil(abs(t[-1] - yaw0) * self.reach / max(step, OUT_ARC)))
+                    c = self._corners_at(p.x, p.y, yaw0 + (t[-1] - yaw0) * numpy.arange(n + 1) / n, dx, dy)
+                    ends.append((c[:-8], c[8:]))
+                owner += [numpy.full(len(e[0]), k) for e in ends[len(owner):]]
+            a, b = (numpy.concatenate([e[i] for e in ends]).reshape(-1, 2) for i in (0, 1))
+            n = numpy.maximum(1, numpy.ceil(numpy.hypot(*(b - a).T) / step)).astype(int)
+            j = numpy.repeat(numpy.arange(len(a)), n)
+            xy = a[j] + ((numpy.arange(n.sum()) - numpy.repeat(numpy.cumsum(n) - n, n)) / n[j])[:, None] * (b - a)[j]
+            owner = numpy.concatenate(owner).astype(int)[j]
+            if around is not None:
+                near = numpy.hypot(xy[:, 0] - around[0], xy[:, 1] - around[1]) <= around[2]
+                xy, owner = xy[near], owner[near]
+            spaces = [self.turning if turning else self for turning in spin]
+            for fp in set(spaces):  # (the points out of each space, how far from its edges round them)
+                mine = numpy.array([space is fp for space in spaces], bool)[owner]
+                q, o = xy[mine], owner[mine]
+                inside = contains_xy(fp.space, q[:, 0], q[:, 1]) if contains_xy is not None else \
+                    contains_points(fp._space, q[:, 0], q[:, 1])
+                q, o = q[~inside], o[~inside]
+                if not len(q):
+                    continue
+                if fp._edge is None:
+                    fp._edge = fp.space.boundary
+                (x0, y0), (x1, y1) = q.min(0), q.max(0)
+                for r in (OUT_NEAR, fp.reach + fp.back):  # (all of them within reach where they're further out)
+                    edge = clip_by_rect(fp._edge, x0 - r, y0 - r, x1 + r, y1 + r)
+                    d = distance(edge, points(q)) if contains_xy is not None else \
+                        numpy.array([edge.distance(Point(*xy)) for xy in q])
+                    if d.max() < r:
+                        break
+                order = numpy.lexsort((d, o))  # (by whose, the farthest last)
+                for i in order[numpy.r_[o[order][1:] != o[order][:-1], True]]:
+                    got[o[i]] = (round(float(d[i]), 3), (float(q[i][0]), float(q[i][1])))
+        for k, ((before, p), turning) in enumerate(zip(turns, spin)):
+            if got[k][1] is None:  # (the corners and the middle of what lies out of the space)
+                fp = self.turning if turning else self
+                shape = unary_union([h for t in self._turns(before.yaw, p.yaw) for h in self._hulls(
+                    p.x, p.y, list(zip(t, t[1:])), fp.back * math.cos(before.yaw), fp.back * math.sin(before.yaw))]) \
+                    if turning else self.body(p.x, p.y, p.yaw)
+                for piece in pieces(shape.difference(fp.space)):
+                    for q in [polylabel(piece, OUT_STEP)] + [Point(xy) for xy in piece.exterior.coords]:
+                        if fp.space.distance(q) > got[k][0]:
+                            got[k] = (round(fp.space.distance(q), 3), (q.x, q.y))
+        return got
 
     def poses_fit(self, poses: Sequence) -> bool:
         # (the last ones first: a way or a turn that sticks out mostly does so further on)

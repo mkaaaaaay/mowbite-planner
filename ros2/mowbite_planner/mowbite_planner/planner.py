@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from shapely import wkb
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import nearest_points
 from shapely.prepared import prep
 
@@ -69,6 +69,8 @@ PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
 TURN_TYPES = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
 EDGES = ('recorded', 'hard')
+# headland_turns: the drives along the headland 'rounded' where an arc fits at their corners, or 'sharp' (on the spot)
+HEADLAND_CORNERS = ('rounded', 'sharp')
 # recorded outlines have a point every few cm, for finding their longest edge they're simplified this much
 ANGLE_SIMPLIFY_TOLERANCE = 0.10
 # rounding a loop's corner may cut it by this share of the mower width at most, 90 degree corners keep the
@@ -90,6 +92,11 @@ MAX_COORDINATE = 1e7
 # rad, smooth_spins replaces turns on the spot by more than this, with an omega of these shares of turn_radius
 SPIN_LIMIT = math.radians(60.0)
 SMOOTH_RADII = (1.0, 0.75, 0.5, 0.35)
+# m, with the body checked: where the path still turns on the spot a pose this much before the point, facing the way
+# it came (where the way in is longer than twice that). OpenMower's FTC turns over the way from the pose before to the
+# next: from 10 cm before it it turns some 5 cm early and drifts, from this close about at the point (a simulation of
+# it, the mower lagging 0.1 s)
+TURN_AHEAD = 0.025
 # m2, lane_spacing_mode 'auto': a plan leaves nothing unmowed with no piece this big and not LEFT_TOTAL together of
 # pieces from LEFT_TUFT on (tufts at corners), like the report
 LEFT_TUFT = 0.01
@@ -124,8 +131,10 @@ FIT_DRIVE = 0.25
 # ways _fit_body tries at most for a plan, past that the path jumps over a place (a count, not a time: the same plan
 # every time)
 FIT_TRIES = 9000
-# m, where nothing fits that soon after a section begins it begins later
+# m, where nothing fits that soon after a section begins it begins later. FIT_LATER: where nothing else does either
+# (turning round, driving on), getting to a section's start is up to whoever drives the path anyway
 FIT_START = 1.0
+FIT_LATER = 8.0
 # where none of those fits the path turns round before the place, at the first point of FIT_TURNS a way fits through:
 # the poses there and round it (FIT_STEP[0] apart, FIT_AROUND m before and after at most, the closest first) moved
 # FIT_IN m to either side, as little as the body fits facing that pose's way, turned half and all the way the path turns
@@ -139,6 +148,9 @@ FIT_ROUND = 600
 ROOM_SIMPLIFY = 0.005
 # headland_turns: a way of _fit_body that turns in the lanes' field counts as this many m of loops and lanes left out
 FIT_FIELD = 2.0
+# m, _fit_body finds where the body sticks out the most at a place looking along its edge this far apart first
+# (Footprint.out_by), closer only where that may be the most
+PLACE_STEP = 0.02
 # _fit_body keeps where it got to every FIT_KEEP poses: a plan whose path starts the same (the loops, at another lane
 # angle) goes on from the last of those up to which it reads the same poses
 FIT_KEEP = 1000
@@ -147,6 +159,9 @@ FIT_KEEP = 1000
 HEADLAND_DETOUR = 2.0
 HEADLAND_SLACK = 2.0
 CROSSINGS = 3
+# m, with headland_corners 'rounded' an arc rounding a drive's corner out of the lanes' field into it (where none fits
+# out of it) reaches this far into it at most, else the corner stays
+FIELD_ARC = 0.12
 # poses of a segment _Route.mowed() looks at together: it skips those whose box is far from where it looks
 MOWED_CHUNK = 32
 # swept_area: points per piece of the way at least
@@ -205,11 +220,12 @@ class PlannerConfig:
     # the spot) only where the headland is too small
     turn_radius: float = 0.25
     # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (a smaller turn_radius counts as this):
-    # drives, loops out and K-turns turn on the spot instead, a turn between lanes where none of it fits is rounded as
-    # wide as fits (at a slant where the lanes end at one, the lanes ending a little earlier for it where that's what
-    # it takes, else a loop into the next lane, see _Route.round_earlier), on the spot only where nothing does, a drive
-    # into a lane ending on a way into it where one fits (the lane starting later for it where that leaves nothing, see
-    # _Route.into_lane). 0: any (the corners of loops are rounded as before)
+    # drives, loops out and K-turns turn on the spot instead (with the body checked a drive's corner gets a tighter arc
+    # where that fits, see _round_corners), a turn between lanes where none of it fits is rounded as wide as fits (at a
+    # slant where the lanes end at one, the lanes ending a little earlier for it where that's what it takes, else a loop
+    # into the next lane, see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on
+    # a way into it where one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane). 0:
+    # any (the corners of loops are rounded as before)
     min_turn_radius: float = 0.0
     allow_reverse: bool = True  # K-turns, which back up a little
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
@@ -239,6 +255,11 @@ class PlannerConfig:
     # there's none. U-turns between lanes far apart, detours, loops out and ways round the body keep out of it too.
     # Where nothing does the way it takes without, stats['headland_turns'] and a warning saying where
     headland_turns: bool = False
+    # with headland_turns and the body checked, the corners of the drives along the headland: 'rounded' (an arc where
+    # one fits like at every corner of a drive, into the lanes' field only where none fits out of it and FIELD_ARC deep
+    # at most, stats['headland_turns'] says how many and how deep, see _round_corners) or 'sharp' (turning on the spot
+    # there, no arc into the field anywhere)
+    headland_corners: str = 'rounded'
     route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
@@ -264,7 +285,8 @@ class PlannerConfig:
     skip_lanes: bool = False
     # m, the mower's body around its centre (base_link): robot_width wide, robot_front ahead of it, robot_rear
     # behind. With all three the turns, lane ends, loops and drives keep the body in the space it may take (see
-    # edges). None: not checked
+    # edges), the corners of drives are rounded where the body fits on an arc (_round_corners) and the path turns on
+    # the spot at the point (TURN_AHEAD). None: not checked
     robot_width: Optional[float] = None
     robot_front: Optional[float] = None
     robot_rear: Optional[float] = None
@@ -280,9 +302,14 @@ class PlannerConfig:
     # m, with the body checked: how far it keeps off the outline's real edge everywhere, obstacle_margin off an
     # obstacle's and an area's to keep out of (one's own margin beats it, see plan_coverage). The loops keep the centre
     # that far off the lines: the first one further in where perimeter_offset would come closer, the ones round an
-    # obstacle further out
+    # obstacle further out (round both of two too close for the body to get through between, _gaps)
     edge_margin: float = 0.05
     obstacle_margin: float = 0.10
+    # m, with the body checked: turning on the spot (the heading jumping by more than footprint.SPIN from one pose to
+    # the next) it keeps this much further off the edges than those margins, anywhere on the last footprint.SPIN_BACK
+    # of the way in: OpenMower's FTC turns over the way to the point and drifts a few cm doing so. 0: only at the point,
+    # the margins as everywhere
+    spin_margin: float = 0.05
     # where the body would still stick out (a turn on the spot, a loop in a tight spot), the path goes another way there
     # that fits, leaving a little of a loop or lane out where it has to (_fit_body, stats['body_fit']). False: the path
     # as planned
@@ -434,6 +461,7 @@ class PlannerConfig:
         finite('body_tolerance', 0.0, MAX_BLADE_OFFSET)
         finite('edge_margin', 0.0, MAX_BLADE_OFFSET)
         finite('obstacle_margin', 0.0, MAX_BLADE_OFFSET)
+        finite('spin_margin', 0.0, MAX_BLADE_OFFSET)
         for name in ('lane_spacing_min', 'lane_spacing_max'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, self.mower_width, lo_open=True)
@@ -454,7 +482,7 @@ class PlannerConfig:
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),
                               ('perimeter_order', PERIMETER_ORDERS), ('perimeter_direction', PERIMETER_DIRECTIONS),
                               ('edges', EDGES), ('narrow_parts', NARROW_PARTS),
-                              ('lane_spacing_mode', LANE_SPACING_MODES)):
+                              ('lane_spacing_mode', LANE_SPACING_MODES), ('headland_corners', HEADLAND_CORNERS)):
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
@@ -1033,6 +1061,10 @@ class _Route:
         self.angle = 0.0
         self.lane_ys: Dict[float, List[float]] = {}
         self._rows: Dict[float, List[Tuple[float, List[Tuple[float, float]]]]] = {}
+        # headland_corners 'sharp': the points (x, y) of the drives along the headland, 'rounded': of the arcs rounding
+        # a corner out of the lanes' field into it (_round_corners)
+        self.sharp: set = set()
+        self.rounded: set = set()
 
     def _count(self, key: str) -> None:
         self.counts[key] = self.counts.get(key, 0) + 1
@@ -1086,6 +1118,8 @@ class _Route:
         if space is None and self.field is not None:
             way = self.headland_way(target, heading, head)
             if way is not None:
+                if self.cfg.headland_corners == 'sharp':
+                    self.sharp.update((p.x, p.y) for p in way)
                 return way
         space = space or self.transit
         pos, facing = start or (self.pos, self.heading)
@@ -1494,9 +1528,13 @@ class _Route:
                 gaps = [o[3].distance(item[3]) for o in outer]
                 closest = min(gaps)
                 parent = max((o for o, g in zip(outer, gaps) if g <= closest + 0.5 * spacing), key=lambda o: o[0])
-                parent[2] = _splice(parent[2], item[2], spacing)
-                parent[3] = LineString(parent[2] + parent[2][:1])
-                item[2] = None
+                # (the next closest where the way over to that one crosses a gap closed between obstacles, see _gaps;
+                # none: a loop of its own)
+                for o in [parent] + [o for _, o in sorted(zip(gaps, outer), key=lambda go: go[0]) if o is not parent]:
+                    ring = _splice(o[2], item[2], spacing)
+                    if self.area.is_free(ring + ring[:1]):
+                        o[2], o[3], item[2] = ring, LineString(ring + ring[:1]), None
+                        break
             loops = [tuple(it) for it in items if it[2] is not None]
         near = 1.5 * self.cfg.lane_spacing
         waits = []
@@ -1848,11 +1886,13 @@ class _Route:
         turn = shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns else None
         return None if turn is None else (turn, a)
 
-    def blade(self, poses: Sequence[Pose2D]):
-        """Where the blade mows driving poses."""
+    def blade(self, *runs: Sequence[Pose2D]):
+        """Where the blade mows driving poses (each run of them)."""
         half, ahead, off = 0.5 * self.cfg.mower_width, self.cfg.blade_ahead, self.cfg.blade_offset
-        return LineString([(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
-                            p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in poses]).buffer(half, 4)
+        lines = [[(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
+                   p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in poses] for poses in runs]
+        return (LineString(lines[0]) if len(lines) == 1 else MultiLineString(lines)).buffer(half, 4) if lines else \
+            Polygon()
 
     def mowed(self, ends: List[Tuple[float, float, float, float]], segments: List[PathSegment]):
         """What the blade mowed driving segments, of their poses near the lines in ends (x0, y0, x1, y1)."""
@@ -2097,13 +2137,19 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
     (FIT_VIA) that it can turn at, and out again (straight, the further ways easing off the path's line and onto it,
     FIT_EASE). Of those the one that leaves the least of the loops and lanes out, a metre driven counting FIT_DRIVE of
     that (with headland_turns one into the lanes' field FIT_FIELD more), FIT_PLACE ways tried at most for a place and
-    FIT_TRIES for all. Where none fits it turns round before the place, or goes through turn_room (see FIT_AROUND), and
-    where neither fits the path jumps from the pose before to the next one that fits (a section starts later where the
-    body doesn't fit at its start, or nothing fits FIT_START after it). Returns the poses, the segments (the ways in
-    place TRANSIT 'body', a jump within a section starts one of its own) and {'fixed': ways in place, 'left': places
-    left out (not the path starting later in its first section, FIT_START m of loops and lanes later at most), 'places':
-    [[x, y, m of loops and lanes left out]] of both, 'skipped_m': those m added up, 'jumps': [[x, y]] of the places the
-    path jumps over, 'tries': ways tried}."""
+    FIT_TRIES for all. Where none fits it turns round before the place, or goes through turn_room (see FIT_AROUND), or
+    drives on through the transit space to one of the next poses that fit, and where none of that fits the path jumps
+    from the pose before to the next one that fits (a section starts later where the body doesn't fit at its start,
+    nothing fits FIT_START after it or nothing else FIT_LATER after it, the path ends before where it would jump last).
+    Where the path starts later in its first section or ends before, a way from where the body turns whatever way it
+    faces closest to its start, or to the one closest to its end. Returns the poses, the segments (the ways in place
+    TRANSIT 'body', a jump within a section starts one of its own) and {'fixed': ways in place, 'left': places left out
+    (not the path starting later in its first section or ending before, FIT_START m of loops and lanes at most),
+    'places': [[x, y, m of loops and lanes left out]] of both, at the pose of the path as planned where the body sticks
+    out the most there, 'poses': [[x, y, yaw, m, spin]] of those poses (how far it sticks out of the space that applies
+    there, see Footprint.out_by, spin 1 where that's turning on the spot), 'skipped_m': those m added up, 'jumps': [[x,
+    y]] of the places the path jumps over, 'unchecked': [[x, y]] where it starts later or ends before with no such way,
+    'tries': ways tried}."""
     fp, step = route.footprint, route.step
     n = len(poses)
     section, mows = [0] * n, [False] * n  # (mows: on the way to it the blade mows a loop or a lane)
@@ -2111,7 +2157,7 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         section[info.start:info.end + 1] = [info.section] * (info.end + 1 - info.start)
         mows[info.start + 1:info.end + 1] = [info.kind in (PERIMETER, LANE)] * (info.end - info.start)
     starts = {i for i in range(n) if i == 0 or section[i] != section[i - 1]}
-    fit, turn_room = fp.fit(poses), fp.anywhere
+    fit, turn_room = fp.fit(poses), fp.turning.anywhere
     tries, most = [0], [0]  # (most: the tries this place may take up to)
     turns: Dict[Tuple[float, ...], bool] = {}  # fits_turn where and which way, rounded (ways share their corner)
 
@@ -2269,7 +2315,7 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
             p = poses[q]
             c, s = math.cos(p.yaw), math.sin(p.yaw)
             moved = [(p.x - off * s, p.y + off * c) for off in (f * sign for f in FIT_IN for sign in (side, -side))]
-            there = fp.fit([Pose2D(x, y, p.yaw + turn * f) for x, y in moved for f in (0.0, 0.5, 1.0)])
+            there = fp.turning.fit([Pose2D(x, y, p.yaw + turn * f) for x, y in moved for f in (0.0, 0.5, 1.0)])
             x, y = next((xy for k, xy in enumerate(moved) if all(there[3 * k:3 * k + 3])), (None, None))
             if x is None or not route.transit.is_free([(x, y)]):
                 continue
@@ -2287,6 +2333,37 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
                     if (angle_diff(into[-1].yaw, onto[0].yaw) <= SPIN or turns_at(x, y, into[-1].yaw, onto[0].yaw)) \
                             and ok([out[k - 1]] if k > first else [], join(into, onto)):
                         return mb + ma, k, j, join(into, onto)
+        return None
+
+    def picked(rs: range, at: List[Pose2D], fits_at: Optional[List[bool]], most: int,
+               far: float = math.inf) -> List[int]:
+        # of the poses at[r] in the transit space (that fit) the first, then FIT_STEP[-1] m of path on, twice as far
+        # each time (most of them, up to far m of path)
+        got, d, nxt, last = [], 0.0, 0.0, 0
+        for r in rs:
+            d += math.hypot(at[r].x - at[last].x, at[r].y - at[last].y) if got else 0.0
+            last = r
+            if d > far:
+                break
+            if (fits_at is None or fits_at[r]) and d >= nxt and route.transit.is_free([(at[r].x, at[r].y)]):
+                got.append(r)
+                nxt = max(FIT_STEP[-1], 2.0 * d)
+                if len(got) == most:
+                    break
+        return got
+
+    def drive_on(i: int) -> Optional[Tuple[float, int, int, List[Pose2D]]]:
+        # a drive (_Route.drive_to) through the transit space from one of the latest poses in it (FIT_TURNS of them,
+        # picked()) to one of the next ones in it that fit (up to the section's end)
+        end = next((j for j in range(i + 1, n) if j in starts), n)
+        seen[0] = max(seen[0], end - 1)
+        backs = picked(range(len(out) - 1, first - 1, -1), out, None, FIT_TURNS)
+        for j in picked(range(i + 1, end), poses, fit, n):
+            for k in backs:
+                way = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
+                                     ((out[k].x, out[k].y), out[k].yaw))
+                if way and ok([out[k - 1]] if k > first else [], join(way, [poses[j]])):
+                    return 0.0, k, j, join(way, [poses[j]])
         return None
 
     def through_room(k: int, j: int) -> Iterator[List[Pose2D]]:
@@ -2361,9 +2438,11 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
     # (kept only as far as a plan at another lane angle reads the same: up to the first lane, rings are loops)
     lanes = min((info.start for info in infos if info.kind == LANE and info.maneuver != 'ring'), default=n)
     # where a plan before with the same body, spaces and settings got to, as far as it read the same poses
-    hashed = hashlib.sha1(repr((step, fp.half, fp.front, fp.rear, FIT_REACH, FIT_STEP, FIT_PLACE, FIT_VIA, FIT_EASE,
-                                FIT_EASE_OFF, FIT_DRIVE, FIT_TRIES, FIT_START, FIT_FIELD, FIT_AROUND, FIT_IN,
-                                FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY)).encode())
+    hashed = hashlib.sha1(repr((step, fp.half, fp.front, fp.rear, fp.spin_margin, fp.turning.back, FIT_REACH, FIT_STEP,
+                                FIT_PLACE, FIT_VIA, FIT_EASE, FIT_EASE_OFF, FIT_DRIVE, FIT_TRIES, FIT_START, FIT_LATER,
+                                FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY,
+                                route.cfg.turn_radius, route.cfg.min_turn_radius, route.cfg.turn_on_spot,
+                                route.cfg.allowed_turns, route.cfg.headland_corners)).encode())
     for geom in (fp.space, route.transit.space, route.field):
         hashed.update(b'-' if geom is None else geom.wkb)
     key = hashed.hexdigest()
@@ -2424,10 +2503,13 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
                     rooms.clear()
                     most[0] = tries[0] + FIT_ROUND
                     best = search(i, FIT_REACH[-1], FIT_STEP[-1], None)
+                if best is None:
+                    most[0] = tries[0] + FIT_ROUND
+                    best = drive_on(i)
             if best is None:
                 # nothing fits: the path jumps from the pose before to the next one that fits (the section starts later
-                # where it began FIT_START before at most)
-                alone(FIT_START)
+                # where it began FIT_LATER before at most)
+                alone(FIT_LATER)
                 if len(out) == first:
                     continue
                 if not jumps or jumps[-1][0] != len(out):
@@ -2451,6 +2533,14 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         i = j + 1
     _keep(_FITTED, key, (poses[:lanes], section[:lanes], mows[:lanes], kept))
     alone()
+    # (where the body doesn't fit by the path's end, the dock, it ends before: no place left out where the path would
+    # jump last and that and what's after leave FIT_START m of loops and lanes out at most, it gets to the end itself)
+    ended = jumps and 0 < jumps[-1][0] < len(out) and \
+        sum(cut[jumps[-1][0]:]) + sum(hop(o) for o in jumps[-1][1] if mows[o]) <= FIT_START
+    if ended:
+        r = jumps.pop()[0]
+        del out[r:], orig[r:], cut[r:]
+        begins.discard(r)
     # (the jumps within a section start one of its own)
     splits = sorted(r for r, gone in jumps if r < len(out) and not (gone and gone[0] in starts))
 
@@ -2477,6 +2567,28 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
     def mown(gone: Sequence[int]) -> float:
         return round(sum(hop(o) for o in gone if mows[o]), 2)
 
+    worst: List[List[float]] = []
+
+    def place_of(a: int, b: int, m: float) -> List[float]:
+        # [x, y, m of loops and lanes left out] of a place over poses[a..b]: where of those the body sticks out the most
+        # (Footprint.out_by: PLACE_STEP apart along its edges first, then closer round the farthest of those that may be
+        # it), [x, y, yaw, how far, 1 where it turns on the spot there else 0] of that pose to worst
+        bad = [(poses[o - 1] if o not in starts else None, o) for o in range(a, b + 1)
+               if not fits(poses[o - 1] if o not in starts else None, o)]
+        best = None
+        for (rough, at), (before, o) in sorted(zip(fp.out_by([(q, poses[o]) for q, o in bad], PLACE_STEP), bad),
+                                               key=lambda g: (-g[0][0], g[1][1])):
+            if best is not None and rough + 0.5 * PLACE_STEP <= best[0]:
+                break
+            d = max(rough, fp.out_by([(before, poses[o])], around=at and (at[0], at[1], PLACE_STEP))[0][0])
+            if best is None or d > best[0]:
+                best = (d, before, o)
+        d, before, o = best or (0.0, None, (a + b) // 2)
+        p = poses[o]
+        spin = before is not None and angle_diff(p.yaw, before.yaw) > SPIN
+        worst.append([round(p.x, 3), round(p.y, 3), round(p.yaw, 3), d, int(spin)])
+        return [round(p.x, 2), round(p.y, 2), m]
+
     places = []
     r = 1
     while r < len(out):
@@ -2487,20 +2599,77 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         while r < len(out) and not planned(r):
             r += 1
         new.append(SegmentInfo(TRANSIT, s, r - 1, False, 'body', part(s)))
-        mid = out[(s + r - 1) // 2]
-        places.append([round(mid.x, 2), round(mid.y, 2), mown(range(orig[s] + 1, orig[r - 1] + 1))])
+        places.append(place_of(orig[s] + 1, orig[r - 1], mown(range(orig[s] + 1, orig[r - 1] + 1))))
     fixed = len(places)
-    # (where the body doesn't fit at the path's start, by the dock, it starts later in its first section: no place left
-    # out where that leaves FIT_START m of loops and lanes out at most, the mower drives to its first pose on its own)
-    if jumps and jumps[0][0] == 0 and out and section[orig[0]] == section[0] and mown(jumps[0][1]) <= FIT_START:
-        jumps = jumps[1:]
+
+    def lead(at: Pose2D, rs: range, start: bool) -> Optional[Tuple[int, List[Pose2D]]]:
+        # (k, the way) from the point closest to `at` where the body turns whatever way it faces (in the transit space)
+        # to out[k] (start, but for out[k]) or from where out[k] is to there, k of rs (picked(), FIT_REACH[0] m of path
+        # at most): eased onto or off the path's line or straight (legs()), else a drive
+        room = turn_room.intersection(route.transit.space)
+        if room.is_empty:
+            return None
+        q, most[0] = nearest_points(room, Point(at.x, at.y))[0], tries[0] + FIT_ROUND
+        ks = picked(rs, out, None, FIT_TURNS, FIT_REACH[0])
+        of = {orig[k]: k for k in ks if orig[k] is not None and out[k] == poses[orig[k]]}
+        got = next(legs(list(of), q.x, q.y, False) if start else legs(ks, q.x, q.y, True), None)
+        if got:
+            return (of[got[0]], got[1][:-1]) if start else got
+        for k in ks:
+            p = out[k]
+            if start:
+                way = route.drive_to((p.x, p.y), p.yaw, None, route.transit, ((q.x, q.y), None))
+                if way and ok([], way[:-1] + out[k:k + 2]):
+                    return k, way[:-1]
+            else:
+                way = route.drive_to((q.x, q.y), None, None, route.transit, ((p.x, p.y), p.yaw))
+                if way and ok(out[k - 1:k] if k else [], way):
+                    return k, way
+        return None
+
+    # where the path starts later in its first section or ends before (by the dock: getting from there to the path and
+    # back the body isn't checked), a way from where it turns whatever way it faces closest to where it would start, or
+    # to the one closest to where it would end: a place driven another way. Where none fits it says where (unchecked),
+    # it starts later all the same (no place left out where that leaves FIT_START m of loops and lanes out at most) or
+    # ends before
+    bounds = sorted(begins | set(splits) | {0, len(out)})
+    leads, unchecked = [None, None], []
+    if jumps and jumps[0][0] == 0 and out and section[orig[0]] == section[0]:
+        gone = jumps[0][1]
+        leads[0] = lead(poses[0], range(0, next(b for b in bounds if b > 0)), True)
+        if leads[0] or mown(gone) <= FIT_START:
+            jumps = jumps[1:]
+        if leads[0]:
+            fixed += 1
+            places.append(place_of(0, orig[0], round(mown(gone) + sum(cut[1:leads[0][0] + 1]), 2)))
+        else:
+            unchecked.append([round(out[0].x, 2), round(out[0].y, 2)])
+    if ended:
+        first = max(b for b in bounds if b < len(out))  # (the last section's, see legs())
+        leads[1] = lead(poses[-1], range(len(out) - 1, first - 1, -1), False)
+        if leads[1]:
+            fixed += 1
+            places.append(place_of(orig[-1] + 1, n - 1,
+                                   round(mown(range(orig[-1] + 1, n)) + sum(cut[leads[1][0] + 1:]), 2)))
+        else:
+            unchecked.append([round(out[-1].x, 2), round(out[-1].y, 2)])
     for r, gone in jumps:
-        mid = poses[gone[len(gone) // 2]] if gone else out[r - 1]
-        places.append([round(mid.x, 2), round(mid.y, 2), mown(gone)])
+        places.append(place_of(orig[r - 1] + 1 if r else 0, orig[r] if r < len(out) else n - 1, mown(gone)))
     new.sort(key=lambda info: (info.start, info.end))
     over = [place[:2] for (r, _), place in zip(jumps, places[fixed:]) if r in splits]
+    if leads[1]:  # (the segments as far as out[k], then the way from there)
+        k, way = leads[1]
+        at = SegmentInfo(TRANSIT, k, k + len(way) - 1, False, 'body', new[-1].section)
+        new = [dataclasses.replace(info, end=min(info.end, k)) for info in new if info.start < k] + [at]
+        out[k:] = way
+    if leads[0]:  # (the way, then the segments from out[k] on)
+        k, way = leads[0]
+        new = [SegmentInfo(TRANSIT, 0, len(way), False, 'body', new[0].section)] + [
+            dataclasses.replace(info, start=max(info.start, k) + len(way) - k, end=info.end + len(way) - k)
+            for info in new if info.end > k]
+        out[:k] = way
     return out, new, {'fixed': fixed, 'left': len(jumps), 'skipped_m': round(sum(m for _, _, m in places), 2),
-                      'places': places, 'jumps': over, 'tries': tries[0]}
+                      'places': places, 'poses': worst, 'jumps': over, 'unchecked': unchecked, 'tries': tries[0]}
 
 
 def _lanes_field(passes: List[Tuple[float, List[List[Lane]]]], trim: float, half: float):
@@ -2520,21 +2689,32 @@ def _lanes_field(passes: List[Tuple[float, List[List[Lane]]]], trim: float, half
     return union(parts)
 
 
-def _field_turns(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo]) -> List[List[float]]:
+def _field_turns(route: '_Route', poses: List[Pose2D],
+                 infos: List[SegmentInfo]) -> Tuple[List[List[float]], int, float]:
     """[x, y] of every place where a drive turns in the lanes' field (headland_turns): the first pose there whose
-    heading changes, those less than a metre apart one place."""
+    heading changes, those less than a metre apart one place. Not on the arcs rounding a corner out of it into it: how
+    many of those turn in it, and how far in the furthest gets (m, along the way from pose to pose, to a few mm)."""
     places: List[List[float]] = []
     last: Optional[Pose2D] = None
+    arcs, deepest, on = 0, 0.0, False  # (on: the pose before turns on one of those arcs in the field)
     for info in infos:
         if info.kind != TRANSIT:
             continue
         for i in range(info.start + 1, info.end + 1):
             p = poses[i]
-            if angle_diff(p.yaw, poses[i - 1].yaw) > 1e-6 and not route.clear([(p.x, p.y)]):
+            turns = angle_diff(p.yaw, poses[i - 1].yaw) > 1e-6 and not route.clear([(p.x, p.y)])
+            if turns and (p.x, p.y) in route.rounded:
+                arcs += not on
+                q = poses[i - 1]
+                way = [(q.x + f * (p.x - q.x), q.y + f * (p.y - q.y)) for f in (0.25, 0.5, 0.75, 1.0)]
+                deepest = max([deepest] + [route.field.boundary.distance(Point(xy)) for xy in way
+                                           if not route.clear([xy])])
+            elif turns:
                 if last is None or math.hypot(p.x - last.x, p.y - last.y) >= 1.0:
                     places.append([round(p.x, 2), round(p.y, 2)])
                 last = p
-    return places
+            on = turns and (p.x, p.y) in route.rounded
+    return places, arcs, round(deepest, 3)
 
 
 def _splice(ring: List[XY], other: List[XY], lead: float = 0.0) -> List[XY]:
@@ -2618,6 +2798,192 @@ def _assemble(segments: List[PathSegment]) -> Tuple[List[Pose2D], List[SegmentIn
             infos.append(SegmentInfo(seg.kind, start, len(poses) - 1, seg.reverse, seg.maneuver, seg.section,
                                      seg.source))
     return poses, infos
+
+
+def _round_corners(route: '_Route', poses: List[Pose2D],
+                   infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
+    """Where a drive or a way of _fit_body (TRANSIT) bends at a pose by more than CORNER_ANGLE (turns on the spot there
+    from footprint.SPIN on), an arc in its place, of SMOOTH_RADII of turn_radius (tighter than min_turn_radius too): the
+    widest that keeps in the transit space and the body fits on. Tangent to the straight ends of the ways in and out,
+    into the loop, lane or turn next to it turn_radius at most (as much as a right angle of that takes) and only where
+    the blade mows what it leaves of it on the arc or on what no rounding leaves out (but EARLIER_LEFT); else an S
+    from as far back on the way in as that allows (or where the drive's straight way in starts) onto the drive's way out
+    further on, or the other way round, turning 90 degrees more at most. With headland_turns out of the lanes' field
+    where the corner is out of it, with headland_corners 'rounded' into it where nothing else fits (an arc only,
+    FIELD_ARC deep at most, its points in route.rounded), with 'sharp' not where a drive along the headland goes
+    (route.sharp). The arc goes with the drive, the piece next to it ends or starts where it does."""
+    out = list(poses)
+    own = [0] * len(out)  # the segment the way to each pose is part of (of one a segment starts with: that one)
+    shared = [k > 0 and infos[k - 1].end == info.start for k, info in enumerate(infos)]
+    for k, info in enumerate(infos):
+        own[info.start + shared[k]:info.end + 1] = [k] * (info.end + 1 - info.start - shared[k])
+
+    def straight(j: int, h: float) -> float:  # m from out[j] to out[j + 1] along h on the way, else 0
+        p, q = out[j], out[j + 1]
+        a, b = infos[own[j]], infos[own[j + 1]]
+        if a.section != b.section or b.reverse or angle_diff(p.yaw, h) > 1e-6 or \
+                abs((q.y - p.y) * math.cos(h) - (q.x - p.x) * math.sin(h)) > 1e-6:
+            return 0.0
+        return math.hypot(q.x - p.x, q.y - p.y)
+
+    def leg(j: int, h: float, step: int, drive: bool = False) -> float:
+        # m straight along h from out[j] back (step -1) or on (1), drive: on drives only
+        d, j = 0.0, j - 1 if step < 0 else j
+        while 0 <= j < len(out) - 1:
+            hop = straight(j, h)
+            if hop <= 0.0 or drive and infos[own[j + 1]].kind != TRANSIT:
+                break
+            d, j = d + hop, j + step
+        return d
+
+    def ways(p: Pose2D, u: float, w: float, r: float, s: bool) -> Iterator[Tuple[float, float, List[Pose2D]]]:
+        # (m before p it leaves the way, m after p it gets back on, the poses between), s: the S's too
+        turn = normalize_angle(w - u)
+        trim = r * math.tan(0.5 * abs(turn))
+        if trim <= min(back, on) + 1e-9:
+            arc = sample_arc(p.x - trim * math.cos(u), p.y - trim * math.sin(u), u, r, turn, route.step)
+            yield trim, trim, [arc[0]._replace(yaw=u)] + arc[1:-1] + [arc[-1]._replace(yaw=w)]  # (yaws as they were)
+        # an S from as far back on the way in as it may (or where the drive's straight way in starts) onto the drive's
+        # way out further on, or the other way round
+        for a, b in [(f, d) for f in sorted({min(back, trim), min(behind, trim)}, reverse=True)
+                     for d in (trim + 2.0 * r, ahead) if s and trim < d <= ahead] + \
+                [(d, f) for f in sorted({min(on, trim), min(ahead, trim)}, reverse=True)
+                 for d in (trim + 2.0 * r, behind) if s and trim < d <= behind]:
+            for m in dubins(Pose2D(p.x - a * math.cos(u), p.y - a * math.sin(u), u),
+                            Pose2D(p.x + b * math.cos(w), p.y + b * math.sin(w), w), r, route.step,
+                            turning=abs(turn) + 0.5 * math.pi)[:1]:
+                if m.name == 'u_turn' or not route.cfg.turn_on_spot:  # (no loop with turn_on_spot)
+                    yield a, b, m.pieces[0].poses
+
+    def fit(a: float, b: float, arc: List[Pose2D], out_of: bool) -> Optional[Tuple[int, int, List[Pose2D]]]:
+        # (the poses before and after it that stay, those and it), where it fits
+        s, e = i - 1, i + 1
+        while s > 0 and math.hypot(out[s].x - p.x, out[s].y - p.y) < a - 1e-9:
+            s -= 1
+        while e < len(out) - 1 and math.hypot(out[e].x - p.x, out[e].y - p.y) < b - 1e-9:
+            e += 1
+        new = join(out[s:s + 1], arc, out[e:e + 1])
+        pts = [(q.x, q.y) for q in arc]
+        # (where it ends at the next corner that one turns from the arc's last but one pose)
+        if not route.transit.is_free(pts) or out_of and not route.clear(pts) or \
+                deep is not None and clear and deep.intersects(LineString(pts)) or \
+                not route.body(new[1:] if same_position(arc[-1], out[e]) else arc):
+            return None
+        # of the pieces next to the drive it leaves out the blade mows all but EARLIER_LEFT on it or elsewhere
+        left = [route.blade([arc[0], Pose2D(p.x - behind * math.cos(u), p.y - behind * math.sin(u), u)])] \
+            if a > behind + 1e-9 else []
+        left += [route.blade([Pose2D(p.x + ahead * math.cos(w), p.y + ahead * math.sin(w), w), arc[-1]])] \
+            if b > ahead + 1e-9 else []
+        if left:
+            left = subtract(union(left), [route.blade(arc)])
+            if left.area > EARLIER_LEFT and subtract(left, [mowed()]).area > EARLIER_LEFT:
+                return None
+        return s, e, new
+
+    # (the poses as they were by the square metre they're in, those further than turn_radius along the path from a
+    # drive: no rounding leaves them out)
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for j, q in enumerate(poses):
+        grid.setdefault((math.floor(q.x), math.floor(q.y)), []).append(j)
+    gap = [math.inf] * len(poses)
+    for info in infos:
+        if info.kind == TRANSIT:
+            gap[info.start:info.end + 1] = [0.0] * (info.end + 1 - info.start)
+    for js in (range(1, len(poses)), range(len(poses) - 2, -1, -1)):
+        for j in js:
+            q, o = poses[j], poses[j - js.step]
+            gap[j] = min(gap[j], gap[j - js.step] + math.hypot(q.x - o.x, q.y - o.y))
+
+    def mowed():
+        # what the blade mows round the corner on the poses as they were that no rounding leaves out (worked out once a
+        # corner)
+        if not here:
+            reach = min(max(back, on), route.cfg.turn_radius * math.tan(0.5 * angle_diff(w, u))) + \
+                route.cfg.mower_width + 2.0 * (abs(route.cfg.blade_ahead) + abs(route.cfg.blade_offset)) + route.step
+            x0, y0, x1, y1 = (math.floor(v) for v in (p.x - reach, p.y - reach, p.x + reach, p.y + reach))
+            runs: List[List[Pose2D]] = []
+            for j in sorted(j for gx in range(x0, x1 + 1) for gy in range(y0, y1 + 1) for j in grid.get((gx, gy), ())
+                            if gap[j] > route.cfg.turn_radius + 1e-6
+                            and math.hypot(poses[j].x - p.x, poses[j].y - p.y) <= reach):
+                if not runs or runs[-1][-1] != j - 1:
+                    runs.append([])
+                runs[-1].append(j)
+            here.append(route.blade(*[poses[run[0]:run[-1] + 1] for run in runs if len(run) > 1]))
+        return here[0]
+
+    strict = route.cfg.headland_corners == 'sharp'
+    # (what of the lanes' field is more than FIELD_ARC in: an arc into it from a corner out of it keeps out of that)
+    deep = prep(route.field.buffer(-FIELD_ARC, QUAD_SEGS)) if route.field is not None and not strict else None
+    i = 1
+    while i < len(out) - 1:
+        p, u, w = out[i], out[i - 1].yaw, out[i].yaw
+        into, onto = infos[own[i]], infos[own[i + 1]]  # (the ways to and from it)
+        k = own[i + 1] if onto.kind == TRANSIT else own[i]
+        if angle_diff(w, u) <= CORNER_ANGLE or angle_diff(w, u) > math.pi - 1e-3 or infos[k].kind != TRANSIT or \
+                not infos[own[i - 1]].section == into.section == onto.section or into.reverse or onto.reverse or \
+                (p.x, p.y) in route.sharp:
+            i += 1
+            continue
+        # (into a loop, lane or turn next to it turn_radius at most, as much as a right angle of that takes: no more of
+        # it left out)
+        behind, ahead = leg(i, u, -1, True), leg(i, w, 1, True)
+        back = min(leg(i, u, -1), behind + route.cfg.turn_radius)
+        on = min(leg(i, w, 1), ahead + route.cfg.turn_radius)
+        # (with headland_turns out of the lanes' field where the corner is, with headland_corners 'rounded' into it
+        # where nothing else fits, no S then)
+        clear, here = route.clear([(p.x, p.y)]), []
+        found = next(((got, arc, out_of) for out_of in ([True, False] if clear and not strict else [clear])
+                      for r in (f * route.cfg.turn_radius for f in SMOOTH_RADII) if r >= 1e-3
+                      for a, b, arc in ways(p, u, w, r, out_of or not clear) for got in [fit(a, b, arc, out_of)]
+                      if got), None)
+        if found is None:
+            i += 1
+            continue
+        (s, e, new), arc, out_of = found
+        if clear and not out_of:
+            route.rounded.update((q.x, q.y) for q in arc)
+        # (the way to the arc's start is the piece's it lies on, the way on from its end too)
+        mid = [k] * (len(new) - 2) if same_position(out[s], arc[0]) else [own[s + 1]] + [k] * (len(new) - 3)
+        own[s:e + 1] = [own[s]] + mid + [k if same_position(arc[-1], out[e]) else own[e]]
+        out[s:e + 1] = new
+        i = s + len(new) - 1
+    lo: Dict[int, int] = {}
+    hi: Dict[int, int] = {}
+    for j, k in enumerate(own):
+        lo.setdefault(k, j)
+        hi[k] = j
+    kept = []
+    for k, info in enumerate(infos):
+        if k in lo:
+            start = lo[k] - shared[k]
+            if hi[k] > start:
+                kept.append(dataclasses.replace(info, start=start, end=hi[k]))
+    return out, kept
+
+
+def _turn_at(route: '_Route', poses: List[Pose2D],
+             infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
+    """Where the path turns on the spot (the heading jumping by more than footprint.SPIN, not backing up) and the way in
+    is longer than twice TURN_AHEAD, a pose TURN_AHEAD before the point on it, facing the way it came (where the body
+    fits so)."""
+    back = {i for info in infos if info.reverse for i in range(info.start, info.end + 1)}
+    first = {info.start for k, info in enumerate(infos) if k == 0 or infos[k - 1].section != info.section}
+    out, at = [], []  # (at: where the poses are put in, by the index of the one after)
+    for i, p in enumerate(poses):
+        q = poses[i - 1] if i else p
+        d = math.hypot(p.x - q.x, p.y - q.y)
+        if i not in first and angle_diff(p.yaw, q.yaw) > SPIN and d > 2.0 * TURN_AHEAD and not {i - 1, i} & back:
+            f = TURN_AHEAD / d
+            ahead = Pose2D(p.x + f * (q.x - p.x), p.y + f * (q.y - p.y), q.yaw)
+            if route.body([ahead]):
+                out.append(ahead)
+                at.append(i)
+        out.append(p)
+
+    def moved(j: int) -> int:
+        return j + bisect.bisect_right(at, j)
+
+    return out, [dataclasses.replace(info, start=moved(info.start), end=moved(info.end)) for info in infos]
 
 
 # entry point -----------------------------------------------------------------------------------------------
@@ -2785,7 +3151,10 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     away_from = [clean_polygon(w) for w in list(obstacles) + list(keep_out)]
     keep = [m + cfg.simplify_tolerance for m in margin_of]
     grown = [w.buffer(k - centre, QUAD_SEGS) if cfg.body and k > centre + 1e-9 else w for w, k in zip(away_from, keep)]
-    blocked = union(grown[:len(obstacles)])
+    # (and the gaps between two too narrow for the body, see _gaps)
+    gaps = [g for g in _gaps(away_from, margin_of, [max(k, centre) for k in keep], cfg) if g.intersects(area)] \
+        if cfg.body else []
+    blocked = union(grown[:len(obstacles)] + gaps)
     free = polygonal(area.difference(blocked)) if not blocked.is_empty else area
     if cfg.simplify_tolerance > 0 and not free.is_empty:
         simple = free.simplify(cfg.simplify_tolerance, preserve_topology=True)
@@ -3067,10 +3436,13 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if cfg.smooth_spins and not cfg.turn_on_spot:
         _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
+    if footprint is not None:
+        poses, segments = _round_corners(route, poses, segments)
     took('route')
     fitted, parts = None, len({s.section for s in segments})
     if footprint is not None and cfg.body_fit:
         poses, segments, fitted = _fit_body(route, poses, segments)
+        poses, segments = _round_corners(route, poses, segments)
         if fitted['fixed']:
             route.warnings.append(f'{fitted["fixed"]} places driven another way where the body would stick out, '
                                   f'{fitted["skipped_m"]:.1f} m of loops and lanes left out there')
@@ -3078,13 +3450,20 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             jumps = ', '.join(f'({x:.2f}, {y:.2f})' for x, y in fitted['jumps'])
             route.warnings.append(f'{fitted["left"]} places left out where the body doesn\'t fit and no other way does'
                                   + (f', the path jumps over them at {jumps}' if jumps else ''))
+        if fitted['unchecked']:
+            route.warnings.append('the path starts later or ends before where the body doesn\'t fit and no way does '
+                                  'from or to the dock\'s side: getting to or from ' + ', '.join(
+                                      f'({x:.2f}, {y:.2f})' for x, y in fitted['unchecked']) + ' the body isn\'t '
+                                  'checked')
         took('body')
-    turning = _field_turns(route, poses, segments) if route.field is not None else []
+    turning, arcs, deepest = _field_turns(route, poses, segments) if route.field is not None else ([], 0, 0.0)
     if turning:
         route.warnings.append(f'{len(turning)} places where a drive turns in the lanes\' field, no way along the '
                               'headland fits there: at ' + ', '.join(f'({x:.2f}, {y:.2f})' for x, y in turning))
     if not poses:
         raise PlanningError('nothing to mow: the area is too small for one loop or lane')
+    if footprint is not None:
+        poses, segments = _turn_at(route, poses, segments)
     if route.counts.get('lanes_shortened'):
         route.warnings.append(f'{route.counts["lanes_shortened"]} lanes along an edge shortened or left out: with '
                               f'blade_offset {cfg.blade_offset} m the centre runs that far off the blade\'s line, '
@@ -3122,8 +3501,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if fitted is not None:
         stats['body_fit'] = fitted
     if cfg.headland_turns:
-        stats['headland_turns'] = {'turns_in_field': len(turning), 'places': turning,
-                                   'crossings': route.counts.get('crossings', 0)}
+        stats['headland_turns'] = {'turns_in_field': len(turning), 'places': turning, 'arcs_in_field': arcs,
+                                   'arc_depth': deepest, 'crossings': route.counts.get('crossings', 0)}
 
     return CoveragePlan(
         poses=poses, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=route.loops,
@@ -3131,6 +3510,23 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         robot_space=drive_space, lane_region=lane_region, remaining=remaining,
         angles=[a for a, _ in passes] or [angle], transit_space=transit_space, body_space=body_space, config=cfg,
         section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
+
+
+def _gaps(shapes: List[object], margin_of: List[float], off: List[float], cfg: PlannerConfig) -> List[Polygon]:
+    """The gaps between two obstacles or areas to keep out of where the body, facing straight across, has less than
+    body_tolerance to spare with each one's margin kept (their real edges robot_width / 2 inside the lines, which lie
+    about body_tolerance off where the mower was): the hull round the parts of either closer than that to the other,
+    less both. Not where the centre keeps off already (off: how far from each one's line). The loops go round both
+    there, nothing drives in where the body would get through facing straight across at best."""
+    gaps = []
+    for i, a in enumerate(shapes):
+        for j in range(i + 1, len(shapes)):
+            b, width = shapes[j], margin_of[i] + margin_of[j] + cfg.body_tolerance
+            if not a.is_empty and not b.is_empty and off[i] + off[j] <= a.distance(b) < width:
+                near = union([a.intersection(b.buffer(width, QUAD_SEGS)), b.intersection(a.buffer(width, QUAD_SEGS))])
+                gaps += [p for p in polygons(near.convex_hull.difference(union([a, b])))
+                         if p.distance(a) < ON_EDGE and p.distance(b) < ON_EDGE]
+    return gaps
 
 
 def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
@@ -3144,7 +3540,7 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
                           for rings in (outlines, away_from))
     key = (outlines, away_from, tuple(margin_of), cfg.edge_margin, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
     found = getattr(_BODY_SPACE, 'last', None)
-    if found is None or found[0] != key:
+    if found is None or found[0] != (key, cfg.spin_margin):
         shared = hashlib.sha1(repr(key).encode()).hexdigest()
         with _KEPT_LOCK:
             space = _BODY_SPACES.get(shared)
@@ -3156,7 +3552,8 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
             space = subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb
             _keep(_BODY_SPACES, shared, space)
         space = wkb.loads(space)
-        found = _BODY_SPACE.last = (key, space, Footprint(space, cfg.robot_width, cfg.robot_front, cfg.robot_rear))
+        found = _BODY_SPACE.last = ((key, cfg.spin_margin), space, Footprint(space, cfg.robot_width, cfg.robot_front,
+                                                                             cfg.robot_rear, cfg.spin_margin))
     return wkb.loads(found[1].wkb), found[2]
 
 
@@ -3173,7 +3570,7 @@ def plan_footprint(plan: CoveragePlan) -> Optional[Footprint]:
     cfg = plan.config
     if cfg is None or not cfg.body or plan.body_space is None:
         return None
-    return Footprint(plan.body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear)
+    return Footprint(plan.body_space, cfg.robot_width, cfg.robot_front, cfg.robot_rear, cfg.spin_margin)
 
 
 def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],

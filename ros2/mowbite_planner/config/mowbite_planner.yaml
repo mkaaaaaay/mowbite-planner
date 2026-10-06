@@ -53,9 +53,10 @@
     # the mower's body [m] around its centre (base_link): robot_width wide, robot_front ahead, robot_rear behind
     # (negative: not set). With all three the outline and obstacles are where the centre drove (edges doesn't count
     # then): the turns, lane ends, loops and drives keep the body where it was while they were recorded, the margins
-    # off that. Without, hard edges (walls) keep the centre robot_width / 2 off them. blade_offset: the blade's
-    # centre this far left of the mower's (negative: right), the loops then go round with the blade on their outer
-    # side
+    # off that, the drives' corners are arcs where the body fits on one and a pose 2.5 cm before every turn on the
+    # spot lets FTC turn at the point. Without, hard edges (walls) keep the centre robot_width / 2 off them.
+    # blade_offset: the blade's centre this far left of the mower's (negative: right), the loops then go round with
+    # the blade on their outer side
     # where the lanes would lie in a part narrower than their turns need (a path, a strip between beds): lanes
     # anyway, or loops further in there, the pieces they come apart into driven on the way round (with
     # fill_pattern concentric all the loops, a part in one go)
@@ -63,6 +64,9 @@
     # clean stripes: in the lanes' field the path only runs straight along the lanes, the drives and turns go along the
     # headland the loops mow (across the field only straight where that way is more than twice as long or there's none)
     headland_turns: false
+    # with headland_turns and the body set: the drives along the headland rounded at their corners where the body fits
+    # on an arc (into the field only where none fits out of it, 12 cm deep at most), or sharp: turning on the spot there
+    headland_corners: rounded
     robot_width: -1.0
     robot_front: -1.0
     robot_rear: -1.0
@@ -75,6 +79,10 @@
     # how far the body keeps off the outline's and the obstacles' real edges [m], everywhere
     edge_margin: 0.05
     obstacle_margin: 0.10
+    # how much further off them it keeps turning on the spot and at a kink of more than 15 deg [m], anywhere on the last
+    # 0.1 m of the way in (OpenMower's FTC turns over the way to the point and drifts a few cm), 0.0: only at the point,
+    # the margins as everywhere
+    spin_margin: 0.05
     blade_offset: 0.0
     # the blade's centre this far ahead of the mower's centre (OpenMower's base_link between the drive wheels),
     # negative: behind it. The lanes start and end that much earlier

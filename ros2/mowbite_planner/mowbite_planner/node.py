@@ -40,9 +40,9 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, LANE, LANE_ORDERS, MAX_PASSES, NARROW_PARTS, PERIMETER,
-                      PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan,
-                      PlannerConfig, PlanningError, plan_coverage)
+from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
+                      NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
+                      TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, plan_coverage)
 
 XY = Tuple[float, float]
 
@@ -81,6 +81,10 @@ PARAMETERS = {
     'headland_turns': (False, "clean stripes: in the lanes' field the path only runs straight along the lanes, the "
                        'drives and turns go along the headland the loops mow (across the field only straight where '
                        'that way is more than twice as long or there is none)', None, ''),
+    'headland_corners': ('rounded', 'with headland_turns and the body set: the drives along the headland rounded at '
+                         'their corners where the body fits on an arc (into the field only where none fits out of it, '
+                         '12 cm deep at most), or sharp: turning on the spot there', lambda v: v in HEADLAND_CORNERS,
+                         'must be rounded or sharp'),
     'body_tolerance': (0.05, 'how much further out than the first loop a turn, a loop out or a drive may take the '
                        "mower's centre [m] (a recorded edge is a few cm off where the mower was), the body keeping the "
                        'margins', lambda v: v >= 0.0, 'must be >= 0'),
@@ -95,6 +99,10 @@ PARAMETERS = {
                     'further in for it', lambda v: v >= 0.0, 'must be >= 0'),
     'obstacle_margin': (0.10, "how far the body keeps off an obstacle's real edge [m], like edge_margin, the loops "
                         'round it further out for it', lambda v: v >= 0.0, 'must be >= 0'),
+    'spin_margin': (0.05, 'how much further the body keeps off the edges turning on the spot and at a kink of more '
+                    "than 15 deg [m], anywhere on the last 0.1 m of the way in (OpenMower's FTC turns over the way to "
+                    'the point and drifts a few cm). 0: only at the point, the margins as everywhere',
+                    lambda v: v >= 0.0, 'must be >= 0'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
     'blade_ahead': (0.0, "how far the blade's centre sits ahead of the mower's centre [m] (OpenMower's base_link "
@@ -177,6 +185,7 @@ RANGES = {
     'body_tolerance': (0.0, 1.0),
     'edge_margin': (0.0, 1.0),
     'obstacle_margin': (0.0, 1.0),
+    'spin_margin': (0.0, 1.0),
     'robot_rear': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),

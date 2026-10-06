@@ -115,7 +115,8 @@ def test_match_area():
 def test_margins_for():
     """An obstacle's or area's own margin, found by its outline as OpenMower sends it (float32, maybe closed). None for
     an outline the map doesn't have, and where it's no number 0..1 (10 meant as cm: the default rather than no plan)."""
-    data = {'areas': [area('front', 'mow', rect(0, 0, 10, 6), planner={'edge_margin': 0.2, 'obstacle_margin': 0}),
+    data = {'areas': [area('front', 'mow', rect(0, 0, 10, 6), planner={'edge_margin': 0.2, 'obstacle_margin': 0,
+                                                                       'spin_margin': 0.08}),
                       area('bed', 'obstacle', rect(4, 2, 5, 3), margin=0.3),
                       area('tree', 'obstacle', rect(6, 2, 7, 3)),
                       area('pond', 'mow', rect(1, 1, 2, 2), mowable=False, margin=0),
@@ -129,7 +130,7 @@ def test_margins_for():
     assert margins_for(None, outlines[:1]) == [None] and margins_for(data, []) == []
     # the area's own in its planner object
     cfg = settings_for(PlannerConfig(), None, area_job(data, 'front'))
-    assert (cfg.edge_margin, cfg.obstacle_margin) == (0.2, 0.0)
+    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.2, 0.0, 0.08)
 
 
 def test_area_job_without_dock_or_properties():
@@ -262,12 +263,12 @@ def test_area_settings():
     # only the ones OpenMower doesn't know (and so doesn't send its planner)
     own = area_settings(area('a', 'mow', rect(0, 0, 1, 1), angle=0.5, outline_count=1, outline_offset=0.1,
                              angle_min=0.1, angle_max=0.4, planner={'turn_radius': 0.3, 'headland_turns': True,
-                                                                    'turn_on_spot': True}),
+                                                                    'headland_corners': 'sharp', 'turn_on_spot': True}),
                         openmower=False)
     assert own == {'angle_min': 0.1, 'angle_max': 0.4, 'turn_radius': 0.3, 'headland_turns': True,
-                   'turn_on_spot': True}
+                   'headland_corners': 'sharp', 'turn_on_spot': True}
     cfg = PlannerConfig().with_overrides(own)
-    assert cfg.headland_turns is cfg.turn_on_spot is True
+    assert cfg.headland_turns is cfg.turn_on_spot is True and cfg.headland_corners == 'sharp'
 
 
 def test_settings_for_layers():

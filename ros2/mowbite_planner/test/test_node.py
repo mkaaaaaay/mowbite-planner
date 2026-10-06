@@ -373,7 +373,7 @@ def test_plan_from_parameters(node):
     ('crosshatch_angle_deg', math.nan), ('perimeter_order', 'middle'), ('perimeter_direction', 'up'),
     ('turn_types', ['u_turn', 'zigzag']), ('angle_min_deg', -math.inf), ('angle_max_deg', math.inf),
     ('angle_step_deg', 0.0), ('lane_overlap_passes', -1), ('max_path_poses', 3), ('perimeter_passes', 256),
-    ('lane_overlap_passes', 256),
+    ('lane_overlap_passes', 256), ('headland_corners', 'round'),
 ])
 def test_bad_parameters_are_refused(node, name, value):
     result = node.set_parameters([Parameter(name, value=value)])[0]
@@ -408,6 +408,12 @@ def test_new_parameters_are_used(node):
     assert node.set_parameters([Parameter('angle_max_deg', value=math.nan)])[0].successful
     res = call_plan_coverage(node)
     assert not res.success and 'angle_min' in res.message
+
+
+def test_headland_corners_parameter(node):
+    assert node.config(node.values()).headland_corners == 'rounded'
+    assert node.set_parameters([Parameter('headland_corners', value='sharp')])[0].successful
+    assert node.config(node.values()).headland_corners == 'sharp'
 
 
 def test_parsing():
