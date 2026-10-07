@@ -45,6 +45,10 @@ The full steps are in [`ros1/README.md`](ros1/README.md). In short:
 Going back to slic3r: remove `OM_PLANNER` from `.env`. Keep a map backup before going back to the official image,
 its `mower_map` drops the extra area properties.
 
+Once open_mower_ros has `OM_PLANNER=external` and keeps the extra area properties (PRs #363 and #364), no own image
+is needed: the planner runs as a container of its own next to the official image (`ros1/compose.yaml`, see
+[`ros1/README.md`](ros1/README.md#a-container-of-its-own-no-own-openmower-image)).
+
 ## Main settings
 
 | Setting | Default | |

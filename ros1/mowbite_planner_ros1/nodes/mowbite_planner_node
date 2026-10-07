@@ -63,8 +63,9 @@ turn that much further (angle_steps, kept in mowbite_planner_angle.json next to 
 angle_min..angle_max. mower_logic's own mow_angle_increment is best left at 0, both add up.
 
 In a container of its own (OM_PLANNER=external in open_mower_ros) the node ends with exit code 1 when the ROS master
-restarts (a new /run_id): the new master doesn't know its service and RPC methods, a restarted container registers
-them again. Its restart policy has to be on (restart: unless-stopped).
+restarts (a new /run_id): the new master doesn't know its service and RPC methods (nor the slic3r planner's), with
+the launch file's own_container everything ends and the restarted container registers them again. Its restart policy
+has to be on (restart: unless-stopped, see compose.yaml).
 """
 
 import collections

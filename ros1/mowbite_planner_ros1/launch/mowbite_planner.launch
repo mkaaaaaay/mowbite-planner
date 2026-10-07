@@ -2,8 +2,11 @@
      (/slic3r_coverage_planner/plan_path), so mower_logic and the mowing.plan RPC use it as they are.
      Start it instead of the slic3r_coverage_planner node, not next to it (slic3r comes as slic3r_classic). -->
 <launch>
+  <!-- own_container: in a container of its own (OM_PLANNER=external), where everything ends when the node does (the
+       ROS master restarted) and the container comes back (its restart policy), the slic3r planner registered again -->
+  <arg name="own_container" default="false"/>
   <node pkg="mowbite_planner_ros1" type="mowbite_planner_node" name="slic3r_coverage_planner" output="screen"
-        respawn="true" respawn_delay="10">
+        respawn="$(eval not own_container)" required="$(arg own_container)" respawn_delay="10">
     <!-- the blade's cutting width [m] (OM_BLADE_WIDTH). OpenMower's tool_width is the lane spacing, usually smaller -->
     <param name="mower_width" value="$(optenv OM_BLADE_WIDTH 0.18)"/>
     <!-- any MowBite Planner setting for all areas (an area's own go in its "planner" property in the map).

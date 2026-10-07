@@ -74,6 +74,27 @@ Without rebuilding OpenMower's image, the planner's [MQTT service](../ros2/READM
 mower's areas on request (Planner Studio, `ext.mowbite_planner.plan`), but `mower_logic` keeps mowing
 slic3r's plans then.
 
+## A container of its own (no own OpenMower image)
+
+Needs an open_mower_ros with `OM_PLANNER=external` (open_mower_ros PR #363) and a `mower_map` that keeps the extra
+area properties (#364), both not merged yet: until then [your own OpenMower image](#your-own-openmower-image).
+
+The official image stays as it is. On OpenMowerOS v2:
+
+1. In OpenMower's `.env` (Dockge, stack `openmower`): `OM_PLANNER=external`, open_mower_ros doesn't start slic3r
+   then.
+2. A stack of its own for the planner, e.g. `/opt/stacks/mowbite-planner/` with [`compose.yaml`](compose.yaml) and a
+   `.env` with `OPENMOWER_VERSION` (the `VERSION` of OpenMower's `.env`) and `OM_BLADE_WIDTH`. It builds the planner
+   on the mower from this repository on GitHub (public, or the path of a clone in `context:`) on that OpenMower image:
+   ROS, OpenMower's messages and slic3r come from it, about 11 MB on top.
+3. `docker compose up -d` there (Dockge: Deploy), then OpenMower's stack again. A newer planner or OpenMower
+   version: `docker compose up -d --build`.
+
+It keeps its settings and plans where OpenMower's container keeps its ROS data (`/home/openmower/ros`), the setting
+`planner` (`slic3r`) switches to OpenMower's slic3r planner, which it starts itself. When OpenMower restarts (a new
+ROS master) the container ends and comes back (`restart: unless-stopped`) to register again; it waits for
+OpenMower's master and never starts one of its own.
+
 ## Your own OpenMower image
 
 The planner goes into OpenMower's workspace as a package of its own, so the mower needs an image built from
