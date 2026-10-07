@@ -13,4 +13,4 @@ services:
       MOWER_MQTT_HOST: 127.0.0.1
       MOWER_MQTT_PORT: 1883
       # OpenMower's FTC controller only drives forwards: no K-turns, lanes far enough apart for U-turns
-      PLANNER_SETTINGS: '{"allow_reverse": false, "lane_order": "skip"}'
+      PLANNER_SETTINGS: '{"lane_order": "skip"}'

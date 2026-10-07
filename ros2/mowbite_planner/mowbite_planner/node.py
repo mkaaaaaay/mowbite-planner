@@ -89,9 +89,6 @@ PARAMETERS = {
                          'their corners where the body fits on an arc (into the field only where none fits out of it, '
                          '12 cm deep at most), or sharp: turning on the spot there', lambda v: v in HEADLAND_CORNERS,
                          'must be rounded or sharp'),
-    'body_tolerance': (0.05, 'how much further out than the first loop a turn, a loop out or a drive may take the '
-                       "mower's centre [m] (a recorded edge is a few cm off where the mower was), the body keeping the "
-                       'margins', lambda v: v >= 0.0, 'must be >= 0'),
     'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may be where '
               'it was then. hard: walls, the centre keeps robot_width / 2 off them. With the body set (robot_width, '
               'robot_front, robot_rear) always recorded',
@@ -99,7 +96,7 @@ PARAMETERS = {
     'body_fit': (True, 'where the body would still stick out, the path goes another way there that fits, leaving a '
                  'little of a loop or lane out where it has to. False: the path as planned', None, ''),
     'edge_margin': (0.05, "how far the body keeps off the outline's real edge [m] (where the body was while its "
-                    'centre drove the line), everywhere: body_tolerance takes nothing off it. The first loop moves '
+                    'centre drove the line), everywhere. The first loop moves '
                     'further in for it', lambda v: v >= 0.0, 'must be >= 0'),
     'obstacle_margin': (0.10, "how far the body keeps off an obstacle's real edge [m], like edge_margin, the loops "
                         'round it further out for it', lambda v: v >= 0.0, 'must be >= 0'),
@@ -137,15 +134,9 @@ PARAMETERS = {
                       'or neither, NaN: no range', lambda v: not math.isinf(v), 'must be a number or NaN'),
     'angle_max_deg': (math.nan, 'see angle_min_deg', lambda v: not math.isinf(v), 'must be a number or NaN'),
     'angle_step_deg': (5.0, 'between the lane directions optimal tries [deg]', lambda v: v > 0.0, 'must be > 0'),
-    'turn_radius': (0.25, 'radius of the turns between lanes [m]. Tighter ones (down to half the lane '
-                    'spacing, then turning on the spot) only where the headland is too small',
+    'turn_radius': (0.25, 'radius of the turns between lanes, no arc of a turn, a drive or a loop out is tighter [m]. '
+                    'Where none fits a drive turns on the spot',
                     lambda v: v >= 0.0, 'must be >= 0'),
-    'min_turn_radius': (0.0, 'no arc of a turn, a drive, a loop out or a K-turn tighter than this [m]: where the inner '
-                        'wheel stands or turns backwards (about half the track of the drive wheels) it scuffs the lawn '
-                        'more than turning on the spot once. 0: any', lambda v: v >= 0.0, 'must be >= 0'),
-    'allow_reverse': (True, 'K-turns (forward arc, a short way back, forward arc) where a forward turn of '
-                      'turn_radius does not fit. Off for controllers that only drive forwards (OpenMower FTC)',
-                      None, ''),
     'turn_on_spot': (False, 'turning on the spot where the path would drive a loop (for lawns that take it): no bulb '
                      'between lanes, a drive arriving on the spot rather than round a loop, the body fitting turning',
                      None, ''),
@@ -157,15 +148,6 @@ PARAMETERS = {
     'route_order': ('nearest', 'cells: nearest (the closest one not mowed yet next) or optimized (the order with the '
                     'shortest drives between them, takes a little longer to plan)', lambda v: v in ROUTE_ORDERS,
                     'must be nearest or optimized'),
-    'perimeter_corner_radius': (0.15, 'outline corners of the perimeter loops are rounded with this radius '
-                                '[m], 0 = sharp', lambda v: v >= 0.0, 'must be >= 0'),
-    'waypoint_spacing': (0.10, 'distance between path poses [m], 0 = only where the direction changes',
-                         lambda v: v >= 0.0, 'must be >= 0'),
-    'transit_clearance': (0.05, 'transits keep this far from the outer loop and obstacle loops [m]',
-                          lambda v: v >= 0.0, 'must be >= 0'),
-    'simplify_tolerance': (0.01, 'the boundary and obstacles are simplified this much first [m]',
-                           lambda v: v >= 0.0, 'must be >= 0'),
-    'min_lane_length': (0.10, 'shorter pieces of a lane are left out [m]', lambda v: v >= 0.0, 'must be >= 0'),
     'bend_max_gap': (0.0, 'a row split by an obstacle with at most this much between its pieces becomes one lane '
                      'bending around it [m], 0 = split', lambda v: v >= 0.0, 'must be >= 0'),
     'bend_max_offset': (0.5, "how far a bend may leave its lane's line [m]", lambda v: v >= 0.0, 'must be >= 0'),
@@ -184,10 +166,8 @@ RANGES = {
     'lane_overlap_passes': (0, MAX_PASSES),
     'angle_step_deg': (0.5, 90.0),
     'turn_radius': (0.0, 5.0),
-    'min_turn_radius': (0.0, 5.0),
     'robot_width': (-1.0, 5.0),
     'robot_front': (-1.0, 5.0),
-    'body_tolerance': (0.0, 1.0),
     'edge_margin': (0.0, 1.0),
     'obstacle_margin': (0.0, 1.0),
     'spin_margin': (0.0, 1.0),

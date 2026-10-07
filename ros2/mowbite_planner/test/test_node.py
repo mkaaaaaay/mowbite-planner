@@ -281,7 +281,7 @@ def test_plan_coverage_request_overrides(node):
     res = call_plan_coverage(node, overrides=[
         override('fill_pattern', 'crosshatch'), override('crosshatch_angle_deg', 60.0),
         override('angle_strategy', 'optimal'), override('angle_min_deg', 10.0), override('angle_max_deg', 20.0),
-        override('perimeter_passes', 1), override('allow_reverse', False), override('turn_types', ['u_turn', 'pivot'])])
+        override('perimeter_passes', 1), override('turn_types', ['u_turn', 'pivot'])])
     assert res.success, res.message
     assert len(res.angles) == 2 and res.angles[0] == res.angle
     assert math.radians(10.0) - 1e-9 <= res.angle <= math.radians(20.0) + 1e-9
@@ -382,7 +382,7 @@ def test_bad_parameters_are_refused(node, name, value):
 
 def test_parameters_are_used(node):
     assert all(r.successful for r in node.set_parameters([
-        Parameter('frame_id', value='garden'), Parameter('allow_reverse', value=False),
+        Parameter('frame_id', value='garden'),
         Parameter('lane_order', value='skip'), Parameter('angle_strategy', value='fixed'),
         Parameter('fixed_angle_deg', value=45.0)]))
     res = call_plan_coverage(node)
@@ -398,7 +398,7 @@ def test_new_parameters_are_used(node):
         Parameter('angle_strategy', value='optimal'), Parameter('angle_step_deg', value=10.0),
         Parameter('angle_min_deg', value=30.0), Parameter('angle_max_deg', value=40.0),
         Parameter('perimeter_order', value='last'), Parameter('perimeter_direction', value='cw'),
-        Parameter('turn_types', value=['k_turn', 'u_turn']), Parameter('lane_overlap_passes', value=1)]))
+        Parameter('turn_types', value=['detour', 'u_turn']), Parameter('lane_overlap_passes', value=1)]))
     res = call_plan_coverage(node)
     assert res.success, res.message
     assert len(res.angles) == 2 and math.radians(30.0) - 1e-9 <= res.angle <= math.radians(40.0) + 1e-9

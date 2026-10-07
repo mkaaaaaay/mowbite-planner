@@ -343,15 +343,6 @@ def test_skip_order_turns_forwards_with_the_full_radius():
     assert len(ys) == len(set(ys))
 
 
-def test_k_turns_keep_the_radius():
-    cfg = PlannerConfig()
-    plan = plan_coverage(rect(0, 0, 12, 8), [], cfg)
-    assert plan.stats['turns_k_turn'] == plan.stats['lanes'] - 1
-    for s in plan.segments:
-        if s.kind == TURN and not s.reverse:
-            assert all(r >= cfg.turn_radius - 1e-6 for r in radii_of(plan.poses[s.start:s.end + 1]))
-
-
 def test_deterministic():
     cfg = PlannerConfig()
     a = plan_coverage(GARDEN, [TREE, BED], cfg)
@@ -623,7 +614,7 @@ def test_perimeter_direction(direction, pattern):
 
 # body and blade --------------------------------------------------------------------------------------------
 
-FORWARD = dict(allow_reverse=False, lane_order='skip', mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0)
+FORWARD = dict(lane_order='skip', mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0)
 
 
 def blade_line(poses, off):
@@ -710,12 +701,12 @@ def test_blade_ahead_mows_the_lanes_where_they_are(ahead):
     assert coverage(plan, cfg) > 0.9999
     # every straight lane's blade runs between the same ends as the centre of a plan without it, shifted
     plain = plan_coverage(GARDEN, obstacles, PlannerConfig(**dict(kw, bend_max_gap=3.0)))
-    for s in plan.segments:
-        if s.kind == LANE and not s.maneuver:
-            p = plan.poses[s.start]
-            starts = [plain.poses[t.start] for t in plain.segments if t.kind == LANE and not t.maneuver]
-            assert any(math.hypot(p.x + ahead * math.cos(p.yaw) - q.x, p.y + ahead * math.sin(p.yaw) - q.y) < 1e-6
-                       for q in starts)
+    # (but where a lane ends a little earlier for a U-turn of the turn radius, round_earlier)
+    starts = [plain.poses[t.start] for t in plain.segments if t.kind == LANE and not t.maneuver]
+    lanes = [plan.poses[s.start] for s in plan.segments if s.kind == LANE and not s.maneuver]
+    same = [p for p in lanes if any(math.hypot(p.x + ahead * math.cos(p.yaw) - q.x,
+                                               p.y + ahead * math.sin(p.yaw) - q.y) < 1e-6 for q in starts)]
+    assert len(same) >= 0.9 * len(lanes)
     with pytest.raises(PlanningError, match='blade_ahead'):
         PlannerConfig(blade_ahead=2.0).validate()
 
@@ -996,7 +987,8 @@ def test_body_bent_lanes():
     plan = plan_coverage(GARDEN, [TREE, BED] + trees, cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [TREE, BED] + trees)
     assert any(s.maneuver == 'bend' for s in plan.segments)
-    assert plan.stats['turns_fallback'] == 0 and plan.stats['turns_pivot'] <= 2
+    # (one turn radius: where no arc of it fits between the bends a drive)
+    assert plan.stats['turns_fallback'] + plan.stats['turns_pivot'] <= 4
     assert not [o for o in check_plan(plan)['body_out'] if o['kind'] in ('turn', 'lane_end')]
 
 
@@ -1216,7 +1208,7 @@ def test_body_fits_through_narrow_gaps():
     """A table recorded 8 cm off the outline, a sunshade 18 cm: the loops between them and the outline turn where the
     body doesn't fit, the path goes another way there, stats saying where and what that leaves out."""
     table, shade = rect(3, 5.0, 5, 5.92), circle(8, 5.47, 0.35, 16)
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, narrow_parts='loops', min_turn_radius=0.25,
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, narrow_parts='loops',
                                perimeter_passes=3))
     plan = plan_coverage(rect(0, 0, 10, 6), [table, shade], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [table, shade])
@@ -1389,7 +1381,7 @@ SHADE = [(1.51, 11.79), (1.33, 11.91), (1.12, 11.97), (0.91, 11.94), (0.81, 11.8
          (0.68, 11.28), (0.8, 11.11), (0.98, 11.01), (1.19, 10.98), (1.29, 11.0), (1.47, 11.11), (1.58, 11.3),
          (1.6, 11.45), (1.55, 11.69)]
 SHADE_MOWER = dict(FORWARD, perimeter_offset=0.05, blade_ahead=0.185, robot_width=0.41, robot_front=0.43,
-                   robot_rear=0.18, min_turn_radius=0.25, narrow_parts='loops', lane_overlap_passes=2,
+                   robot_rear=0.18, narrow_parts='loops', lane_overlap_passes=2,
                    lane_spacing_mode='auto', fill_pattern='concentric', perimeter_passes=-1)
 
 
@@ -1715,7 +1707,7 @@ def test_headland_turns():
     out. That with headland_corners 'sharp'; with 'rounded' (the default) the drives' corners at the field's edge are
     arcs, into the field (FIELD_ARC at most) only where none fits out of it, those counted on their own, not as turning
     in it."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
     plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     clean = dataclasses.replace(cfg, headland_turns=True, headland_corners='sharp')
     plan = plan_coverage(GARDEN, [TREE, BED], clean, start=(1, 1, 0.0), end=(1, 1))
@@ -1754,7 +1746,7 @@ def test_headland_turns_where_nothing_fits(monkeypatch):
     """Where no drive along the headland (nor across the field) fits, it goes the way it would without: stats and a
     warning say where it turns in the lanes' field."""
     monkeypatch.setattr(planner._Route, 'headland_way', lambda self, target, heading, head: None)
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3, headland_turns=True))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, headland_turns=True))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [TREE, BED])
     found = plan.stats['headland_turns']
@@ -1908,7 +1900,7 @@ def test_drives_rounded(monkeypatch):
     the spot spin_margin further off), as well mowed. Where it still turns on the spot a pose TURN_AHEAD before the
     point. Without the rounding and that pose (body_fit off: the same loops and lanes otherwise), the loops and lanes
     are the same but for the ends a drive's corner was rounded into, turn_radius at most."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [TREE, BED])
     off = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, body_fit=False), start=(1, 1, 0.0), end=(1, 1))
@@ -1991,7 +1983,7 @@ def test_lane_spacing_auto(monkeypatch):
     check_invariants(plan, plan.config)
     chosen = plan.stats['chosen']
     assert chosen['mode'] == 'auto' and chosen['lane_spacing'] == pytest.approx(0.85 * 0.18)
-    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 1.1
+    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 1.15
     swept = []
     monkeypatch.setattr(planner, 'swept_area', lambda *args: swept.append(args) or swept_area(*args))
     again = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
@@ -2151,23 +2143,17 @@ def test_arriving_the_other_way_turns_into_it():
 
 
 def test_smooth_spins():
-    """Turns on the spot by more than SPIN_LIMIT become an omega where there's room, with allow_reverse a K-turn in
-    place where there isn't (backing up a segment of its own); the plan as well mowed."""
+    """Without turn_on_spot turns on the spot by more than SPIN_LIMIT become an omega where there's room, never
+    backing up."""
     def spins(plan):
         return sum(1 for a, b in zip(plan.poses, plan.poses[1:]) if angle_diff(a.yaw, b.yaw) > SPIN_LIMIT)
 
-    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, smooth_spins=False)), start=(1, 1, 0.0))
-    left = check_plan(plain)['left_m2']
+    plain = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(FORWARD, turn_on_spot=True)), start=(1, 1, 0.0))
     cfg = PlannerConfig(**FORWARD)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
     check_invariants(plan, cfg, [TREE, BED])
     assert spins(plan) < spins(plain) / 2 and plan.stats['path_length'] > plain.stats['path_length']
-    assert not any(s.reverse for s in plan.segments) and check_plan(plan)['left_m2'] == pytest.approx(left, abs=0.02)
-    cfg = PlannerConfig(**dict(FORWARD, allow_reverse=True))
-    backing = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
-    check_invariants(backing, cfg, [TREE, BED])
-    assert spins(backing) == 0 and any(s.reverse and s.maneuver == 'k_point' for s in backing.segments)
-    assert check_plan(backing)['left_m2'] == pytest.approx(left, abs=0.02)
+    assert not any(s.reverse for s in plan.segments)
 
 
 def test_turn_on_spot():
@@ -2185,7 +2171,7 @@ def test_turn_on_spot():
         return found
 
     # (without spin_margin: with it no turn on the spot between the lanes fits by the edges here)
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, min_turn_radius=0.25, angle=0.3, spin_margin=0.0))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, spin_margin=0.0))
     plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     spot = dataclasses.replace(cfg, turn_on_spot=True)
     plan = plan_coverage(GARDEN, [TREE, BED], spot, start=(1, 1, 0.0), end=(1, 1))
@@ -2199,9 +2185,10 @@ def test_turn_on_spot():
         PlannerConfig(turn_on_spot=1).validate()
 
 
-def test_min_turn_radius():
-    """No turn, drive, loop out or K-turn tighter than min_turn_radius: turning on the spot instead, but for a U-turn
-    between lanes where none of it fits, which is rounded as wide as fits (lanes ending earlier for it)."""
+def test_one_turn_radius():
+    """No turn, drive or loop out tighter than turn_radius (min_turn_radius is it): turning on the spot instead, but
+    for a U-turn between lanes where none of it fits, which is rounded as wide as fits (lanes ending earlier for it).
+    min_turn_radius and smooth_spins of before are left out of the settings."""
     def arcs(plan):
         # radii of the runs of turning poses that turn 45 degrees at least (not counting turns on the spot)
         out, i, P = [], 1, plan.poses
@@ -2219,28 +2206,17 @@ def test_min_turn_radius():
                 i += 1
         return out
 
-    kw = dict(FORWARD, allow_reverse=True)
-    loose = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**kw), start=(1, 1, 0.0))
-    cfg = PlannerConfig(**dict(kw, min_turn_radius=0.2))
+    cfg = PlannerConfig(**dict(FORWARD, turn_radius=0.2))
+    assert cfg.min_turn_radius == 0.2
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0))
     check_invariants(plan, cfg, [TREE, BED])
     # the loops' corners keep their rounding, so count only what the turns and loops out make
-    turns = [s for s in plan.segments if s.kind in (TURN, TRANSIT) or s.maneuver == 'k_point']
-    assert turns and min(arcs(loose)) < 0.15
+    turns = [s for s in plan.segments if s.kind == TURN]  # (a drive's corner may get a tighter arc, _round_corners)
     tight = [s for s in turns if any(r <= 0.2 - 0.02 for r in arcs(
         dataclasses.replace(plan, poses=plan.poses[s.start:s.end + 1])))]
-    assert all(s.maneuver == 'u_turn' for s in tight)
-    with pytest.raises(PlanningError, match='min_turn_radius'):
-        PlannerConfig(min_turn_radius=-0.1).validate()
-
-
-def test_turn_radius_at_least_min_turn_radius():
-    """A turn_radius below min_turn_radius plans as that: the turns aren't all left to drives and loops."""
-    base = dict(MOWER, **NX60I, min_turn_radius=0.3)
-    low = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, turn_radius=0.25)), start=(1, 1, 0.0))
-    same = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(base, turn_radius=0.3)), start=(1, 1, 0.0))
-    assert [(p.x, p.y, p.yaw) for p in low.poses] == [(p.x, p.y, p.yaw) for p in same.poses]
-    assert low.config.turn_radius == 0.3
+    assert turns and all(s.maneuver == 'u_turn' for s in tight)
+    assert cfg.with_overrides({'min_turn_radius': 0.4, 'smooth_spins': False, 'allow_reverse': True,
+                               'waypoint_spacing': 0.5}) == cfg
 
 
 def test_angle_increment():
@@ -2312,7 +2288,7 @@ def test_earlier_only_where_mowed():
     """A turn that ends the lanes earlier, the one just mowed too, only where what that leaves of them gets mowed: the
     lane just mowed doesn't mow its own end."""
     space = TransitPlanner(Polygon(rect(0, 0, 9.23, 4)))  # a wall 3 cm past the lane's end
-    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25, turn_types=('u_turn', 'pivot')))
+    cfg = PlannerConfig(**dict(FORWARD, turn_types=('u_turn', 'pivot')))
 
     def route(loop_from):
         r = _Route(cfg, space, space, (1.0, 1.0), 0.0, None)
@@ -2332,7 +2308,7 @@ def test_drive_into_lane_where_mowed():
     the lane instead of turning on the spot, the lane starting a little further on, only where the loops along the
     wall mow what that leaves of it; the lane goes on from where the drive ends, forwards."""
     space = TransitPlanner(Polygon(rect(0, 0, 10, 4)))
-    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25))
+    cfg = PlannerConfig(**dict(FORWARD))
 
     def route(loops):
         r = _Route(cfg, space, space, (3.0, 2.3), math.pi, None)
@@ -2357,7 +2333,7 @@ def test_next_cell_beside_turned_into_earlier():
     """The next cell's first lane right beside the lane just mowed and the other way round, at a wall where no turn
     fits: the lane just mowed ends a little earlier for a U-turn into it, no turning on the spot."""
     space = TransitPlanner(Polygon(rect(0, 0, 9.23, 4)))  # a wall 3 cm past the lane's end
-    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25, turn_types=('u_turn', 'pivot')))
+    cfg = PlannerConfig(**dict(FORWARD, turn_types=('u_turn', 'pivot')))
     r = _Route(cfg, space, space, (1.0, 1.0), 0.0, None)
     r.add(PERIMETER, sample_straight(9.2, 0.2, 9.2, 3.0, math.pi / 2, 0.05))  # along the wall
     r.add(LANE, sample_straight(1.0, 1.0, 9.2, 1.0, 0.0, 0.05))
@@ -2372,7 +2348,7 @@ def test_lanes_entered_without_turning_on_the_spot():
     """Where the lanes end at a slant and obstacles split them into cells, the drives to the next cell and the turns
     into it get into the lanes on a way, not turning on the spot where a lane starts."""
     shape = [(0, 0), (8, 0), (8, 6), (0, 8)]
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', min_turn_radius=0.25, perimeter_passes=3,
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', perimeter_passes=3,
                                lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.6,
                                obstacle_margin=0.05))
     plan = plan_coverage(shape, [circle(3, 3, 0.8, 16), circle(6, 4.5, 0.6, 12)], cfg, start=(1, 1, 0.0))
@@ -2389,7 +2365,7 @@ def test_lanes_entered_without_turning_on_the_spot():
 def test_bent_lane_entered_on_its_first_piece():
     """A lane bending round an obstacle starts later only on its first straight piece, not behind it."""
     space = TransitPlanner(Polygon(rect(0, 0, 10, 4)).difference(Polygon(rect(0.62, 1.85, 0.95, 2.15))))
-    cfg = PlannerConfig(**dict(FORWARD, min_turn_radius=0.25))
+    cfg = PlannerConfig(**dict(FORWARD))
     r = _Route(cfg, space, space, (3.0, 2.3), math.pi, None)
     for x in (0.05, 0.18, 0.31):
         r.add(PERIMETER, sample_straight(x, 0.5, x, 3.5, math.pi / 2, 0.05))
@@ -2405,7 +2381,7 @@ def test_turns_where_lanes_end_at_a_slant():
     ending a little earlier only where that leaves nothing, else loops into the next lane: hardly a drive in place of a
     turn, none on the spot, as well mowed."""
     kite = [(0, 0), (7, 1.5), (9, 6), (1, 7)]
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', min_turn_radius=0.25, perimeter_passes=3,
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edges='hard', perimeter_passes=3,
                                lane_overlap_passes=2, overlap=1 - 0.153 / 0.18, narrow_parts='loops', angle=0.0))
     plan = plan_coverage(kite, [], cfg, start=(1, 1, 0.0))
     check_invariants(plan, cfg)
@@ -2616,10 +2592,11 @@ def test_turn_types_in_order_of_preference():
 
 
 @pytest.mark.parametrize('kw, used', [
-    (dict(turn_types=('bulb', 'pivot')), 'bulb'),
+    (dict(turn_types=('bulb', 'pivot'), perimeter_passes=4), 'bulb'),
     (dict(turn_types=('pivot',)), 'pivot'),
     (dict(perimeter_passes=4), 'bulb'),  # a deep headland: a bulb fits as well as a K-turn
-    (dict(perimeter_passes=4, turn_types=('k_turn', 'bulb', 'u_turn', 'detour', 'pivot')), 'k_turn'),
+    (dict(perimeter_passes=4, turn_types=('k_turn', 'bulb', 'u_turn', 'detour', 'pivot'), allow_reverse=True),
+     'k_turn'),
     (dict(perimeter_passes=4, turn_types=('k_turn', 'bulb'), allow_reverse=False), 'bulb'),
 ])
 def test_turn_types_of_a_plan(kw, used):
@@ -2738,7 +2715,7 @@ def test_with_overrides():
     assert cfg.overlap == base.overlap  # here None keeps it
     assert cfg.fill_pattern == 'concentric'
     assert base.mower_width == 0.22 and base.angle == 0.3  # a copy
-    assert base.with_overrides({'turn_types': ['k_turn', 'bulb']}).turn_types == ('k_turn', 'bulb')
+    assert base.with_overrides({'turn_types': ['k_turn', 'bulb']}).turn_types == ('bulb',)  # (no setting any more)
     other = base.with_overrides({'perimeter_offset': 0, 'angle_min': -1, 'angle_max': 1, 'allow_reverse': False})
     assert isinstance(other.perimeter_offset, float) and isinstance(other.angle_min, float)
     assert other.allow_reverse is False

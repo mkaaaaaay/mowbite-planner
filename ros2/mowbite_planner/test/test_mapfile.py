@@ -196,7 +196,7 @@ def test_broken_maps():
     for props, what in (({'planner': {'turn_types': 5}}, 'turn_types'),
                         ({'planner': {'perimeter_passes': 'x'}}, 'perimeter_passes'),
                         ({'planner': {'mower_width': -1}}, 'mower_width'),
-                        ({'planner': {'allow_reverse': 'no'}}, 'allow_reverse'),
+                        ({'planner': {'turn_on_spot': 'no'}}, 'turn_on_spot'),
                         ({'planner': {'colour': 'green'}}, 'colour'), ({'planner': 'concentric'}, 'planner'),
                         ({'planner': [1]}, 'planner'), ({'outline_count': 300}, 'perimeter_passes')):
         with pytest.raises(PlanningError, match=f"area 'front': .*{what}"):

@@ -66,7 +66,7 @@ LANE_SPACING_MODES = ('fixed', 'auto')
 # lane spacings lane_spacing_mode 'auto' tries, from lane_spacing_max down to lane_spacing_min
 SPACING_CANDIDATES = 5
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
-TURN_TYPES = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot')
+TURN_TYPES = ('u_turn', 'bulb', 'detour', 'pivot')
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
 EDGES = ('recorded', 'hard')
 # headland_turns: the drives along the headland 'rounded' where an arc fits at their corners, or 'sharp' (on the spot)
@@ -218,19 +218,15 @@ class PlannerConfig:
     # on the outline. OpenMower records outlines driving the mower's centre along the edge and uses 0,
     # negative goes outside the outline (OpenMower's outline_offset allows that too)
     perimeter_offset: Optional[float] = None
-    # m, radius of the turns between lanes. Tighter ones (down to half the lane spacing, then turning on
-    # the spot) only where the headland is too small
+    # m, radius of the turns between lanes, and no arc of a turn, a drive or a loop out is tighter (min_turn_radius):
+    # where none fits the drives turn on the spot instead (with the body checked a drive's corner gets a tighter arc
+    # where that fits, see _round_corners), a turn between lanes is rounded as wide as fits (at a slant where the lanes
+    # end at one, the lanes ending a little earlier for it where that's what it takes, else a loop into the next lane,
+    # see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
+    # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane)
     turn_radius: float = 0.25
-    # m, no arc of a turn, a drive, a loop out or a K-turn tighter than this (a smaller turn_radius counts as this):
-    # drives, loops out and K-turns turn on the spot instead (with the body checked a drive's corner gets a tighter arc
-    # where that fits, see _round_corners), a turn between lanes where none of it fits is rounded as wide as fits (at a
-    # slant where the lanes end at one, the lanes ending a little earlier for it where that's what it takes, else a loop
-    # into the next lane, see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on
-    # a way into it where one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane). 0:
-    # any (the corners of loops are rounded as before)
-    min_turn_radius: float = 0.0
-    allow_reverse: bool = True  # K-turns, which back up a little
-    # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'). Larger
+    allow_reverse: bool = False  # K-turns, which back up a little (fixed, see INTERNAL: OpenMower drives forwards)
+    # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'detour', 'pivot'). Larger
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
@@ -243,12 +239,11 @@ class PlannerConfig:
     # next to them and back out), so no trips along a path from piece to piece. With fill_pattern concentric 'loops'
     # drives all the loops that way, a part of the area in one go
     narrow_parts: str = 'lanes'
-    # where the path would turn on the spot by more than SPIN_LIMIT, a loop out (an omega) in its place where it fits
-    smooth_spins: bool = True
-    # turning on the spot where the path would drive a loop (for lawns that take it): no loop out (smooth_spins), no
-    # bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive arriving on
-    # the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way. The body fits
-    # turning like everywhere
+    # turning on the spot where the path would drive a loop (for lawns that take it). Off: where the path would turn on
+    # the spot by more than SPIN_LIMIT a loop out (an omega) in its place where it fits (_smooth_spins). On: no loop
+    # out, no bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive
+    # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way.
+    # The body fits turning like everywhere
     turn_on_spot: bool = False
     # the lanes' field kept clean (where they lie but for what the loops mow and 2 turn_radius at their ends, where the
     # turns go): in there the path only runs straight along the lanes. Drives go along the headland round it (out of the
@@ -396,17 +391,25 @@ class PlannerConfig:
         return tuple(pts if Polygon(pts).exterior.is_ccw else pts[::-1])
 
     @property
+    def min_turn_radius(self) -> float:
+        """m, no arc tighter than this: the turns' radius (one for all)."""
+        return self.turn_radius
+
+    @property
     def allowed_turns(self) -> Tuple[str, ...]:
         return tuple(t for t in self.turn_types if (t != 'k_turn' or self.allow_reverse) and
                      (t != 'bulb' or not self.turn_on_spot))
 
     @classmethod
     def names(cls) -> Tuple[str, ...]:
-        return tuple(f.name for f in dataclasses.fields(cls))
+        """The settings, not the INTERNAL ones."""
+        return tuple(f.name for f in dataclasses.fields(cls) if f.name not in INTERNAL)
 
     def with_overrides(self, overrides: Mapping[str, Any]) -> 'PlannerConfig':
         """A copy with some settings changed, e.g. per area. Unknown names are an error, ints are fine for
         floats, None keeps the setting."""
+        # (the ones that were settings once, from a settings file or a map of then)
+        overrides = {n: v for n, v in overrides.items() if n not in INTERNAL and n not in RETIRED}
         unknown = sorted(set(overrides) - set(self.names()))
         if unknown:
             raise PlanningError(f'unknown planner settings: {", ".join(unknown)}')
@@ -419,7 +422,7 @@ class PlannerConfig:
                     value = [t.strip() for t in value.split(',') if t.strip()]
                 if not isinstance(value, (list, tuple)):
                     raise PlanningError(f'turn_types must be a list of turn types, got {value!r}')
-                value = tuple(value)
+                value = tuple(t for t in value if t not in RETIRED)
             elif name == 'robot_outline' and isinstance(value, (list, tuple)):
                 value = tuple(tuple(p) if isinstance(p, (list, tuple)) else p for p in value)
             elif name in _FLOATS and isinstance(value, int) and not isinstance(value, bool):
@@ -448,7 +451,6 @@ class PlannerConfig:
         finite('mower_width', 0.0, lo_open=True)
         finite('overlap', 0.0, 1.0, hi_open=True)
         finite('turn_radius', 0.0, MAX_TURN_RADIUS)
-        finite('min_turn_radius', 0.0, MAX_TURN_RADIUS)
         finite('perimeter_corner_radius', 0.0)
         finite('waypoint_spacing', 0.0)
         finite('transit_clearance', 0.0)
@@ -517,14 +519,21 @@ class PlannerConfig:
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
-                any(t not in TURN_TYPES for t in self.turn_types):
+                any(t not in TURN_TYPES + ('k_turn',) for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
         for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
-                     'smooth_spins', 'turn_on_spot', 'headland_turns', 'body_fit'):
+                     'turn_on_spot', 'headland_turns', 'body_fit'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 
 
+# fixed, no settings (with_overrides leaves them out): OpenMower's FTC drives forwards (no K-turns), the rest is how
+# the planner works inside
+INTERNAL = ('allow_reverse', 'waypoint_spacing', 'simplify_tolerance', 'min_lane_length', 'transit_clearance',
+            'body_tolerance', 'perimeter_corner_radius')
+# settings (and a turn type) of before, with_overrides leaves them out: min_turn_radius is turn_radius, smooth_spins
+# not turn_on_spot
+RETIRED = ('min_turn_radius', 'smooth_spins', 'k_turn')
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
 _OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear',
              'robot_outline', 'lane_spacing_min', 'lane_spacing_max')
@@ -1066,6 +1075,9 @@ class _Route:
         self.body = footprint.poses_fit if footprint is not None else None
         # (a turn between lanes: spin_margin all along it too)
         self.turn_body = (lambda poses: footprint.poses_fit(poses, True)) if footprint is not None else None
+        # a turn between lanes rounded as wide as fits where it would turn on the spot (round_earlier): where an arc of
+        # one may be (only pivots allowed: on the spot)
+        self.rounds = cfg.min_turn_radius > 0 and any(t in cfg.allowed_turns for t in ('u_turn', 'bulb', 'detour'))
         self.transit = transit  # shortest ways, through the drivable areas too
         self.area = area  # turns and loops stay inside the mowing area
         self.step = cfg.waypoint_spacing
@@ -1700,8 +1712,8 @@ class _Route:
             return None
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.cfg.allow_reverse, self.step, self.area.is_free, self.detour_path,
-                         self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius)
-        if (turn is None or turn.name == 'pivot') and self.cfg.min_turn_radius > 0:
+                         self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0)
+        if (turn is None or turn.name == 'pivot') and self.rounds:
             earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
             if earlier is not None:
                 turn, a = earlier
@@ -1796,7 +1808,7 @@ class _Route:
                 def turn_to(entry: XY, types) -> Optional[Maneuver]:
                     return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
                                      self.turn_space(entry), self.detour_path, types, self.turn_body,
-                                     self.cfg.min_turn_radius)
+                                     self.cfg.min_turn_radius if self.rounds else 0.0)
 
                 # the turn goes level with the lane end further out, where the body may not fit (body_ends only
                 # made room for a turn level with each end): this lane starts level with the last one's end then,
@@ -1819,7 +1831,7 @@ class _Route:
                             self._count('lanes_body')
                 if turn is None:
                     turn = turn_to(a, types)
-                if (turn is None or turn.name == 'pivot') and self.cfg.min_turn_radius > 0:
+                if (turn is None or turn.name == 'pivot') and self.rounds:
                     earlier = self.round_earlier(a, yaw, rest)
                     if earlier is not None:
                         turn, a = earlier
@@ -3084,8 +3096,6 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     lane spacing and loops it was planned with."""
     cfg = config or PlannerConfig()
     cfg.validate()
-    if cfg.turn_radius < cfg.min_turn_radius:  # no turn tighter than that, the turns are that wide then
-        cfg = dataclasses.replace(cfg, turn_radius=cfg.min_turn_radius)
     if cfg.lane_spacing_mode != 'auto':
         return _plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins)
     t0 = time.perf_counter()
@@ -3504,7 +3514,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         else:
             loops()
             lanes()
-    if cfg.smooth_spins and not cfg.turn_on_spot:
+    if not cfg.turn_on_spot:
         _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
     if footprint is not None:

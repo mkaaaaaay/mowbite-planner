@@ -324,9 +324,9 @@ def test_bad_area_gives_no_paths(planner):
 
 
 def test_settings_parameter(planner):
-    rospy.params = {'~settings': {'lane_order': 'snake', 'allow_reverse': True, 'turn_types': 'k_turn,pivot'}}
+    rospy.params = {'~settings': {'lane_order': 'snake', 'turn_types': 'detour,pivot'}}
     p = node_module.MowbitePlannerRos1()
-    assert p.base.lane_order == 'snake' and p.base.turn_types == ('k_turn', 'pivot')
+    assert p.base.lane_order == 'snake' and p.base.turn_types == ('detour', 'pivot')
     check(p.handle(request()))
 
 
@@ -422,18 +422,20 @@ def test_margins_of_the_map_obstacles(planner, monkeypatch):
     assert got[-1][7] == (None, None)
 
 
-def test_backing_up_only_where_the_ftc_controller_does(planner, monkeypatch):
-    # allow_reverse counts only with OpenMower's FTC controller backing up where the plan does, else it would hold the
-    # mower at every backing up leg until it times out
-    got, real = [], node_module.plan_coverage
-    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: got.append(args[2]) or real(*args, **kw))
-    rpc('planner.settings.set', {'allow_reverse': True})
-    planner.handle(request())
-    assert got[-1].allow_reverse is False and any('allow_reverse left out' in m for _, m in rospy.log)
-    rospy.params[node_module.BACK_UP_PARAM] = True
-    planner.handle(request(angle=0.4))
-    assert got[-1].allow_reverse is True
-    assert rpc('planner.settings')[0]['can_back_up'] is True
+def test_settings_of_before_left_out(planner):
+    """Settings that are fixed now or gone (allow_reverse, min_turn_radius, smooth_spins, waypoint_spacing, ...) are
+    left out where they still come: from the settings file (it plans as without, they're gone from it after the next
+    set) and from an app, the rest set as asked. planner.settings doesn't list them."""
+    with open(stored_file(), 'w') as f:
+        json.dump({'allow_reverse': True, 'min_turn_radius': 0.3, 'body_tolerance': 0.1, 'turn_radius': 0.3}, f)
+    node = node_module.MowbitePlannerRos1()
+    assert node.current.stored == {'turn_radius': 0.3} and node.base.allow_reverse is False
+    result, error = rpc('planner.settings.set', {'smooth_spins': False, 'waypoint_spacing': 0.2, 'edge_margin': 0.06})
+    assert error is None and result['settings']['edge_margin']['value'] == 0.06
+    assert not {'allow_reverse', 'min_turn_radius', 'smooth_spins', 'waypoint_spacing'} & set(result['settings'])
+    with open(stored_file()) as f:
+        assert json.load(f) == {'edge_margin': 0.06, 'turn_radius': 0.3}
+    assert 'can_back_up' not in result
 
 
 def test_area_in_the_area_mowed_on_its_own(planner):
@@ -623,8 +625,6 @@ def test_rpc_settings(planner):
                           'nullable': True, 'unit': 'rad'}
     assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
     assert not s['skip_lanes']['settable'] and s['skip_lanes']['from']
-    assert s['allow_reverse']['settable'] and s['allow_reverse']['value'] is False
-    assert result['can_back_up'] is False
     # mower_logic's until set here
     for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes'):
         assert s[name]['settable'] and s[name]['from'].startswith('/mower_logic/'), name

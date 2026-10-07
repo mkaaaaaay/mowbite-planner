@@ -301,7 +301,7 @@ def test_plan_errors(service):
                    {'outline': square, 'settings': {'perimeter_passes': 'x'}},
                    {'outline': square, 'settings': {'mower_width': -1}},
                    {'outline': square, 'settings': {'fill_pattern': ['lanes']}},
-                   {'outline': square, 'settings': {'allow_reverse': 'no'}},
+                   {'outline': square, 'settings': {'turn_on_spot': 'no'}},
                    {'area_id': ['front']}, {'area_id': {'id': 'front'}}, {'area_id': 4}):
         assert error(service, 'ext.mowbite_planner.plan', params)['code'] == -32602, params
     assert error(service, 'ext.mowbite_planner.plan', [{'area_id': 'front'}])['code'] == -32602  # by position

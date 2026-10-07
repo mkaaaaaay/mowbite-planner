@@ -10,7 +10,7 @@
     <!-- the blade's cutting width [m] (OM_BLADE_WIDTH). OpenMower's tool_width is the lane spacing, usually smaller -->
     <param name="mower_width" value="$(optenv OM_BLADE_WIDTH 0.18)"/>
     <!-- any MowBite Planner setting for all areas (an area's own go in its "planner" property in the map).
-         Without, it plans for OpenMower's forward only FTC controller: allow_reverse false, lane_order skip.
+         Without, it plans for OpenMower's forward only FTC controller: lane_order skip.
          Lane spacing, loops and skip flags come with mower_logic's request, the angle too unless angle or
          angle_strategy is set here and the area has no angle of its own in the saved map (an editor preview
          of an angle just added or removed follows the saved area until the edit is saved). The edges are walls

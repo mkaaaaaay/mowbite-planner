@@ -27,7 +27,7 @@ next to this node with its service moved to classic_service, mower_logic's reque
 answer back as it is (where it doesn't answer the MowBite Planner plans). planner.plan asks it like mower_logic would.
 
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
-allow_reverse false and lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
+lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
 until the next start only), plans_dir (where the plans are kept, default $ROS_HOME/mowbite_plans, empty: in memory
 only), max_path_poses (at least 4), frame_id, service, classic_service, map_topic, use_map, rpc. The request
@@ -41,8 +41,7 @@ removed follows the saved area until the edit is saved.
 
 OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
-                        choices, settable. Not settable: the skip flags of mower_logic's request. allow_reverse
-                        (backing up in K-turns) needs an FTC controller that backs up where the plan does.
+                        choices, settable. Not settable: the skip flags of mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
                         type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
@@ -131,12 +130,12 @@ CLASSIC_WAIT = 5.0  # s it waits for that service
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
-          'min_turn_radius': (0.0, limits.MAX_TURN_RADIUS), 'angle_increment_every': (1, None),
+          'angle_increment_every': (1, None),
           'perimeter_passes': (-1, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
-          'body_tolerance': (0.0, limits.MAX_BLADE_OFFSET), 'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
+          'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
           'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET)}
 # plans kept, in memory and on disk (in plans_dir): the same request again (a preview, then the mow; mowing.plan, then
 # planner.plan) gets the plan at once
@@ -147,9 +146,6 @@ DISK_PLANS = 64
 PLAN_AHEAD_DELAY = 5.0
 # mower_logic's events (xbot_mqtt.publishEvent): a finished mow turns the lanes on (angle_increment)
 EVENTS_TOPIC = 'events/json'
-# OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
-# backing up leg would hold the mower until it times out): allow_reverse counts only then
-BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
 # OpenMower's track of every job (ROS_HOME/position_history/<start>_<job id>.jsonl): what planner.drive checks, a
 # driven point whose body gets more than DRIVE_OFF m into the margins is a place, points closer than DRIVE_STEP m to the
 # one before give no heading and are left out
@@ -270,14 +266,16 @@ class MowbitePlannerRos1:
     @staticmethod
     def setup(width, settings, stored):
         """The settings with the stored ones on top, PlanningError if they don't go together."""
+        # (settings of before left out, they're fixed now or gone)
+        stored = {n: v for n, v in stored.items() if n not in limits.INTERNAL and n not in limits.RETIRED}
         on_top = {n: v for n, v in stored.items() if n != 'mower_width'}
         settings = dict(settings, **on_top)
         planner = settings.pop('planner', PLANNERS[0])
         if planner not in PLANNERS:
             raise PlanningError('planner must be one of %s' % ', '.join(PLANNERS))
-        # OpenMower's FTC controller only drives forwards: no K-turns, and lanes far enough apart that every
-        # turn is a forward U-turn of turn_radius. ~settings can change that (and anything else)
-        base = PlannerConfig(allow_reverse=False, lane_order='skip').with_overrides(settings)
+        # OpenMower's FTC controller only drives forwards: lanes far enough apart that every turn is a forward U-turn
+        # of turn_radius. ~settings can change that (and anything else)
+        base = PlannerConfig(lane_order='skip').with_overrides(settings)
         base.validate()
         blade = base.with_overrides({'mower_width': stored.get('mower_width', width)})
         blade.validate()
@@ -350,11 +348,10 @@ class MowbitePlannerRos1:
             out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
         out['planner'] = {'value': current.planner, 'default': defaults.planner, 'stored': 'planner' in current.stored,
                           'type': 'string', 'settable': True, 'choices': list(PLANNERS)}
-        # whether allow_reverse counts: OpenMower's FTC controller backs up where the plan does
         # angle_increment: the steps turned so far and the finished mows towards the next one
         steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
-                'can_back_up': bool(rospy.get_param(BACK_UP_PARAM, False)), 'angle_steps': steps, 'angle_mows': mows,
+                'angle_steps': steps, 'angle_mows': mows,
                 'angle_turned': steps * current.base.angle_increment}
 
     def rpc_angle_reset(self, params=None):
@@ -420,6 +417,8 @@ class MowbitePlannerRos1:
         fixed = sorted(set(params) & set(FIXED))
         if fixed:
             raise PlanningError('not settable here: %s' % ', '.join('%s (%s)' % (n, FIXED[n]) for n in fixed))
+        # (settings of before an app may still send: left out)
+        params = {n: v for n, v in params.items() if n not in limits.INTERNAL and n not in limits.RETIRED}
         unknown = sorted(set(params) - set(PlannerConfig.names()) - {'planner'})
         if unknown:
             raise PlanningError('unknown planner settings: %s' % ', '.join(unknown))
@@ -671,16 +670,11 @@ class MowbitePlannerRos1:
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
-        given and the planner's code, the same again (to the last bit) is the same plan. allow_reverse only where the
-        FTC controller backs up (BACK_UP_PARAM)."""
+        given and the planner's code, the same again (to the last bit) is the same plan."""
         return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins)[0]
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """(plan, whether it was kept from before), see plan_coverage."""
-        if cfg.allow_reverse and not rospy.get_param(BACK_UP_PARAM, False):
-            rospy.logwarn_throttle(600, 'MowBite Planner: allow_reverse left out, OpenMower\'s FTC controller doesn\'t '
-                                   'back up (%s is not true)' % BACK_UP_PARAM)
-            cfg = cfg.with_overrides({'allow_reverse': False})
         # the obstacles in one order, every way there (the request, the map) gives the same, each with its margin
         margins = list(margins) + [None] * (len(obstacles) + len(keep_out) - len(margins))
         pairs = sorted(zip(canon(obstacles), canon(margins)), key=lambda pair: pair[0])

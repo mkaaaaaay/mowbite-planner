@@ -52,13 +52,13 @@ shapely, and wrapped differently if OpenMower's interfaces change.
   route), `section_start` (the first pose of every [section](#sections), mostly just `[0]`), `angle` (the
   lane direction used, 0..π) and `angles` (crosshatch: two), `lane_spacing`, `path_length`, `fingerprint`
   (SHA-256 of the poses) and the segments: `segment_start` and `segment_end` (pose indices),
-  `segment_type` (perimeter loop, lane, turn or transit) and `segment_reverse` (the backwards leg of a
-  K-turn).
+  `segment_type` (perimeter loop, lane, turn or transit) and `segment_reverse` (always false: it plans
+  forwards only).
 - **`~/plan_path`** (`mowbite_planner_interfaces/srv/PlanPath`): OpenMower's `slic3r_coverage_planner/PlanPath`
   with the same fields and meanings: `fill_type` (`FILL_LINEAR` lanes, `FILL_CONCENTRIC` loops further and
   further in), `angle`, `distance` (the lane spacing), `outer_offset`, `outline_count` (0..255),
   `outline_overlap_count`, `skip_*`, `outline`, `holes`. Everything else comes from the parameters (turn
-  radius, K-turns, lane order, waypoint spacing, `max_path_poses`). `mower_width` is the larger of the
+  radius, lane order, `max_path_poses`). `mower_width` is the larger of the
   parameter and `distance`. The angle offset and range don't apply, OpenMower adds its own
   `mow_angle_offset`. The answer is `Path[] paths`: the perimeter loops (`is_outline` 1) and the lanes with
   their turns (`is_outline` 0), each a continuous drive, every section its own. A run longer than
@@ -71,10 +71,9 @@ shapely, and wrapped differently if OpenMower's interfaces change.
   subscribes later still gets the last one (set the Path display's durability to Transient Local).
 
 Every pose has `header.frame_id` = the `frame_id` parameter (`map`) and the time of the plan, and is
-`waypoint_spacing` (0.1 m) from the next one. Its orientation is the heading, as a quaternion around z
+0.1 m from the next one. Its orientation is the heading, as a quaternion around z
 (`z = sin(yaw / 2)`, `w = cos(yaw / 2)`, worked out directly, no tf). The heading points to the next pose.
-On the short backwards leg of a K-turn it points the way the mower faces, against the way it drives,
-which is how Nav2's controllers recognise a reversal. Two poses never share a position: OpenMower's FTC
+Two poses never share a position: OpenMower's FTC
 controller would skip one of them.
 
 The same input gives exactly the same poses on the same shapely and GEOS version (OpenMower checks a hash
@@ -90,7 +89,7 @@ starts again.
    first loop, every further loop is a lane spacing further in (`perimeter_passes`, default 2). The
    obstacles get their loops from the same shrinking, so where a bed is close to the edge the loops go
    around both instead of crossing. Corners of the outline are rounded a little
-   (`perimeter_corner_radius`), the inner loops a little less, so no tuft stays between the loops (but see
+   (0.15 m), the inner loops a little less, so no tuft stays between the loops (but see
    [Known limits](#known-limits)). Loops start where the mower already is, the next loop is entered with a
    short slanted hop. A negative `outer_offset` in PlanPath puts the first loop outside the outline and
    lets the mower's centre go as far into the obstacles too, like OpenMower's `outline_offset`.
@@ -131,7 +130,6 @@ area:
 | --- | --- | --- |
 | U-turn | quarter arc, straight, quarter arc | lanes at least 2 × radius apart |
 | bulb | swerve out, loop of more than half a circle, swerve back (forwards only) | about radius × (1 + 2 sin θ) of headland |
-| K-turn | quarter arc forwards, a short straight backwards, quarter arc forwards | one radius of headland, `allow_reverse` |
 | smaller radius | the same with 0.75, 0.5 × the radius, down to a half circle | |
 | detour | quarter arc, shortest way along the edge, quarter arc | lanes 2 radii apart, edge not square to the lanes |
 | pivot | turn on the spot by 90°, cross over, turn by 90° | last resort |
@@ -193,22 +191,14 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `angle_min_deg`, `angle_max_deg` | `.nan` | the lane direction stays in this range, both or neither |
 | `angle_step_deg` | 5.0 | between the directions `optimal` tries, 0.5..90 |
 | `turn_radius` | 0.25 | radius of the turns [m], 0..5 |
-| `min_turn_radius` | 0.0 | no arc of a turn, a drive, a loop out (`smooth_spins`) or a K-turn tighter than this [m], turning on the spot instead: where the inner wheel stands or turns backwards (half the track of the drive wheels, OpenMower's `wheel_distance_m` / 2) it scuffs the lawn more than turning once. 0: any. The corners of the loops keep their rounding, with the body set a drive's corner gets a tighter arc where none this wide fits (see `robot_rear`) |
-| `allow_reverse` | true | backing up: K-turns between lanes, and a K-turn in place where it would turn on the spot and no loop out fits (`smooth_spins`) |
-| `turn_types` | all | `[u_turn, bulb, k_turn, detour, pivot]`, the ones allowed, preferred first |
+| `turn_types` | all | `[u_turn, bulb, detour, pivot]`, the ones allowed, preferred first |
 | `lane_order` | `snake` | `snake` or `skip` |
 | `route_order` | `nearest` | cells `nearest` first, or `optimized`: the order with the shortest drives between them |
-| `perimeter_corner_radius` | 0.15 | rounding of the loops' outline corners [m], 0 = sharp |
-| `waypoint_spacing` | 0.10 | distance between poses [m], 0 = only where the direction changes |
-| `transit_clearance` | 0.05 | how far transits stay from the outer loop and obstacle loops [m] |
-| `simplify_tolerance` | 0.01 | the boundary and obstacles are simplified this much first [m] |
-| `min_lane_length` | 0.10 | shorter lane pieces are left out [m] |
 | `nested_areas` | true | a mowing area lying in the one planned (90 % of it at least, an area of its own with another angle or pattern) is left out and mowed round, it gets its own plan; for the map's areas (MQTT service, ROS 1 node) |
 | `lane_spacing_mode` | `fixed` | `fixed`: the lane spacing follows from `overlap` (OpenMower's `tool_width`). `auto`: the planner tries 5 spacings from `lane_spacing_max` down to `lane_spacing_min` at the given angle and keeps the plan that leaves least unmowed, then turns on the spot least, then is shortest; `stats.chosen` says which (`lane_spacing`, `perimeter_passes`, `mode`) |
 | `lane_spacing_min`, `lane_spacing_max` | none | m, the range `auto` tries, none: 50 % and 95 % of `mower_width` |
 | `perimeter_passes` -1 | | as many loops as the turns of the lanes need: they mow the strip along the edges the lanes don't get to (a lane ends where its turn keeps the body in what `edges` allow, the blade `blade_ahead` further in), worked out from `turn_radius`, the body and `blade_ahead`; set for the planner it beats `mower_logic`'s `outline_count` (an area's own still beats it) |
-| `smooth_spins` | true | where the path would turn on the spot by more than 60° (a sharp corner of a loop, a drive arriving across a lane, a pivot), a loop out instead (an omega of `turn_radius`, down to 35 % of it) where it fits; the loops round their right turns too |
-| `turn_on_spot` | false | turning on the spot where the path would drive a loop, for lawns that take it: no loop out (`smooth_spins`), no bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive arriving on the spot rather than into a lane round a loop (`min_turn_radius`) or from beside it, or on arcs that cross its own way. With the body set it keeps the margins turning, like everywhere; with `headland_turns` still not in the lanes' field |
+| `turn_on_spot` | false | turning on the spot where the path would drive a loop, for lawns that take it: no loop out, no bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive arriving on the spot rather than into a lane round a loop (`min_turn_radius`) or from beside it, or on arcs that cross its own way. With the body set it keeps the margins turning, like everywhere; with `headland_turns` still not in the lanes' field |
 | `headland_turns` | false | clean stripes: in the lanes' field (where they lie, but for the headland the loops mow and 2 `turn_radius` at their ends, where the turns go) the path only runs straight along the lanes, no loop, turn on the spot or bend. Drives between cells, loops and parts go along the headland (out of the field straight on from a lane's end, into it straight along the next lane), across the field only straight (along a lane's line where that's not much longer) where the headland's way is more than twice as long (and 2 m) as the shortest or there's none; U-turns between lanes far apart, detours, loops out and the ways round the body keep out of it too. Where nothing does (narrow places, no room in the headland) the path goes the way it would without, `stats.headland_turns` says where (`turns_in_field`, `places` as [x, y]) and how often it crosses the field (`crossings`), with a warning. Turning in the narrow headland, the mower turns on the spot more often there |
 | `headland_corners` | `rounded` | with `headland_turns` and the body set: `rounded`, the drives along the headland get arcs at their corners where the body fits on one, like every drive (into the field only where none fits out of it and 12 cm deep at most, else the corner stays; `stats.headland_turns` counts those on their own: `arcs_in_field`, the deepest `arc_depth`); `sharp`, they turn on the spot there and no arc of any drive goes into the field |
 | `narrow_parts` | `lanes` | where the lanes would lie in a part narrower than a U-turn (2 turn radii: a path, a strip between beds): `lanes` anyway, or `loops` further in there, the pieces they come apart into driven on the way round. Areas without such parts keep their plan. With `fill_pattern` `concentric`, `loops` drives all the loops that way: a part in one go, no drives from loop to loop |
@@ -217,9 +207,8 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 | `robot_rear` | -1.0 | how far it reaches behind the centre [m], negative = not set. With all three (or `robot_outline`) the turns, lane ends, loops and drives keep the body in (see `edges`): lane ends move back until the turn's arcs fit, loop corners get larger arcs; `report` lists the poses where it still sticks out (`body_out`). The corners of drives and of the ways round the body (`body_fit`) get an arc where the body fits on one, from `turn_radius` down to 35 % of it (tighter than `min_turn_radius` too), the loop or lane next to one ending `turn_radius` earlier at most and only where what that leaves out is mowed anyway; else an S onto the drive further on. Where the path still turns on the spot a pose 2.5 cm before the point lets OpenMower's FTC turn there instead of over the way to it (some 5 cm early, drifting) |
 | `robot_outline` | not set | the body as its outline instead of that rectangle (beats the three): `[x0, y0, x1, y1, ...]` [m] round the centre (base_link, x ahead, y to the left; in a request's `settings`, the map's `planner` property and over RPC `[[x, y], ...]`), 3 points at least round the centre, the outline not crossing itself. A rounded front reaches less far out turning than the rectangle's corners: it fits turns closer to the edges, fewer places go another way, less is left unmowed; the real edges are where that body was while they were recorded (an outline drawn bigger moves them out as far, the margins keep the distance off them). A point every few cm is plenty, every one more takes longer to plan |
 | `edges` | `recorded` | `recorded`: the outline and obstacles are where the mower's centre drove, the body may be where it was then (half its width each side, the front ahead and the rear behind the way the points go, turning on the spot at each point). `hard`: walls, nothing of the body past them, the centre keeps `robot_width` / 2 off them. With the body set always `recorded`. An area to keep out of (an inactive one, one not to mow) counts like an obstacle |
-| `body_tolerance` | 0.05 | how much further out than the first loop a turn, a loop out or a drive may take the centre [m] (a recorded edge is a few cm off where the mower was), the body keeping the margins |
 | `edge_margin` | 0.05 | how far the body keeps off the outline's real edge [m] (where the body was while its centre drove the line), everywhere; the first loop moves further in for it, 0..1 |
-| `obstacle_margin` | 0.10 | the same off an obstacle's real edge and an area's to keep out of, the loops round it move further out (round both of two that leave the body, the margins kept, less than `body_tolerance` to spare between them); one with a `margin` property of its own in the map (m) keeps that instead (the obstacles of a request are found in the map by their outline), 0..1 |
+| `obstacle_margin` | 0.10 | the same off an obstacle's real edge and an area's to keep out of, the loops round it move further out (round both of two that leave the body, the margins kept, less than 5 cm to spare between them); one with a `margin` property of its own in the map (m) keeps that instead (the obstacles of a request are found in the map by their outline), 0..1 |
 | `spin_margin` | 0.05 | turning on the spot (the heading jumping by more than 15° from one pose to the next: at a kink like that OpenMower's FTC turns the same way) the body keeps this much further off the real edges than the margins [m], anywhere on the last 0.1 m of the way in: OpenMower's FTC turns over the way to the point and drifts a few cm doing so. All along the turns between the lanes (U-turns, loops, detours) too: there the mower keeps less exactly to its path, its corners swinging further. Where that doesn't fit the path turns further out in the open or goes another way (`body_fit`). 0: only at the point, the margins as everywhere, 0..1 |
 | `body_fit` | true | where the body would still stick out (a turn on the spot, a loop in a tight spot), the path goes another way there that fits, leaving a little of a loop or lane out where it has to. Where no such way fits (a place too narrow to turn round in, a gap the body doesn't pass) it turns round before it: it drives in only as far as it can still turn round (on the spot, the body keeping the margins) and on to where the path goes on, the rest of the place left out, or it goes round through where the body turns whatever way it faces, or it drives on to where the path goes on (a drive through the free space). Only where that doesn't fit either it leaves out the poses that don't fit (the path jumps there, `mower_logic` drives that bit on its own; by the dock at the path's end it ends before instead). Where the path starts later or ends before (by the dock) a way from or to where the body turns whatever way it faces, closest to where it would start or end, gets it there with the body checked (`mower_logic` gets from the dock to the path and back on its own); where none fits it says so (`unchecked`, with a warning). `stats.body_fit` says how many places (`fixed` ways in place, turning round and those ways too, `left` places left out, `places` as [x, y, m left out] of both, at the pose of the path as planned where the body sticks out the most there, `poses` as [x, y, yaw, m it sticks out there (turning on the spot of the space `spin_margin` smaller), 1 where it turns on the spot there else 0] of those, `jumps` as [x, y] where the path jumps, `unchecked` as [x, y] where it starts later or ends before with no such way), `skipped_m` and `tries`, with a warning naming where it jumps. false: the path as planned |
 | `blade_offset` | 0.0 | the blade's centre this far left of the mower's [m] (negative: right), the loops go round with the blade on their outer side, -1..1 |
@@ -270,18 +259,15 @@ their full type name though: the port has to use `mowbite_planner_interfaces/srv
 `mowbite_planner_interfaces/msg/Path`), with `slic3r_coverage_planner`'s types unchanged it can't call it.
 What the request doesn't carry comes from the parameters: set `mower_width` to the real blade width
 (OpenMower's `tool_width` is the lane spacing, `distance` in the request), and for OpenMower's FTC
-controller, which only drives forwards, `allow_reverse: false` and `lane_order: skip`.
+controller, which only drives forwards, `lane_order: skip` (it plans forwards only anyway).
 
 `~/plan_coverage` gives more than `PlanPath` can carry. If OpenMower's side can be changed, these make the
 most of it:
 
 - **Drive the route as one path.** Every separate path starts with driving to its first pose and turning
   on the spot there. The route from `~/plan_coverage` is continuous within a section, transits included.
-- **A controller that can back up**, e.g. Nav2's regulated pure pursuit with `allow_reversing`. Then K-turns
-  keep the full turn radius in a narrow headland. FTC with `forward_only: false` reverses but doesn't
-  handle the change of direction.
 - **Use the segments.** `segment_type` says where turns and transits are (slower in turns, blade off on
-  long transits), `segment_reverse` where the mower backs up.
+  long transits).
 - **Pass the mower's pose** (`use_start_pose`), so the plan starts on the loop next to the mower, and the
   docking station as `end_point`.
 - **Leave the angle to the planner** (`use_angle: false`): along the longest edge gives the fewest turns.
@@ -332,7 +318,7 @@ environment:
   the broker.
 - `MOWER_MQTT_PREFIX`: topic prefix, only if OpenMower uses one.
 - `PLANNER_SETTINGS`: a JSON object of planner settings (the names in `PlannerConfig`, angles in rad).
-  `compose.yaml` sets `{"allow_reverse": false, "lane_order": "skip"}` for OpenMower's FTC controller.
+  `compose.yaml` sets `{"lane_order": "skip"}` for OpenMower's FTC controller.
   Add `mower_width` with the blade's width. With the ROS 1 node on the mower, its `settings` and
   `mower_width` here make the previews its plans.
 
@@ -346,7 +332,7 @@ Without Docker it needs shapely and paho-mqtt (1.6 or 2.x): `python3 -m mowbite_
   rounds it less than the inner loops count on: a tuft of a few cm² can stay between them.
 - With `perimeter_passes: 0` a strip can stay along edges parallel to the lanes.
 - Perimeter loops follow the GPS jitter of a recorded outline vertex by vertex. Reduce its points first
-  (MowBite's map editor does that) or raise `simplify_tolerance`.
+  (MowBite's map editor does that).
 - `geometry_msgs/Polygon` is float32: steps of 1 mm or less up to 8 km from the map origin. Further out
   the node warns, use a local map frame.
 - Points have to be numbers within 10⁷ m of the map origin and `turn_radius` at most 10 m (the node: 5 m),

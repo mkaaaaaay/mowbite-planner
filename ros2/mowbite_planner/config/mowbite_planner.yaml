@@ -28,28 +28,18 @@
     angle_min_deg: .nan
     angle_max_deg: .nan
     angle_step_deg: 5.0
-    # turns between lanes: arcs of this radius. Where a forward turn doesn't fit, a K-turn backs up a
-    # little (allow_reverse). OpenMower's FTC controller only drives forwards: there use
-    # allow_reverse: false and lane_order: skip (every turn a forward U-turn of turn_radius).
-    # These and waypoint_spacing also apply to ~/plan_path, the rest comes with its request
+    # turns between lanes: arcs of this radius, and no arc of a turn, a drive or a loop out tighter [m] (where none
+    # fits it turns on the spot). It plans forwards only, for OpenMower's FTC controller use lane_order: skip (every
+    # turn a forward U-turn of turn_radius). This also applies to ~/plan_path, the rest comes with its request
     turn_radius: 0.25
-    # no arc of a turn, a drive, a loop out or a K-turn tighter than this [m] (about half the track of the drive
-    # wheels: tighter, the inner wheel stands or turns backwards and scuffs the lawn), turning on the spot instead
-    min_turn_radius: 0.0
-    allow_reverse: true
     # turning on the spot where the path would drive a loop (for lawns that take it): no bulb between lanes, a drive
     # arriving on the spot rather than round a loop, the body fitting turning
     turn_on_spot: false
     # the turns allowed, preferred first
-    turn_types: [u_turn, bulb, k_turn, detour, pivot]
+    turn_types: [u_turn, bulb, detour, pivot]
     lane_order: snake
     # cells: nearest (the closest one not mowed yet next) or optimized (shortest drives between them)
     route_order: nearest
-    perimeter_corner_radius: 0.15
-    waypoint_spacing: 0.10
-    transit_clearance: 0.05
-    simplify_tolerance: 0.01
-    min_lane_length: 0.10
     # the mower's body [m] around its centre (base_link): robot_width wide, robot_front ahead, robot_rear behind
     # (negative: not set). With all three the outline and obstacles are where the centre drove (edges doesn't count
     # then): the turns, lane ends, loops and drives keep the body where it was while they were recorded, the margins
@@ -74,9 +64,6 @@
     # points at least, not crossing itself. Not set: the rectangle
     # robot_outline: [0.43, -0.03, 0.43, 0.03, 0.26, 0.205, -0.18, 0.205, -0.18, -0.205, 0.26, -0.205]
     edges: recorded
-    # how much further out than the first loop a turn, a loop out or a drive may take the centre [m] (a recorded edge
-    # is a few cm off), the body keeping the margins
-    body_tolerance: 0.05
     # where the body would still stick out, the path goes another way there that fits (false: as planned)
     body_fit: true
     # how far the body keeps off the outline's and the obstacles' real edges [m], everywhere
