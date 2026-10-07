@@ -97,7 +97,7 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
         assert angle_diff(travel, facing) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:
-        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'k_point'):
+        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'k_point', 'mop_up'):
             yaws = {poses[i].yaw for i in range(s.start, s.end)}
             assert len(yaws) == 1
             yaw = yaws.pop()
@@ -1621,6 +1621,23 @@ def turn_poses(plan):
             out += [i for i in range(seg.start + 1, seg.end + 1) if i not in starts and
                     angle_diff(plan.poses[i].yaw, plan.poses[i - 1].yaw) <= footprint.SPIN]
     return out
+
+
+def test_mop_up():
+    """mop_up: at the end a round over the biggest pieces left unmowed where the blade gets to (a pass over each, the
+    body fitting, turning where they meet too), back to where the path ended: less left unmowed, nothing sticking out,
+    no jump. stats['mop_up'] says how many and how much; off, the plan as without."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
+    plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    mop = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, mop_up=True), start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(mop, mop.config, [TREE, BED])
+    report = check_plan(mop)
+    assert report['body_out'] == [] and mop.stats['body_fit']['jumps'] == [] and len(mop.section_starts) == 1
+    assert mop.stats['mop_up']['pieces'] > 0 and mop.stats['mop_up']['area'] > 0.0 and plain.stats['mop_up'] is None
+    assert report['left_m2'] < check_plan(plain)['left_m2'] - 0.5 * mop.stats['mop_up']['area']
+    passes = [s for s in mop.segments if s.maneuver == 'mop_up' and s.kind == LANE]
+    assert len(passes) == mop.stats['mop_up']['pieces'] and mop.poses[:len(plain.poses) - 1] == plain.poses[:-1]
+    assert math.hypot(mop.poses[-1].x - plain.poses[-1].x, mop.poses[-1].y - plain.poses[-1].y) < 0.05
 
 
 def test_margins_kept():

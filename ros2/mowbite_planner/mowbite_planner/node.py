@@ -95,6 +95,8 @@ PARAMETERS = {
               lambda v: v in EDGES, 'must be recorded or hard'),
     'body_fit': (True, 'where the body would still stick out, the path goes another way there that fits, leaving a '
                  'little of a loop or lane out where it has to. False: the path as planned', None, ''),
+    'mop_up': (False, 'with the body set, a round at the end over the biggest pieces left unmowed where the blade gets '
+               'to (a short pass over each), then back to where the path ended', None, ''),
     'edge_margin': (0.05, "how far the body keeps off the outline's real edge [m] (where the body was while its "
                     'centre drove the line), everywhere. The first loop moves '
                     'further in for it', lambda v: v >= 0.0, 'must be >= 0'),
