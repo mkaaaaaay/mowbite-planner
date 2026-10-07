@@ -47,7 +47,8 @@ its `mower_map` drops the extra area properties.
 
 Once open_mower_ros has `OM_PLANNER=external` and keeps the extra area properties (PRs #363 and #364), no own image
 is needed: the planner runs as a container of its own next to the official image (`ros1/compose.yaml`, see
-[`ros1/README.md`](ros1/README.md#a-container-of-its-own-no-own-openmower-image)).
+[`ros1/README.md`](ros1/README.md#a-container-of-its-own-no-own-openmower-image)). To test it now: OpenMower's
+`pr-363` image.
 
 ## Main settings
 

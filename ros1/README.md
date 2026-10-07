@@ -76,19 +76,27 @@ slic3r's plans then.
 
 ## A container of its own (no own OpenMower image)
 
-Needs an open_mower_ros with `OM_PLANNER=external` (open_mower_ros PR #363) and a `mower_map` that keeps the extra
-area properties (#364), both not merged yet: until then [your own OpenMower image](#your-own-openmower-image).
+The official image stays as it is, the planner runs next to it. It needs `OM_PLANNER=external` in open_mower_ros
+(open_mower_ros PR #363) and, for an area's own settings and an obstacle's margin, a `mower_map` that keeps the extra
+area properties (#364). Neither is merged yet, but OpenMower's CI builds an image of every PR: `pr-363` works for
+testing now. Otherwise [your own OpenMower image](#your-own-openmower-image).
 
-The official image stays as it is. On OpenMowerOS v2:
+On OpenMowerOS v2:
 
-1. In OpenMower's `.env` (Dockge, stack `openmower`): `OM_PLANNER=external`, open_mower_ros doesn't start slic3r
-   then.
-2. A stack of its own for the planner, e.g. `/opt/stacks/mowbite-planner/` with [`compose.yaml`](compose.yaml) and a
-   `.env` with `OPENMOWER_VERSION` (the `VERSION` of OpenMower's `.env`) and `OM_BLADE_WIDTH`. It builds the planner
-   on the mower from this repository on GitHub (public, or the path of a clone in `context:`) on that OpenMower image:
-   ROS, OpenMower's messages and slic3r come from it, about 11 MB on top.
-3. `docker compose up -d` there (Dockge: Deploy), then OpenMower's stack again. A newer planner or OpenMower
-   version: `docker compose up -d --build`.
+1. In OpenMower's `.env` (Dockge, stack `openmower`): `OM_PLANNER=external` (open_mower_ros doesn't start slic3r
+   then), for testing now `VERSION="pr-363"`.
+2. The planner as a stack of its own, e.g. `/opt/stacks/mowbite-planner/`: [`compose.yaml`](compose.yaml) and a `.env`
+   with `OPENMOWER_VERSION` (the `VERSION` of OpenMower's `.env`, `pr-363` for now) and `OM_BLADE_WIDTH`. It builds
+   the planner on the mower on that OpenMower image (ROS, OpenMower's messages and slic3r come from it, about 11 MB on
+   top) from this repository. While it's private: `git clone` it into the stack's folder (e.g. as `src`) and set
+   `context: ./src` in `compose.yaml`.
+3. `docker compose up -d` there (Dockge: Deploy), then OpenMower's stack again. A newer planner or OpenMower version:
+   `git pull` in the clone, then `docker compose up -d --build`.
+
+Testing with `pr-363`: its `mower_map` doesn't have #364, the next save of the map drops the extra area properties
+(an area's `planner` settings, an obstacle's `margin`, `angle_min`/`angle_max`). Keep a map backup and set the
+planner for all areas (`planner.settings.set`, the MowBite app's planner menu). Going back: `VERSION` as before and
+`OM_PLANNER` out of OpenMower's `.env`, the planner's stack stopped.
 
 It keeps its settings and plans where OpenMower's container keeps its ROS data (`/home/openmower/ros`), the setting
 `planner` (`slic3r`) switches to OpenMower's slic3r planner, which it starts itself. When OpenMower restarts (a new
