@@ -172,15 +172,15 @@ def the_map(planner=None, areas=(), **props):
     ], 'docking_stations': [{'id': 'd', 'position': {'x': 22.0, 'y': 1.5}, 'heading': math.pi}]}
 
 
-# the properties of an area stock mower_map keeps (MapArea's from_json and to_json), openmower.patch keeps all
+# the properties of an area mower_map kept before open_mower_ros #364 (MapArea's from_json and to_json), all since
 STOCK_PROPERTIES = ('name', 'type', 'active', 'mowable', 'angle', 'outline_count', 'outline_overlap_count',
                     'outline_offset')
 
 
-def through_mower_map(data, patched):
+def through_mower_map(data, keeps_all):
     """The map as mower_map publishes it on json_map."""
     return dict(data, areas=[dict(a, properties={k: v for k, v in a['properties'].items()
-                                                 if patched or k in STOCK_PROPERTIES}) for a in data['areas']])
+                                                 if keeps_all or k in STOCK_PROPERTIES}) for a in data['areas']])
 
 
 def send_map(data):
@@ -357,19 +357,19 @@ def test_settings_parameter_angle(planner):
         assert p.settings(request(angle=0.7), node_module.area_job(the_map(**props), 0)).angle == angle, props
 
 
-@pytest.mark.parametrize('patched', [False, True])
-def test_mowbite_properties_need_the_patched_mower_map(planner, patched):
-    """An area's planner property, angle range and mow_around reach the node only through mower_map with
-    openmower.patch: stock mower_map drops the properties it doesn't know."""
+@pytest.mark.parametrize('keeps_all', [False, True])
+def test_mowbite_properties_need_mower_map_to_keep_them(planner, keeps_all):
+    """An area's planner property, angle range and mow_around reach the node only through a mower_map that keeps the
+    extra area properties (open_mower_ros #364), before it they were dropped."""
     plain = planner.handle(request())
     pond = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
     send_map(through_mower_map(the_map({'fill_pattern': 'crosshatch'}, angle_min=0.2, angle_max=0.4, areas=[
-        area('pond', pond, type='mow', mowable=False, mow_around=True)]), patched))
+        area('pond', pond, type='mow', mowable=False, mow_around=True)]), keeps_all))
     res = planner.handle(request(angle=1.0))
     check(res)
-    assert (len(poses(res)) > 1.6 * len(poses(plain))) == patched  # crosshatch
-    assert (not inside(res, pond)) == patched  # mowed around
-    if patched:  # in the area's range, not mower_logic's 1 rad
+    assert (len(poses(res)) > 1.6 * len(poses(plain))) == keeps_all  # crosshatch
+    assert (not inside(res, pond)) == keeps_all  # mowed around
+    if keeps_all:  # in the area's range, not mower_logic's 1 rad
         assert math.degrees(0.2) - 0.05 <= lane_angle() <= math.degrees(0.4) + 0.05
     else:
         assert lane_angle() == round(math.degrees(1.0), 1)
@@ -570,21 +570,6 @@ def test_preview_plans_like_the_node(planner, props, params, settings, areas, by
     assert lane_angle() == pytest.approx(math.degrees(preview['angle']), abs=0.05)
     assert len(mowed) == len(preview['poses'])
     assert max(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(mowed, preview['poses'])) < 1e-3
-
-
-def test_patch_writes_the_known_properties_first():
-    """MowBite's scheduler (docker/scheduler.sh) reads type, active and mowable of an area up to the first
-    closing brace in its properties: the patched mower_map writes the ones it doesn't know (a planner object)
-    after them."""
-    with open(os.path.join(HERE, '..', '..', 'openmower.patch')) as f:
-        patch = f.read()
-    hunk = [h for h in patch.split('\n@@ ') if 'properties.update(data.other_properties);' in h]
-    assert len(hunk) == 1 and 'void to_json(json& j, const MapArea& data)' in hunk[0].splitlines()[0]
-    lines = [line[1:].strip() for line in hunk[0].splitlines()[1:] if line[:1] in (' ', '+') and '//' not in line]
-    update = lines.index('properties.update(data.other_properties);')
-    assert lines[update - 1].startswith('if (!std::isnan(data.outline_offset)) properties["outline_offset"]')
-    assert lines[update + 1] == 'j["properties"] = properties;'
-    assert 'json properties = data.other_properties' not in patch
 
 
 # OpenMower RPCs (planner.settings, planner.settings.set, planner.plan)

@@ -3,7 +3,8 @@
 OpenMower, also on its new OS, runs on ROS 1 Noetic and plans every area with its slic3r planner through the
 service `/slic3r_coverage_planner/plan_path`. `mowbite_planner_ros1` answers that service with the MowBite
 Planner instead. It uses the same request and gives the same answer, so `mower_logic` and the `mowing.plan`
-RPC (the app's preview) use it as they are. Only the launch file decides which planner runs.
+RPC (the app's preview) use it as they are. It runs in a container of its own next to OpenMower's, which doesn't
+start slic3r with `OM_PLANNER=external` (see [Setup](#setup)).
 
 What comes on top, without touching `mower_logic`:
 
@@ -44,9 +45,9 @@ What comes on top, without touching `mower_logic`:
   With `angle` or `angle_strategy` in it, the lanes go that way instead of the angle `mower_logic` sends
   (its `mow_angle_offset` included). An unknown name or a bad value there and the area isn't planned (no
   paths), the log says why. The area's `angle_min` and `angle_max` (rad) keep the lanes in that range,
-  and mowing areas set to not mowable with `mow_around` that lie in it are mowed around. Stock
-  `mower_map` drops the properties it doesn't know when it reads the map, so they never reach the planner
-  and are gone after the next save. The patch below keeps them.
+  and mowing areas set to not mowable with `mow_around` that lie in it are mowed around. They need a
+  `mower_map` that keeps the extra area properties (open_mower_ros #364), before it they're dropped when it reads
+  the map and gone after the next save.
 - **Obstacles** come with the request, like for slic3r: a `mowing.plan` preview of an edited obstacle
   shows the edit. One with a `margin` property in the map (m, found by its outline) keeps the body that far off
   it in place of `obstacle_margin`, an area set to not mowable or inactive too.
@@ -70,16 +71,12 @@ image) can change the last bits of a coordinate or a vertex, an interrupted area
 Planning on Noetic's shapely 1.7 takes longer than with shapely 2. On a PC: a garden of 300 m² 0.07 s, a
 lawn of 1700 m² with a recorded outline 1.5 s; a Raspberry Pi CM4 needs roughly four to six times as long.
 
-Without rebuilding OpenMower's image, the planner's [MQTT service](../ros2/README.md#mqtt-service) plans the
-mower's areas on request (Planner Studio, `ext.mowbite_planner.plan`), but `mower_logic` keeps mowing
-slic3r's plans then.
+## Setup
 
-## A container of its own (no own OpenMower image)
-
-The official image stays as it is, the planner runs next to it. It needs `OM_PLANNER=external` in open_mower_ros
-(open_mower_ros PR #363) and, for an area's own settings and an obstacle's margin, a `mower_map` that keeps the extra
-area properties (#364). Neither is merged yet, but OpenMower's CI builds an image of every PR: `pr-363` works for
-testing now. Otherwise [your own OpenMower image](#your-own-openmower-image).
+OpenMower's official image stays as it is, the planner runs next to it. It needs `OM_PLANNER=external` in
+open_mower_ros (open_mower_ros PR #363) and, for an area's own settings and an obstacle's margin, a `mower_map` that
+keeps the extra area properties (#364). Neither is merged yet, but OpenMower's CI builds an image of every PR:
+`pr-363` works for testing now.
 
 On OpenMowerOS v2:
 
@@ -98,150 +95,20 @@ Testing with `pr-363`: its `mower_map` doesn't have #364, the next save of the m
 planner for all areas (`planner.settings.set`, the MowBite app's planner menu). Going back: `VERSION` as before and
 `OM_PLANNER` out of OpenMower's `.env`, the planner's stack stopped.
 
-It keeps its settings and plans where OpenMower's container keeps its ROS data (`/home/openmower/ros`), the setting
-`planner` (`slic3r`) switches to OpenMower's slic3r planner, which it starts itself. When OpenMower restarts (a new
-ROS master) the container ends and comes back (`restart: unless-stopped`) to register again; it waits for
-OpenMower's master and never starts one of its own.
+It keeps its settings and plans where OpenMower's container keeps its ROS data (`/home/openmower/ros`). When
+OpenMower restarts (a new ROS master) the container ends and comes back (`restart: unless-stopped`) to register
+again; it waits for OpenMower's master and never starts one of its own.
 
-## Your own OpenMower image
-
-The planner goes into OpenMower's workspace as a package of its own, so the mower needs an image built from
-a copy of open_mower_ros with this repository in it. The image goes straight from the PC to the mower, no
-registry involved.
-
-### 1. Which OS the mower runs
-
-Check on the mower:
-
-| What you find | OS | Build from | The image is picked in | Settings go in |
-| --- | --- | --- | --- | --- |
-| `grep 'image:.*open_mower_ros' /opt/stacks/openmower/compose.yaml` finds a line | OpenMowerOS v2, Docker (Dockge on port 5001) | `docker/Dockerfile` | that `image:` line | `/opt/stacks/openmower/.env` |
-| `systemctl cat openmower` starts it with `podman run` | OpenMowerOS v1 | `docker/Dockerfile.Legacy` | that `podman run` line | the file mounted as `/config/mower_config.sh` |
-| `systemctl cat openmower` starts `openmower-nspawn-start` | OpenMower OS on Buildroot (A/B updates) | `docker/Dockerfile` | nowhere on the mower, see step 4 | `/data/openmower/openmower.conf` |
-
-The steps are written for OpenMowerOS v2, the other two differ where noted.
-
-### 2. Build the image (on a PC)
-
-```bash
-MOWBITE=~/mowbite-planner  # your clone of this repository
-git clone --recursive https://github.com/ClemensElflein/open_mower_ros.git
-cd open_mower_ros          # main, or check out the tag you want and run git submodule update --init --recursive
-
-# ros1/ and ros2/ side by side: ros1 takes the planner from ../../ros2, catkin skips ros2 (CATKIN_IGNORE)
-mkdir -p src/lib/mowbite
-git -C "$MOWBITE" archive HEAD ros1 ros2 | tar -x -C src/lib/mowbite
-
-# OM_PLANNER switch in the launch file, mower_map keeps the area properties it doesn't know
-git apply src/lib/mowbite/ros1/openmower.patch
-```
-
-`git archive` takes what's committed, without caches (`cp -r` works too). The patch is made for main at
-71dd04f: if it doesn't fit a newer version, `git checkout 71dd04f && git submodule update --init --recursive`
-gives that one. Settings for all areas go in
-`src/lib/mowbite/ros1/mowbite_planner_ros1/launch/mowbite_planner.launch` now (see [Settings](#settings)),
-they're part of the image.
-
-The mower is arm64. On an x86 PC, Docker needs arm64 emulation once (Docker Desktop has it built in):
-
-```bash
-docker run --privileged --rm tonistiigi/binfmt --install arm64
-```
-
-Then build with OpenMower's own Dockerfile (`docker/Dockerfile.Legacy` for OpenMowerOS v1):
-
-```bash
-docker buildx build --platform linux/arm64 -f docker/Dockerfile \
-  --build-arg OM_SOFTWARE_VERSION="$(git describe --tags --always)-mowbite" \
-  -t local/open_mower_ros:mowbite --load .
-```
-
-Emulated, that's slow, it builds all of OpenMower. On an arm64 machine (a Mac with Apple silicon, a
-Raspberry Pi 5) it runs natively. rosdep installs python3-shapely. `OM_SOFTWARE_VERSION` is the software
-version OpenMower reports, without it the build says v0.0.0 (the build context leaves out `.git`).
-
-Check that the planner is in it, this prints the package's path:
-
-```bash
-docker run --rm --platform linux/arm64 --entrypoint bash local/open_mower_ros:mowbite -c \
-  'source /opt/open_mower_ros/devel/setup.bash && rospack find mowbite_planner_ros1 && python3 -c "import mowbite_planner"'
-```
-
-### 3. Copy it to the mower
-
-```bash
-docker save local/open_mower_ros:mowbite | gzip | ssh openmower@<mower> docker load
-```
-
-The image takes a few GB, check `df -h` on the mower first. Keep the official image there, it's the way
-back. OpenMowerOS v1: `... | ssh <user>@<mower> sudo podman load`, podman calls it
-`localhost/local/open_mower_ros:mowbite` (`sudo podman images`). On Buildroot skip this step.
-
-### 4. Run it instead of the official image
-
-On the mower, keep copies of the two files you change:
-
-```bash
-cd /opt/stacks/openmower
-sudo cp compose.yaml compose.yaml.official
-sudo cp .env .env.official
-```
-
-In `compose.yaml` the service with `image: ghcr.io/clemenselflein/open_mower_ros:...` gets
-`image: local/open_mower_ros:mowbite` (the whole value, also if the tag comes from a variable). If it has
-`pull_policy: always`, remove that line. In `.env`, next to `HARDWARE_PLATFORM` and `MOWER`:
-
-```bash
-OM_PLANNER=mowbite
-OM_BLADE_WIDTH=0.18
-```
-
-`OM_BLADE_WIDTH` is the blade's cutting width. OpenMower's `tool_width` (in `mower_params.yaml`,
-`OM_TOOL_WIDTH` on OpenMowerOS v1) stays the lane spacing. Then:
-
-```bash
-sudo docker compose up -d                        # new container from your image
-docker ps --format '{{.Names}} {{.Image}}'        # its name
-docker exec <name> printenv OM_PLANNER            # mowbite
-```
-
-Nothing printed: the container doesn't get `.env`. Add the two settings under the service's
-`environment:` (`- OM_PLANNER=mowbite`) and run `sudo docker compose up -d` again. Dockge
-(`http://<mower>:5001`) does the same in the browser. Don't pull or update this stack while it runs your
-image, no registry has it.
-
-- **OpenMowerOS v1:** in the `podman run` line of the unit `systemctl cat openmower` shows, replace the
-  image with `localhost/local/open_mower_ros:mowbite` and drop a `podman pull` before it. Add
-  `export OM_PLANNER=mowbite` and `export OM_BLADE_WIDTH=0.18` to the config file, then
-  `sudo systemctl daemon-reload && sudo systemctl restart openmower`.
-- **OpenMower OS on Buildroot:** ROS runs from `/opt/openmower-root`, a copy of the image made when the OS
-  is built, read only. Build the OS around your image on the same PC, in a clone of
-  [OpenMower](https://github.com/ClemensElflein/OpenMower) (`git clone --recursive`):
-  `cd os && OMR_SOURCE=local-image OMR_IMAGE=local/open_mower_ros:mowbite make image`, and flash
-  `output/images/sdcard.img`. That replaces everything on the mower, back up `/data/openmower` first.
-  Update bundles (`.raucb`) you build later only install on a mower flashed with your keys (`os/keys/`).
-  Settings: `OM_PLANNER=mowbite` and `OM_BLADE_WIDTH=0.18` in `/data/openmower/openmower.conf` (no
-  `export`), then `systemctl restart openmower`.
-
-### 5. Going back
-
-- **slic3r with your image:** `planner.settings.set` with `{"planner": "slic3r"}` (the MowBite app's switch),
-  at once and for all areas: OpenMower's slic3r planner runs next to the MowBite Planner (`slic3r_classic`) and
-  plans, `mower_logic`'s request goes to it as it came. `{"planner": null}` goes back. Or without the MowBite
-  Planner: remove `OM_PLANNER` from `.env` and `sudo docker compose up -d` (on the other two OS from the config
-  file, then restart).
-- **The official image:** `sudo cp compose.yaml.official compose.yaml && sudo cp .env.official .env &&
-  sudo docker compose up -d`. Its `mower_map` drops the area properties it doesn't know (`planner`,
-  `angle_min`, `angle_max`, `mow_around`, `margin`) and saves the map without them next time: keep a map backup.
-
-Every switch changes the plans, an interrupted mow then starts its area again.
+Back to slic3r: the setting `planner` `slic3r` (the MowBite app's switch), at once and for all areas, the planner
+starts OpenMower's slic3r planner itself and hands it `mower_logic`'s request as it came. Or without the planner:
+`OM_PLANNER` out of OpenMower's `.env` and the planner's stack stopped.
 
 ### First run
 
 - [ ] A small, simple area, the mower docked, no mow interrupted.
-- [ ] The log (`docker logs -f <name> 2>&1 | grep MowBite`, on the other two OS
-  `journalctl -u openmower -f`) says `MowBite Planner answers /slic3r_coverage_planner/plan_path` at the
-  start. If not, `OM_PLANNER` didn't arrive and slic3r plans.
+- [ ] The planner's log (`docker logs -f mowbite_planner 2>&1 | grep MowBite`) says `MowBite Planner answers
+  /slic3r_coverage_planner/plan_path` at the start, and OpenMower's (`docker logs open_mower_ros`) doesn't start
+  `slic3r_coverage_planner`: else `OM_PLANNER=external` didn't arrive.
 - [ ] The plan before mowing: in MowBite, Map, the area, mowing settings, "show mowing plan" says "from
   the mower". Or over MQTT:
 
@@ -302,7 +169,8 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   `angle_mows` (towards the next step) and `angle_turned` (rad), `planner.angle.reset` sets them back to 0. Leave
   `mower_logic`'s `mow_angle_increment` at 0, both add up.
 - `planner` (not a planner setting, for all areas): `mowbite` or `slic3r`, OpenMower's slic3r planner plans then
-  (see Going back), `planner.plan` asks it like `mower_logic` would and gives its paths as a plan (no body check).
+  (see [Setup](#setup)), `planner.plan` asks it like `mower_logic` would and gives its paths as a plan (no body
+  check).
 - Plans are kept, the last 64 in `$ROS_HOME/mowbite_plans` (`/data/ros` in the container, parameter `plans_dir`), for
   this planner code only. 5 s after the map or the settings last changed every active mowing area is planned ahead
   like `planner.plan` plans it: the app's preview and the next mow find it at once (`kept: true` in `planner.plan`).

@@ -32,23 +32,20 @@ Expect a few % of the lawn near edges and obstacles to stay unmowed, depending o
 
 ## Setup on OpenMower
 
-The full steps are in [`ros1/README.md`](ros1/README.md). In short:
+OpenMower's official image stays as it is, the planner runs in a container of its own next to it. The full steps are
+in [`ros1/README.md`](ros1/README.md#setup). In short:
 
-1. Build your own OpenMower image with the planner in it (`ros1/` and `ros2/` copied into
-   `open_mower_ros/src/lib/mowbite`, `ros1/openmower.patch` applied, OpenMower's Dockerfile for arm64).
-2. Load it on the mower, point `compose.yaml` at it and set `OM_PLANNER=mowbite` and `OM_BLADE_WIDTH` in `.env`.
+1. In OpenMower's `.env`: `OM_PLANNER=external` (needs open_mower_ros #363, not merged yet: OpenMower's `pr-363`
+   image for testing).
+2. The planner as a stack of its own with [`ros1/compose.yaml`](ros1/compose.yaml), built on the mower on the same
+   OpenMower image (about 11 MB on top), `docker compose up -d`.
 3. Set the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) with
    `planner.settings.set` or in the MowBite app.
 4. Record the map with the mower's centre along the edges.
 5. Check the plan in the app before the first mow, and keep the emergency stop at hand.
 
-Going back to slic3r: remove `OM_PLANNER` from `.env`. Keep a map backup before going back to the official image,
-its `mower_map` drops the extra area properties.
-
-Once open_mower_ros has `OM_PLANNER=external` and keeps the extra area properties (PRs #363 and #364), no own image
-is needed: the planner runs as a container of its own next to the official image (`ros1/compose.yaml`, see
-[`ros1/README.md`](ros1/README.md#a-container-of-its-own-no-own-openmower-image)). To test it now: OpenMower's
-`pr-363` image.
+Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env`. An area's
+own settings and an obstacle's margin need open_mower_ros #364, without it `mower_map` drops them on the next save.
 
 ## Main settings
 
@@ -85,8 +82,7 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install shapely pytest
 ```
 
 `ros2/` also has a ROS 2 node, an MQTT service for OpenMower's Planner Studio and `tools/plot_coverage.py` to plot
-a plan without ROS. `open_mower_ros/` and `mowbite/` are copies of my OpenMower workspace and the app, not built
-from here.
+a plan without ROS.
 
 ## License
 

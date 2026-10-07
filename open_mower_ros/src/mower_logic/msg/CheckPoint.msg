@@ -1,6 +1,0 @@
-string job_id
-int32 currentMowingPath
-int32 currentMowingArea
-int32 currentMowingPathIndex
-string currentMowingPlanDigest
-float32 currentMowingAngleIncrementSum

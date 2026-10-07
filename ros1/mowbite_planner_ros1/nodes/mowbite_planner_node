@@ -10,7 +10,7 @@ On top, from OpenMower's map (mower_map_service/json_map) it finds the area the 
 with it the one that's active and mowable):
   - its "planner" property: any MowBite Planner setting for this area (pattern, turns, angle strategy...),
     and its angle_min/angle_max. With angle or angle_strategy in it the lanes go that way instead of
-    mower_logic's angle. Stock mower_map drops properties it doesn't know, see openmower.patch.
+    mower_logic's angle. mower_map keeps them since open_mower_ros #364, before it they're dropped.
   - its own angle: with one, mower_logic's angle counts even with angle or angle_strategy in settings.
   - the areas to mow around (mow_around) in it, on top of the obstacles mower_logic sends, and with
     nested_areas the other mowing areas lying in it (they get their own plan).

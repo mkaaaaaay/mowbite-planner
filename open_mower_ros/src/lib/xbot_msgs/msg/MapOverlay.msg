@@ -1,1 +1,0 @@
-MapOverlayPolygon[] polygons
