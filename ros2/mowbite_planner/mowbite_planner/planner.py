@@ -128,9 +128,13 @@ FIT_EASE = 1.5
 FIT_EASE_OFF = 0.01
 # what a metre driven counts against a metre of loops and lanes left out, picking one of _fit_body's ways
 FIT_DRIVE = 0.25
+# shares of turn_radius: the arcs of Dubins' ways _fit_body tries (arc, straight, arc or three arcs, turning half round
+# at most all together, the shortest FIT_DUBINS of each), before the ways turning on the spot at a corner
+FIT_ARCS = (1.0, 0.75, 0.5)
+FIT_DUBINS = 2
 # ways _fit_body tries at most for a plan, past that the path jumps over a place (a count, not a time: the same plan
 # every time)
-FIT_TRIES = 9000
+FIT_TRIES = 12000
 # m, where nothing fits that soon after a section begins it begins later. FIT_LATER: where nothing else does either
 # (turning round, driving on), getting to a section's start is up to whoever drives the path anyway
 FIT_START = 1.0
@@ -2206,16 +2210,16 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
 def _fit_body(route: '_Route', poses: List[Pose2D],
               infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """Where the body still sticks out (at a pose, or turning on the spot there), the path from a pose before it to one
-    after it (FIT_REACH before and after at most) another way that fits: straight (turning on the spot at both ends), or
-    in to the first point from where the two headings meet on towards where it can turn round whatever way it faces
-    (FIT_VIA) that it can turn at, and out again (straight, the further ways easing off the path's line and onto it,
-    FIT_EASE). Of those the one that leaves the least of the loops and lanes out, a metre driven counting FIT_DRIVE of
-    that (with headland_turns one into the lanes' field FIT_FIELD more), FIT_PLACE ways tried at most for a place and
-    FIT_TRIES for all. Where none fits it turns round before the place, or goes through turn_room (see FIT_AROUND), or
-    drives on through the transit space to one of the next poses that fit, or turns round further to the side, and
-    where none of that fits the path jumps from the pose before to the next one that fits (a section starts later where
-    the body doesn't fit at its start, nothing fits FIT_START after it or nothing else FIT_LATER after it, the path ends
-    before where it would jump last).
+    after it (FIT_REACH before and after at most) another way that fits: straight (turning on the spot at both ends),
+    Dubins' ways (FIT_ARCS), or in to the first point from where the two headings meet on towards where it can turn
+    round whatever way it faces (FIT_VIA) that it can turn at, and out again (straight, the further ways easing off the
+    path's line and onto it, FIT_EASE). Of those the one that leaves the least of the loops and lanes out, a metre
+    driven counting FIT_DRIVE of that (with headland_turns one into the lanes' field FIT_FIELD more), FIT_PLACE ways
+    tried at most for a place (and the Dubins' ways) and FIT_TRIES for all. Where none fits it turns round before the
+    place, or goes through turn_room (see FIT_AROUND), or drives on through the transit space to one of the next poses
+    that fit, or turns round further to the side, and where none of that fits the path jumps from the pose before to the
+    next one that fits (a section starts later where the body doesn't fit at its start, nothing fits FIT_START after it
+    or nothing else FIT_LATER after it, the path ends before where it would jump last).
     Where the path starts later in its first section or ends before, a way from where the body turns whatever way it
     faces closest to its start, or to the one closest to its end. Returns the poses, the segments (the ways in place
     TRANSIT 'body', a jump within a section starts one of its own) and {'fixed': ways in place, 'left': places left out
@@ -2264,6 +2268,14 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
 
     def ways(a: Pose2D, b: Pose2D, eased: bool) -> Iterator[List[Pose2D]]:
         yield straight(a, b)
+        # (round: no turning on the spot, the body needs no room round where it would. Tries of their own, the ways
+        # after them get as many as before; with headland_turns not into the lanes' field)
+        for share in FIT_ARCS:
+            for m in dubins(a, b, share * route.cfg.turn_radius, step, turning=math.pi)[:FIT_DUBINS]:
+                way = m.pieces[0].poses
+                if route.field is None or route.clear([(q.x, q.y) for q in way]):
+                    most[0] += 1
+                    yield way
         # in to the first point that it can turn at from where the two headings meet (a corner) on towards where it
         # can turn round whatever way it faces, and out again: straight, or (eased) off a's line and onto b's no
         # faster than the rear and the front swing out
