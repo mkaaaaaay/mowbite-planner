@@ -24,8 +24,9 @@ space by moving the body along the recorded lines, then checks every pose and ev
 whole body (a rectangle, or the measured outline of your mower) and keeps a margin to the edges.
 
 Where the body doesn't fit, only that spot changes: the mower takes another way or turns back before a place that's
-too narrow, and that bit stays unmowed. Turns on the spot get some extra margin, because OpenMower's FTC controller
-starts turning a few cm before the turn point.
+too narrow, and that bit stays unmowed. Turning on the spot and the turns between the lanes get some extra margin:
+OpenMower's FTC controller starts turning a few cm before the turn point, and in a turn the mower keeps less
+exactly to its path.
 
 Expect a few % of the lawn near edges and obstacles to stay unmowed, depending on the margins.
 
@@ -52,7 +53,7 @@ its `mower_map` drops the extra area properties.
 | `robot_outline` | none | measured outline `[[x, y], ...]` instead of the rectangle |
 | `edge_margin` | 0.05 | margin to the boundary (m) |
 | `obstacle_margin` | 0.10 | margin to obstacles (m), `margin` on an obstacle in the map overrides it |
-| `spin_margin` | 0.05 | extra margin when turning on the spot (m) |
+| `spin_margin` | 0.05 | extra margin when turning on the spot and in the turns between lanes (m) |
 | `turn_radius` | 0.25 | radius of the turns (m) |
 | `headland_turns` | false | clean stripes |
 | `turn_on_spot` | false | turn on the spot instead of loops |

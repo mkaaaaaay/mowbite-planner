@@ -311,8 +311,9 @@ class PlannerConfig:
     obstacle_margin: float = 0.10
     # m, with the body checked: turning on the spot (the heading jumping by more than footprint.SPIN from one pose to
     # the next) it keeps this much further off the edges than those margins, anywhere on the last footprint.SPIN_BACK
-    # of the way in: OpenMower's FTC turns over the way to the point and drifts a few cm doing so. 0: only at the point,
-    # the margins as everywhere
+    # of the way in: OpenMower's FTC turns over the way to the point and drifts a few cm doing so. On the turns between
+    # the lanes too (U-turns, loops, detours, all of them): there the mower keeps less exactly to its path, its corners
+    # swinging further. 0: only at the point, the margins as everywhere
     spin_margin: float = 0.05
     # where the body would still stick out (a turn on the spot, a loop in a tight spot), the path goes another way there
     # that fits, leaving a little of a loop or lane out where it has to (_fit_body, stats['body_fit']). False: the path
@@ -1063,6 +1064,8 @@ class _Route:
         self.cfg = cfg
         self.footprint = footprint
         self.body = footprint.poses_fit if footprint is not None else None
+        # (a turn between lanes: spin_margin all along it too)
+        self.turn_body = (lambda poses: footprint.poses_fit(poses, True)) if footprint is not None else None
         self.transit = transit  # shortest ways, through the drivable areas too
         self.area = area  # turns and loops stay inside the mowing area
         self.step = cfg.waypoint_spacing
@@ -1697,7 +1700,7 @@ class _Route:
             return None
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.cfg.allow_reverse, self.step, self.area.is_free, self.detour_path,
-                         self.cfg.allowed_turns, self.body, self.cfg.min_turn_radius)
+                         self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius)
         if (turn is None or turn.name == 'pivot') and self.cfg.min_turn_radius > 0:
             earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
             if earlier is not None:
@@ -1792,7 +1795,7 @@ class _Route:
 
                 def turn_to(entry: XY, types) -> Optional[Maneuver]:
                     return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
-                                     self.turn_space(entry), self.detour_path, types, self.body,
+                                     self.turn_space(entry), self.detour_path, types, self.turn_body,
                                      self.cfg.min_turn_radius)
 
                 # the turn goes level with the lane end further out, where the body may not fit (body_ends only
@@ -1870,7 +1873,7 @@ class _Route:
             for rr in turn_radii(r, 4.0 * r, least):
                 for m in dubins(exit_pose, Pose2D(entry[0], entry[1], yaw), rr, self.step, loops):
                     poses = m.pieces[0].poses
-                    if fits([(p.x, p.y) for p in poses]) and (self.body is None or self.body(poses)):
+                    if fits([(p.x, p.y) for p in poses]) and (self.body is None or self.turn_body(poses)):
                         return m
             return None
 
@@ -1895,7 +1898,7 @@ class _Route:
             turn = shortest(exit_pose, entry, False) if 'u_turn' in self.cfg.allowed_turns else None
             if turn is None and k:
                 turn = plan_turn(exit_pose, entry, r, self.cfg.allow_reverse, self.step, fits, self.detour_path, types,
-                                 self.body, least, False)
+                                 self.turn_body, least, False)
             k += 1
             if turn is None:
                 continue
@@ -1980,10 +1983,10 @@ class _Route:
                 return True
             # leaving at the end, arriving at the start (worked out backwards, facing the other way)
             if t > 0.5 * length:
-                return not leave or self.footprint.poses_fit(sample_arc(x, y, yaw, r, leave * quarter, self.step))
+                return not leave or self.footprint.poses_fit(sample_arc(x, y, yaw, r, leave * quarter, self.step), True)
             return not arrive or self.footprint.poses_fit(
                 [Pose2D(p.x, p.y, p.yaw + math.pi) for p in sample_arc(x, y, yaw + math.pi, r, -arrive * quarter,
-                                                                         self.step)])
+                                                                         self.step)], True)
 
         def edge(inside: float, outside: float) -> float:
             # where between a point that fits and one that doesn't it stops fitting, the side that fits
@@ -2126,10 +2129,11 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
             return space(pts) and (not clear or route.clear(pts))
 
         at = Pose2D(p.x, p.y, before.yaw)
+        body = route.turn_body if route.segments[i].kind == TURN else route.body  # (on a turn spin_margin too)
         for share in SMOOTH_RADII:
             r = share * cfg.turn_radius
             loop = omega(at, turn, r, route.step) if r >= max(1e-3, cfg.min_turn_radius - 1e-9) else None
-            if loop and fits([(q.x, q.y) for q in loop]) and (route.body is None or route.body([before] + loop)):
+            if loop and fits([(q.x, q.y) for q in loop]) and (body is None or body([before] + loop)):
                 inserts[(i, j)] = [(loop, False)]
                 route._count('spins_smoothed')
                 return
@@ -2216,7 +2220,10 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         section[info.start:info.end + 1] = [info.section] * (info.end + 1 - info.start)
         mows[info.start + 1:info.end + 1] = [info.kind in (PERIMETER, LANE)] * (info.end - info.start)
     starts = {i for i in range(n) if i == 0 or section[i] != section[i - 1]}
-    fit, turn_room = fp.fit(poses), fp.turning.anywhere
+    on_turn = [False] * n  # (on the way to it: a turn between lanes, spin_margin all along it too)
+    for info in infos:
+        on_turn[info.start + 1:info.end + 1] = [info.kind == TURN] * (info.end - info.start)
+    fit, turn_room = fp.fit(poses, on_turn), fp.turning.anywhere
     tries, most = [0], [0]  # (most: the tries this place may take up to)
     turns: Dict[Tuple[float, ...], bool] = {}  # fits_turn where and which way, rounded (ways share their corner)
 
@@ -2638,11 +2645,13 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         bad = [(poses[o - 1] if o not in starts else None, o) for o in range(a, b + 1)
                if not fits(poses[o - 1] if o not in starts else None, o)]
         best = None
-        for (rough, at), (before, o) in sorted(zip(fp.out_by([(q, poses[o]) for q, o in bad], PLACE_STEP), bad),
+        for (rough, at), (before, o) in sorted(zip(fp.out_by([(q, poses[o]) for q, o in bad], PLACE_STEP,
+                                                             on_turn=[on_turn[o] for _, o in bad]), bad),
                                                key=lambda g: (-g[0][0], g[1][1])):
             if best is not None and rough + 0.5 * PLACE_STEP <= best[0]:
                 break
-            d = max(rough, fp.out_by([(before, poses[o])], around=at and (at[0], at[1], PLACE_STEP))[0][0])
+            d = max(rough, fp.out_by([(before, poses[o])], around=at and (at[0], at[1], PLACE_STEP),
+                                     on_turn=[on_turn[o]])[0][0])
             if best is None or d > best[0]:
                 best = (d, before, o)
         d, before, o = best or (0.0, None, (a + b) // 2)
@@ -3636,17 +3645,20 @@ def plan_footprint(plan: CoveragePlan) -> Optional[Footprint]:
 def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
              footprint: Footprint) -> List[Dict[str, Any]]:
     """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
-    'lane_end', 'loop' or 'transit' (what the pose belongs to)."""
+    'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
+    (footprint.OnTurn)."""
     kind_at: Dict[int, str] = {}
+    on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
     for seg in segments:
         kind = {TURN: 'turn', TRANSIT: 'transit', PERIMETER: 'loop'}.get(seg.kind, 'loop' if seg.maneuver == 'ring'
                                                                          else 'lane_end')
         for i in range(seg.start, seg.end + 1):
             kind_at[i] = kind
+        on_turn[seg.start + 1:seg.end + 1] = [seg.kind == TURN] * (seg.end - seg.start)
     out = []
     for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
         part = poses[a:b]
-        for i in footprint.bad_poses(part):
+        for i in footprint.bad_poses(part, on_turn[a:b]):
             p = part[i]
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
                         'kind': 'spin' if footprint.spins(part, i) else kind_at.get(a + i, 'transit')})

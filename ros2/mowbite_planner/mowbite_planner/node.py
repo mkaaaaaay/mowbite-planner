@@ -105,7 +105,8 @@ PARAMETERS = {
                         'round it further out for it', lambda v: v >= 0.0, 'must be >= 0'),
     'spin_margin': (0.05, 'how much further the body keeps off the edges turning on the spot and at a kink of more '
                     "than 15 deg [m], anywhere on the last 0.1 m of the way in (OpenMower's FTC turns over the way to "
-                    'the point and drifts a few cm). 0: only at the point, the margins as everywhere',
+                    'the point and drifts a few cm), and all along the turns between lanes. 0: only at the point, '
+                    'the margins as everywhere',
                     lambda v: v >= 0.0, 'must be >= 0'),
     'blade_offset': (0.0, "how far the blade's centre sits left of the mower's centre [m], negative: right. The "
                      'loops go round with the blade on their outer side', math.isfinite, 'must be a number'),
