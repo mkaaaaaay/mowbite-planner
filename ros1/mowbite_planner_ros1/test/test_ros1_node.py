@@ -199,6 +199,7 @@ def planner():
         pass
     # no plans kept from other tests, none planned ahead in the background (test_plan_ahead does that itself)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
+    shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
     node_module.PLAN_AHEAD_DELAY = 1e6
     return node_module.MowbitePlannerRos1()
 
@@ -598,7 +599,7 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.plan', 'planner.settings', 'planner.settings.set']
+    methods = ['planner.angle.reset', 'planner.drive', 'planner.plan', 'planner.settings', 'planner.settings.set']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -981,3 +982,40 @@ def test_planner_slic3r(planner, monkeypatch):
     assert again.current.planner == 'mowbite'
     check(again.handle(request()))
     assert not asked
+
+
+def track_file(job, segments):
+    """A position_history file of OpenMower for job: [(blades, [(x, y), ...]), ...]."""
+    folder = os.path.join(os.environ['ROS_HOME'], 'position_history')
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, '1791377699_%s.jsonl' % job)
+    with open(path, 'w') as f:
+        for blades, pts in segments:
+            f.write(json.dumps({'type': 'new_segment', 'attributes': {'job_id': job, 'blades': blades},
+                                'points': []}) + '\n')
+            f.write(json.dumps({'type': 'append_points', 'points': [list(p) for p in pts]}) + '\n')
+    return path
+
+
+def test_planner_drive(planner):
+    """planner.drive: the driven track (OpenMower's position_history) against the plan's body_space, the places where
+    the body got more than DRIVE_OFF into the margins, the furthest point of each; after a finished mow by itself, in
+    the log and as the answer without params. Without a track an error."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
+    send_map(the_map())
+    result, error = rpc('planner.drive', {'job_id': 'nope'})
+    assert result is None and 'no track' in error[1]
+    inside = [(x / 10.0, 5.0) for x in range(10, 61)]
+    out = [(19.0, 2.0), (19.5, 2.0), (20.05, 2.0), (20.1, 2.0), (19.5, 2.4), (18.0, 2.4)]
+    track_file('job1', [(False, [(1.0, 5.0)]), (True, inside), (True, out)])
+    result, error = rpc('planner.drive', {'job_id': 'job1'})
+    assert error is None and result['file'] == '1791377699_job1.jsonl'
+    a = result['areas']['a']
+    assert a['checked'] > 50 and len(a['places']) == 1 and a['places'][0][:2] == [20.05, 2.0] and a['worst'] > 0.2
+    assert node_module.DRIVE_OFF == 0.01
+    # after a finished mow by itself
+    rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
+        topic='events/json', payload=json.dumps({'type': 'JOB_COMPLETE', 'job_id': 'job1'})))
+    planner.drive_thread.join(60.0)
+    assert any(level == 'warn' and 'got into the margins at 1 places' in line for level, line in rospy.log)
+    assert rpc('planner.drive')[0] == result

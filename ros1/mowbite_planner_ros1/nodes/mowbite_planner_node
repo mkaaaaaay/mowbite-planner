@@ -50,6 +50,11 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         like planner.settings
   planner.angle.reset   back to no steps of angle_increment turned (answers like planner.settings, which says
                         angle_steps, angle_mows: the finished mows towards the next step, angle_turned in rad)
+  planner.drive         how close the body came to the edges driving: {job_id or file (of position_history, default:
+                        the latest), area_id (default: every active mowing area)} gives {file, areas: {id: {checked,
+                        places: [[x, y, m]] where the body at a driven point got m into the margins (more than
+                        DRIVE_OFF; not within DOCK_REACH of a docking station), worst}}}. After every finished
+                        mow (JOB_COMPLETE) the same for that job, in the log and as the answer without params
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
@@ -80,6 +85,7 @@ import threading
 import time
 
 import rospy
+from shapely.geometry import Point as Spot
 from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion
 from nav_msgs.msg import Path
 from slic3r_coverage_planner.msg import Path as PlannerPath
@@ -92,6 +98,7 @@ import mowbite_planner
 from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D, SegmentInfo, plan_coverage,
                              quaternion_to_yaw, yaw_to_quaternion)
 from mowbite_planner import planner as limits
+from mowbite_planner.planner import plan_footprint
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.geometry import clean_polygon, polygonal, union
 from mowbite_planner.mapfile import area_job, margins_for, match_area, openmower_settings
@@ -143,6 +150,14 @@ EVENTS_TOPIC = 'events/json'
 # OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
 # backing up leg would hold the mower until it times out): allow_reverse counts only then
 BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
+# OpenMower's track of every job (ROS_HOME/position_history/<start>_<job id>.jsonl): what planner.drive checks, a
+# driven point whose body gets more than DRIVE_OFF m into the margins is a place, points closer than DRIVE_STEP m to the
+# one before give no heading and are left out
+HISTORY_DIR = 'position_history'
+DRIVE_OFF = 0.01
+DRIVE_STEP = 0.02
+# m round a docking station the track isn't checked: docking it drives over the area's edge on purpose
+DOCK_REACH = 1.0
 # s between looks at the master's /run_id, a new one means it restarted and doesn't know this node any more
 MASTER_CHECK = 5.0
 
@@ -229,6 +244,10 @@ class MowbitePlannerRos1:
         self.angle_lock = threading.Lock()
         self.angle = self.read_angle()
         self.local = threading.local()  # whether the last plan of this thread was kept from before
+        self.history = os.path.expanduser(rospy.get_param('~history_dir', os.path.join(
+            os.environ.get('ROS_HOME', '~/.ros'), HISTORY_DIR)))
+        self.drive = None  # the last finished mow's planner.drive
+        self.drive_thread = None
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
@@ -240,6 +259,7 @@ class MowbitePlannerRos1:
             self.rpc = XbotRpc('mowbite_planner', {'planner.settings': self.rpc_settings,
                                                    'planner.settings.set': self.rpc_settings_set,
                                                    'planner.plan': self.rpc_plan,
+                                                   'planner.drive': self.rpc_drive,
                                                    'planner.angle.reset': self.rpc_angle_reset})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
 
@@ -375,6 +395,8 @@ class MowbitePlannerRos1:
             return
         if not isinstance(event, dict) or event.get('type') != 'JOB_COMPLETE':
             return
+        self.drive_thread = threading.Thread(target=self.drive_after, args=(event.get('job_id'),), daemon=True)
+        self.drive_thread.start()
         base = self.current.base
         with self.lock:
             data = self.map
@@ -415,11 +437,12 @@ class MowbitePlannerRos1:
         self.plan_ahead_later()
         return self.rpc_settings()
 
-    def rpc_plan(self, params):
+    def rpc_plan(self, params, keep=None):
+        """keep: a list the plan itself goes to too."""
         current = self.current
         with self.lock:
             data = self.map
-        if current.planner == 'slic3r':
+        if current.planner == 'slic3r' and keep is None:
             # what mower_logic would ask the slic3r planner: OpenMower's settings and the area's, not the node's
             service = PlannerService(PlannerConfig(mower_width=current.mower_width, nested_areas=False))
             service.planner = self.classic_plan
@@ -427,7 +450,8 @@ class MowbitePlannerRos1:
             service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width,
                                                                   'angle_steps': self.angle['steps']}),
                                      current.own_angle)
-            service.planner = self.plan_coverage
+            service.planner = self.plan_coverage if keep is None else (
+                lambda *args, **kw: keep.append(self.plan_coverage(*args, **kw)) or keep[-1])
             service.own = current.own
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
@@ -435,6 +459,77 @@ class MowbitePlannerRos1:
         result = service.plan(params)
         result['kept'] = self.local.kept  # planned before (ahead, or the same asked for already)
         return result
+
+    def rpc_drive(self, params):
+        if not params and self.drive is not None:
+            return self.drive
+        return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
+
+    def drive_after(self, job_id):
+        """planner.drive of a finished mow, in the log."""
+        try:
+            self.drive = got = self.drive_check(job_id)
+        except PlanningError as e:
+            rospy.logwarn('MowBite Planner: drive not checked: %s', e)
+            return
+        except Exception as e:  # noqa: BLE001 - a check must not take the planner down
+            rospy.logerr('MowBite Planner: checking the drive failed: %s: %s', type(e).__name__, e)
+            return
+        for area_id, a in got['areas'].items():
+            if a['places']:
+                rospy.logwarn('MowBite Planner: area %s, the body got into the margins at %d places, %.0f cm the most, '
+                              'at %s', area_id, len(a['places']), 100 * a['worst'],
+                              ', '.join('(%.2f, %.2f) %.0f cm' % (x, y, 100 * m) for x, y, m in a['places'][:5]))
+            else:
+                rospy.loginfo('MowBite Planner: area %s, the body kept its margins (%d points)', area_id, a['checked'])
+
+    def drive_check(self, job_id=None, name=None, area_id=None):
+        """planner.drive: the track of a job (its position_history file, the latest without one) against the plans'
+        body_space: where the body at a driven point (facing the next one) got into the margins."""
+        if self.current.planner == 'slic3r':
+            raise PlanningError('planner slic3r: no body checked')
+        files = sorted(glob.glob(os.path.join(self.history, '*.jsonl')), key=os.path.getmtime) if self.history else []
+        if name:
+            files = [f for f in files if os.path.basename(f) == os.path.basename(str(name))]
+        elif job_id:
+            files = [f for f in files if f.endswith('_%s.jsonl' % job_id)]
+        if not files:
+            raise PlanningError('no track in %s' % (self.history or 'position_history'))
+        track = read_track(files[-1])
+        with self.lock:
+            data = self.map
+        if area_id is not None:
+            ids = [area_id]
+        else:
+            ids = [a.get('id') for a in (data or {}).get('areas', []) if a.get('id') and
+                   (a.get('properties') or {}).get('type') == 'mow' and
+                   (a.get('properties') or {}).get('active') is not False]
+        docks = [((d.get('position') or {}).get('x'), (d.get('position') or {}).get('y'))
+                 for d in (data or {}).get('docking_stations') or []]
+        docks = [(x, y) for x, y in docks if isinstance(x, (int, float)) and isinstance(y, (int, float))]
+        track = [p for p in track if all(math.hypot(p.x - x, p.y - y) > DOCK_REACH for x, y in docks)]
+        out = {}
+        for i in ids:
+            keep = []
+            self.rpc_plan({'area_id': i}, keep)
+            fp = plan_footprint(keep[-1]) if keep else None
+            if fp is None:
+                continue
+            near = keep[-1].area.buffer(0.5)
+            poses = [p for p in track if near.contains(Spot(p.x, p.y))]
+            outs = fp.out_by([(None, p) for p in poses]) if poses else []
+            places, run = [], None
+            for p, (m, _) in zip(poses, outs):
+                if m > DRIVE_OFF:  # (a place: points one after the other out there, where it's the furthest)
+                    if run is None or m > run[2]:
+                        run = [round(p.x, 2), round(p.y, 2), m]
+                elif run is not None:
+                    places.append(run)
+                    run = None
+            if run is not None:
+                places.append(run)
+            out[i] = {'checked': len(poses), 'places': places, 'worst': max([m for _, _, m in places], default=0.0)}
+        return {'file': os.path.basename(files[-1]), 'areas': out}
 
     def classic_answer(self, req):
         """The slic3r planner's answer, PlanningError when there's none."""
@@ -712,6 +807,24 @@ def code_version():
                 with open(os.path.join(root, name), 'rb') as f:
                     digest.update(name.encode() + b'\0' + f.read())
     return digest.hexdigest()
+
+
+def read_track(path):
+    """The driven points of a position_history file (OpenMower's: new_segment and append_points lines of [x, y]),
+    each facing the next one (DRIVE_STEP apart at least, the last one as the one before)."""
+    pts = []
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            for xy in rec.get('points') or []:
+                if isinstance(xy, (list, tuple)) and len(xy) >= 2 and (
+                        not pts or math.hypot(xy[0] - pts[-1][0], xy[1] - pts[-1][1]) >= DRIVE_STEP):
+                    pts.append((float(xy[0]), float(xy[1])))
+    out = [Pose2D(x, y, math.atan2(b[1] - y, b[0] - x)) for (x, y), b in zip(pts, pts[1:])]
+    return out + [Pose2D(pts[-1][0], pts[-1][1], out[-1].yaw)] if out else []
 
 
 def master_restarted(run_id):
