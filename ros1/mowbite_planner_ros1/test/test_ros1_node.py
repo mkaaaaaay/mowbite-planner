@@ -903,3 +903,32 @@ def test_angle_increment(planner):
     event('JOB_COMPLETE')
     event('JOB_COMPLETE')
     assert node_module.MowbitePlannerRos1().angle == {'steps': 1, 'mows': 0}
+
+
+def test_master_restarted(monkeypatch):
+    """A new /run_id is a restarted master, one that's down isn't (yet)."""
+    monkeypatch.setitem(rospy.params, '/run_id', 'a')
+    assert not node_module.master_restarted('a')
+    monkeypatch.setitem(rospy.params, '/run_id', 'b')
+    assert node_module.master_restarted('a')
+
+    def down(name, default=None):
+        raise ConnectionRefusedError
+    monkeypatch.setattr(rospy, 'get_param', down)
+    assert not node_module.master_restarted('a')
+
+
+def test_main_ends_when_the_master_restarts(monkeypatch):
+    """In a container of its own the node ends with 1 once the master has another /run_id, to register again."""
+    ids = iter(['a', 'a', 'b'])
+    shut = []
+    monkeypatch.setattr(rospy, 'get_param', lambda name, default=None: next(ids))
+    monkeypatch.setattr(rospy, 'init_node', lambda name: None, raising=False)
+    monkeypatch.setattr(rospy, 'is_shutdown', lambda: False, raising=False)
+    monkeypatch.setattr(rospy, 'signal_shutdown', shut.append, raising=False)
+    monkeypatch.setattr(node_module, 'MowbitePlannerRos1', lambda: None)
+    monkeypatch.setattr(node_module, 'MASTER_CHECK', 0.0)
+    with pytest.raises(SystemExit) as end:
+        node_module.main()
+    assert end.value.code == 1 and shut == ['ROS master restarted']
+    assert ('warn', 'MowBite Planner: the ROS master restarted, ending to register again') in rospy.log

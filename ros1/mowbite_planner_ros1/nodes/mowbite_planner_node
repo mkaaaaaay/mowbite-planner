@@ -57,6 +57,10 @@ planner.plan plans it, so the app's preview and the next mow find their plan at 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
 angle_min..angle_max. mower_logic's own mow_angle_increment is best left at 0, both add up.
+
+In a container of its own (OM_PLANNER=external in open_mower_ros) the node ends with exit code 1 when the ROS master
+restarts (a new /run_id): the new master doesn't know its service and RPC methods, a restarted container registers
+them again. Its restart policy has to be on (restart: unless-stopped).
 """
 
 import collections
@@ -126,6 +130,8 @@ EVENTS_TOPIC = 'events/json'
 # OpenMower's FTC controller backs up where the plan does only with this on (forward_only stops it otherwise, a
 # backing up leg would hold the mower until it times out): allow_reverse counts only then
 BACK_UP_PARAM = '/move_base_flex/FTCPlanner/back_up_with_plan'
+# s between looks at the master's /run_id, a new one means it restarted and doesn't know this node any more
+MASTER_CHECK = 5.0
 
 
 class XbotRpc:
@@ -619,10 +625,24 @@ def code_version():
     return digest.hexdigest()
 
 
+def master_restarted(run_id):
+    """Whether the master now has another /run_id than run_id. While it's down: no (the new one comes later)."""
+    try:
+        return rospy.get_param('/run_id', run_id) != run_id
+    except OSError:
+        return False
+
+
 def main():
     rospy.init_node('slic3r_coverage_planner')
     MowbitePlannerRos1()
-    rospy.spin()
+    run_id = rospy.get_param('/run_id', None)
+    while not rospy.is_shutdown():
+        time.sleep(MASTER_CHECK)
+        if run_id is not None and master_restarted(run_id):
+            rospy.logwarn('MowBite Planner: the ROS master restarted, ending to register again')
+            rospy.signal_shutdown('ROS master restarted')
+            raise SystemExit(1)
 
 
 if __name__ == '__main__':
