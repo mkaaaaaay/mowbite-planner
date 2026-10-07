@@ -196,8 +196,11 @@ image, no registry has it.
 
 ### 5. Going back
 
-- **slic3r with your image:** remove `OM_PLANNER` from `.env` and `sudo docker compose up -d` (on the
-  other two OS from the config file, then restart).
+- **slic3r with your image:** `planner.settings.set` with `{"planner": "slic3r"}` (the MowBite app's switch),
+  at once and for all areas: OpenMower's slic3r planner runs next to the MowBite Planner (`slic3r_classic`) and
+  plans, `mower_logic`'s request goes to it as it came. `{"planner": null}` goes back. Or without the MowBite
+  Planner: remove `OM_PLANNER` from `.env` and `sudo docker compose up -d` (on the other two OS from the config
+  file, then restart).
 - **The official image:** `sudo cp compose.yaml.official compose.yaml && sudo cp .env.official .env &&
   sudo docker compose up -d`. Its `mower_map` drops the area properties it doesn't know (`planner`,
   `angle_min`, `angle_max`, `mow_around`, `margin`) and saves the map without them next time: keep a map backup.
@@ -269,6 +272,8 @@ Without a new image, through OpenMower's JSON-RPC (MQTT `rpc/request`, like `mow
   `planner` property. The steps so far are kept next to the settings file, `planner.settings` says `angle_steps`,
   `angle_mows` (towards the next step) and `angle_turned` (rad), `planner.angle.reset` sets them back to 0. Leave
   `mower_logic`'s `mow_angle_increment` at 0, both add up.
+- `planner` (not a planner setting, for all areas): `mowbite` or `slic3r`, OpenMower's slic3r planner plans then
+  (see Going back), `planner.plan` asks it like `mower_logic` would and gives its paths as a plan (no body check).
 - Plans are kept, the last 64 in `$ROS_HOME/mowbite_plans` (`/data/ros` in the container, parameter `plans_dir`), for
   this planner code only. 5 s after the map or the settings last changed every active mowing area is planned ahead
   like `planner.plan` plans it: the app's preview and the next mow find it at once (`kept: true` in `planner.plan`).

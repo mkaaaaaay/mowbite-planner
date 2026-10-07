@@ -57,6 +57,7 @@ its `mower_map` drops the extra area properties.
 | `turn_radius` | 0.25 | radius of the turns (m) |
 | `headland_turns` | false | clean stripes |
 | `turn_on_spot` | false | turn on the spot instead of loops |
+| `planner` | mowbite | `slic3r`: OpenMower's slic3r planner plans instead, for all areas (no body check) |
 
 All settings, the RPCs and what the plan answer contains: [`ros1/README.md`](ros1/README.md),
 [`ros2/README.md`](ros2/README.md).

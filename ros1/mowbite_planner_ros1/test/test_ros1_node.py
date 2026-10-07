@@ -625,7 +625,9 @@ def test_rpc_settings(planner):
     result, error = rpc('planner.settings')
     assert error is None and result['file'] == stored_file() and result['own_angle'] is False
     s = result['settings']
-    assert set(s) == set(node_module.PlannerConfig.names())
+    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner'}
+    assert s['planner'] == {'value': 'mowbite', 'default': 'mowbite', 'stored': False, 'type': 'string',
+                            'settable': True, 'choices': ['mowbite', 'slic3r']}
     assert s['turn_radius'] == {'value': 0.25, 'default': 0.25, 'stored': False, 'type': 'number', 'settable': True,
                                 'unit': 'm', 'min': 0.0, 'max': 10.0}
     assert s['mower_width']['value'] == 0.18 and s['mower_width']['settable']
@@ -751,6 +753,7 @@ def test_rpc_settings_angle(planner):
     ({'body_fit': 1}, 'body_fit must be true or false'),
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),
+    ({'planner': 'fast'}, 'planner must be one of mowbite, slic3r'),
 ])
 def test_rpc_settings_set_refused(planner, params, message):
     rpc('planner.settings.set', {'turn_radius': 0.3})
@@ -932,3 +935,64 @@ def test_main_ends_when_the_master_restarts(monkeypatch):
         node_module.main()
     assert end.value.code == 1 and shut == ['ROS master restarted']
     assert ('warn', 'MowBite Planner: the ROS master restarted, ending to register again') in rospy.log
+
+
+def slic3r_path(is_outline, points):
+    """A path as OpenMower's slic3r planner answers it, poses facing the next point."""
+    poses = []
+    for (x, y), (nx, ny) in zip(points, points[1:] + [points[-1]]):
+        yaw = math.atan2(ny - y, nx - x) if (nx, ny) != (x, y) else 0.0
+        poses.append(node_module.PoseStamped(pose=node_module.Pose(
+            position=node_module.Point(x=x, y=y, z=0.0),
+            orientation=node_module.Quaternion(x=0.0, y=0.0, z=math.sin(yaw / 2), w=math.cos(yaw / 2)))))
+    return node_module.PlannerPath(is_outline=is_outline, path=node_module.Path(poses=poses))
+
+
+def test_planner_slic3r(planner, monkeypatch):
+    """planner slic3r (for all areas, kept like the settings): mower_logic's request goes to OpenMower's slic3r planner
+    as it came and its answer back as it is; planner.plan asks it like mower_logic would (OpenMower's settings, none of
+    the node's) and gives its paths as a plan, nothing planned ahead. Where the slic3r planner doesn't answer the
+    MowBite Planner plans, and the log says why. planner null: the MowBite Planner again."""
+    asked = []
+    answer = node_module.PlanPathResponse(paths=[slic3r_path(1, [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0)]),
+                                                 slic3r_path(0, [(1.0, 2.0), (2.0, 2.0), (3.0, 2.0), (4.0, 2.0)])])
+
+    def proxy(name, kind):  # (the node's others as they were)
+        return (lambda req: asked.append(req) or answer) if name == '/slic3r_classic/plan_path' else real(name, kind)
+
+    real = rospy.ServiceProxy
+    monkeypatch.setattr(rospy, 'ServiceProxy', proxy, raising=False)
+    rospy.params['/mower_logic'] = {'tool_width': 0.14, 'outline_count': 2, 'outline_offset': 0.0,
+                                    'outline_overlap_count': 1}
+    result, error = rpc('planner.settings.set', {'planner': 'slic3r', 'perimeter_passes': -1})
+    assert error is None and result['settings']['planner']['value'] == 'slic3r'
+    assert result['settings']['planner']['stored']
+    with open(stored_file()) as f:
+        assert json.load(f) == {'perimeter_passes': -1, 'planner': 'slic3r'}
+    req = request()
+    assert planner.handle(req) is answer and asked == [req]
+    send_map(the_map())
+    result, error = rpc('planner.plan', {'area_id': 'a', 'report': True})
+    assert error is None and [p['is_outline'] for p in result['paths']] == [1, 0]
+    sent = asked[-1]
+    assert sent.distance == pytest.approx(0.14) and sent.outline_count == 2 and len(sent.holes) == 1
+    assert result['stats']['path_length'] == pytest.approx(5.0) and 'report' in result
+    assert any('slic3r' in w for w in result['warnings'])
+    asked.clear()
+    planner.plan_ahead()
+    assert not asked
+    # no slic3r planner: the MowBite Planner's plan, and why in the log
+    monkeypatch.setattr(rospy, 'wait_for_service', lambda name, timeout=None: (_ for _ in ()).throw(
+        rospy.ROSException('timeout')), raising=False)
+    planner.classic = None
+    check(planner.handle(request()))
+    assert any(level == 'error' and 'no answer from the slic3r planner' in line for level, line in rospy.log)
+    # after a restart still, then back to the MowBite Planner
+    monkeypatch.setattr(rospy, 'wait_for_service', lambda name, timeout=None: None, raising=False)
+    again = node_module.MowbitePlannerRos1()
+    assert again.current.planner == 'slic3r' and again.handle(req) is answer
+    asked.clear()
+    rpc('planner.settings.set', {'planner': None})
+    assert again.current.planner == 'mowbite'
+    check(again.handle(request()))
+    assert not asked
