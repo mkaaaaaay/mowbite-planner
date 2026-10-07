@@ -43,6 +43,8 @@ OUTSIDE_TURN = math.radians(20.0)
 OUT_STEP = 0.004
 OUT_ARC = 0.01
 OUT_NEAR = 0.15
+# fits_turn's answers kept (the same turn again, to the bit: the same answer), cleared at this many
+TURNS_KEPT = 100000
 # m, with shapely 1.7 squares of the map this big are looked up once whether all of them lies in a _Zone
 CELL = 0.1
 # m, with shapely 2 a _Zone knows of every square this big at once whether all of it lies in it
@@ -133,6 +135,7 @@ class Footprint:
         self.turning = Footprint(space.buffer(-spin_margin, QUAD_SEGS), self.corners, back=SPIN_BACK) \
             if spin_margin > 0 else self
         self._edge = None  # (space's boundary, see out_by)
+        self._turns_kept: dict = {}
 
     def body(self, x: float, y: float, yaw: float) -> Polygon:
         c, s = math.cos(yaw), math.sin(yaw)
@@ -220,6 +223,15 @@ class Footprint:
         spin_margin the body keeps that much further off the edges, turning anywhere on the last SPIN_BACK of the way
         in (facing yaw0), checked from one of those poses to the next (the hull of both: between them a corner may
         get closer to an edge than at either)."""
+        key = (x, y, yaw0, yaw1)
+        got = self._turns_kept.get(key)
+        if got is None:
+            if len(self._turns_kept) >= TURNS_KEPT:
+                self._turns_kept.clear()
+            got = self._turns_kept[key] = self._fits_turn(x, y, yaw0, yaw1)
+        return got
+
+    def _fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
         fp = self.turning
         if fp._safe_at(x, y):
             return True
