@@ -46,13 +46,14 @@ What comes on top, without touching `mower_logic`:
   (its `mow_angle_offset` included). An unknown name or a bad value there and the area isn't planned (no
   paths), the log says why. The area's `angle_min` and `angle_max` (rad) keep the lanes in that range,
   and mowing areas set to not mowable with `mow_around` that lie in it are mowed around. They need a
-  `mower_map` that keeps the extra area properties (open_mower_ros #364), before it they're dropped when it reads
-  the map and gone after the next save.
+  `mower_map` that keeps the extra area properties (open_mower_ros #364, in `edge`), an older one drops them when it
+  reads the map and they're gone after the next save.
 - **Obstacles** come with the request, like for slic3r: a `mowing.plan` preview of an edited obstacle
   shows the edit. One with a `margin` property in the map (m, found by its outline) keeps the body that far off
   it in place of `obstacle_margin`, an area set to not mowable or inactive too.
-- **Shortest ways** between the parts of an area, also through the other lawns. Not over navigation
-  areas or areas set to not mowable: `mower_logic` mows a path from start to end, so a transit over a
+- **Shortest ways** between the parts of an area, also through the other lawns, 15 cm further off the edges than
+  the margins where that's not a lot longer (5 cm where it is). Not over navigation areas or areas set to not
+  mowable: `mower_logic` mows a path from start to end, so a transit over a
   driveway would run with the blade on.
 - **Sections.** Parts of an area with no way between them, not even through the other lawns (a hedge
   across the lawn, a passage narrower than the mower, a driveway in between), are each mowed completely,
@@ -74,26 +75,23 @@ lawn of 1700 m² with a recorded outline 1.5 s; a Raspberry Pi CM4 needs roughly
 ## Setup
 
 OpenMower's official image stays as it is, the planner runs next to it. It needs `OM_PLANNER=external` in
-open_mower_ros (open_mower_ros PR #363) and, for an area's own settings and an obstacle's margin, a `mower_map` that
-keeps the extra area properties (#364). Neither is merged yet, but OpenMower's CI builds an image of every PR:
-`pr-363` works for testing now.
+open_mower_ros (open_mower_ros #363) and, for an area's own settings and an obstacle's margin, a `mower_map` that
+keeps the extra area properties (#364). Both are in OpenMower's `edge` image since 8 October 2026, not in a release
+yet.
 
 On OpenMowerOS v2:
 
 1. In OpenMower's `.env` (Dockge, stack `openmower`): `OM_PLANNER=external` (open_mower_ros doesn't start slic3r
-   then), for testing now `VERSION="pr-363"`.
+   then) and `VERSION="edge"`.
 2. The planner as a stack of its own, e.g. `/opt/stacks/mowbite-planner/`: [`compose.yaml`](compose.yaml) and a `.env`
-   with `OPENMOWER_VERSION` (the `VERSION` of OpenMower's `.env`, `pr-363` for now) and `OM_BLADE_WIDTH`. It builds
+   with `OPENMOWER_VERSION` (the `VERSION` of OpenMower's `.env`, `edge`) and `OM_BLADE_WIDTH`. It builds
    the planner on the mower on that OpenMower image (ROS, OpenMower's messages and slic3r come from it, about 11 MB on
    top) from this repository. While it's private: `git clone` it into the stack's folder (e.g. as `src`) and set
    `context: ./src` in `compose.yaml`.
 3. `docker compose up -d` there (Dockge: Deploy), then OpenMower's stack again. A newer planner or OpenMower version:
    `git pull` in the clone, then `docker compose up -d --build`.
 
-Testing with `pr-363`: its `mower_map` doesn't have #364, the next save of the map drops the extra area properties
-(an area's `planner` settings, an obstacle's `margin`, `angle_min`/`angle_max`). Keep a map backup and set the
-planner for all areas (`planner.settings.set`, the MowBite app's planner menu). Going back: `VERSION` as before and
-`OM_PLANNER` out of OpenMower's `.env`, the planner's stack stopped.
+Going back: `VERSION` as before and `OM_PLANNER` out of OpenMower's `.env`, the planner's stack stopped.
 
 It keeps its settings and plans where OpenMower's container keeps its ROS data (`/home/openmower/ros`). When
 OpenMower restarts (a new ROS master) the container ends and comes back (`restart: unless-stopped`) to register

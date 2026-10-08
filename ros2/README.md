@@ -104,7 +104,8 @@ starts again.
    first, `concentric` loops further and further in instead of lanes.
 4. **Route.** Where an obstacle splits the lanes they're grouped into cells, each mowed as a snake. The
    next cell is the closest one not mowed yet, reached on the shortest way through the free space, along
-   the obstacles and the perimeter (a visibility graph searched with A*). With `perimeter_order: last` the
+   the obstacles and the perimeter (a visibility graph searched with A*), 15 cm off them where that's not a
+   lot longer (else 5 cm, else along them). With `perimeter_order: last` the
    loops come after the lanes. With an end point (the docking station) the plan ends close to it: the
    lanes in the cell closest to it, the loops (`last`) on the outer loop closest to it, `concentric` on the
    loop closest to it of those nothing else waits for (the innermost going in, the outermost with `last`).

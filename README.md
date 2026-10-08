@@ -26,7 +26,8 @@ whole body (a rectangle, or the measured outline of your mower) and keeps a marg
 Where the body doesn't fit, only that spot changes: the mower takes another way or turns back before a place that's
 too narrow, and that bit stays unmowed. Turning on the spot and the turns between the lanes get some extra margin:
 OpenMower's FTC controller starts turning a few cm before the turn point, and in a turn the mower keeps less
-exactly to its path.
+exactly to its path. Drives between the parts of the plan keep another 15 cm off the edges where that's not a lot
+longer (5 cm where it is).
 
 Expect a few % of the lawn near edges and obstacles to stay unmowed, depending on the margins.
 
@@ -35,8 +36,8 @@ Expect a few % of the lawn near edges and obstacles to stay unmowed, depending o
 OpenMower's official image stays as it is, the planner runs in a container of its own next to it. The full steps are
 in [`ros1/README.md`](ros1/README.md#setup). In short:
 
-1. In OpenMower's `.env`: `OM_PLANNER=external` (needs open_mower_ros #363, not merged yet: OpenMower's `pr-363`
-   image for testing).
+1. In OpenMower's `.env`: `OM_PLANNER=external`, with `VERSION="edge"` (open_mower_ros #363 and #364, in `edge`
+   since 8 October 2026, not in a release yet).
 2. The planner as a stack of its own with [`ros1/compose.yaml`](ros1/compose.yaml), built on the mower on the same
    OpenMower image (about 11 MB on top), `docker compose up -d`.
 3. Set the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) with
@@ -44,8 +45,7 @@ in [`ros1/README.md`](ros1/README.md#setup). In short:
 4. Record the map with the mower's centre along the edges.
 5. Check the plan in the app before the first mow, and keep the emergency stop at hand.
 
-Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env`. An area's
-own settings and an obstacle's margin need open_mower_ros #364, without it `mower_map` drops them on the next save.
+Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env`.
 
 ## Main settings
 
