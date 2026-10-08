@@ -225,7 +225,7 @@ def test_plan_with_the_margins_of_the_map(planned):
 def test_plan_like_the_mower(planned):
     """The preview plans what the ROS 1 node gives mower_logic: parts only reachable over a navigation area
     get paths of their own, mow_around areas are left out, an absolute mow_angle_offset is the angle."""
-    s = PlannerService(PlannerConfig(allow_reverse=False, lane_order='skip'))
+    s = PlannerService(PlannerConfig(lane_order='skip'))
     # a hedge across the lawn up to 20 cm before its end, the drive across the top
     s.on_map(json.dumps({'areas': [area('lawn', 'mow', rect(0, 0, 20, 10), angle=1.0),
                                    area('hedge', 'obstacle', rect(9, -1, 11, 9.8)),
@@ -246,7 +246,7 @@ def test_plan_with_the_area_properties_in_the_request(planned):
     # two lawns joined by a neck 0.1 m wide, too narrow for the mower: no way between them
     lawn = [[0, 0], [8, 0], [8, 3.95], [10, 3.95], [10, 0], [18, 0], [18, 8], [10, 8], [10, 4.05], [8, 4.05],
             [8, 8], [0, 8]]
-    s = PlannerService(PlannerConfig(allow_reverse=False, lane_order='skip', mower_width=0.18))
+    s = PlannerService(PlannerConfig(lane_order='skip', mower_width=0.18))
     s.on_map(json.dumps({'areas': [area('lawn', 'mow', lawn, angle=0.0, outline_count=2)],
                          'docking_stations': [{'id': 'd', 'position': {'x': 1.0, 'y': 1.0}, 'heading': 0.0}]}))
     s.on_params(json.dumps({'/mower_logic/tool_width': 0.15, '/mower_logic/outline_offset': 0.09}))

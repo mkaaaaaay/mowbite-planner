@@ -39,7 +39,7 @@ from shapely.prepared import prep
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, join,
-                        k_point, omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
+                        omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -236,7 +236,6 @@ class PlannerConfig:
     # see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
     # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane)
     turn_radius: float = 0.25
-    allow_reverse: bool = False  # K-turns, which back up a little (fixed, see INTERNAL: OpenMower drives forwards)
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'detour', 'pivot'). Larger
     # radii come first, the order counts between turns of the same radius
     turn_types: Tuple[str, ...] = TURN_TYPES
@@ -413,8 +412,7 @@ class PlannerConfig:
 
     @property
     def allowed_turns(self) -> Tuple[str, ...]:
-        return tuple(t for t in self.turn_types if (t != 'k_turn' or self.allow_reverse) and
-                     (t != 'bulb' or not self.turn_on_spot))
+        return tuple(t for t in self.turn_types if t != 'bulb' or not self.turn_on_spot)
 
     @classmethod
     def names(cls) -> Tuple[str, ...]:
@@ -535,21 +533,20 @@ class PlannerConfig:
             if getattr(self, name) not in allowed:
                 raise PlanningError(f'{name} must be one of {", ".join(allowed)}, got {getattr(self, name)!r}')
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
-                any(t not in TURN_TYPES + ('k_turn',) for t in self.turn_types):
+                any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
-        for name in ('allow_reverse', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
+        for name in ('skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
                      'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 
 
-# fixed, no settings (with_overrides leaves them out): OpenMower's FTC drives forwards (no K-turns), the rest is how
-# the planner works inside
-INTERNAL = ('allow_reverse', 'waypoint_spacing', 'simplify_tolerance', 'min_lane_length', 'transit_clearance',
+# fixed, no settings (with_overrides leaves them out): how the planner works inside
+INTERNAL = ('waypoint_spacing', 'simplify_tolerance', 'min_lane_length', 'transit_clearance',
             'body_tolerance', 'perimeter_corner_radius')
 # settings (and a turn type) of before, with_overrides leaves them out: min_turn_radius is turn_radius, smooth_spins
-# not turn_on_spot
-RETIRED = ('min_turn_radius', 'smooth_spins', 'k_turn')
+# not turn_on_spot, allow_reverse and k_turn (backing up) gone: OpenMower's FTC drives forwards
+RETIRED = ('min_turn_radius', 'smooth_spins', 'allow_reverse', 'k_turn')
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
 _OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear',
              'robot_outline', 'lane_spacing_min', 'lane_spacing_max')
@@ -560,8 +557,8 @@ _FLOATS = tuple(f.name for f in dataclasses.fields(PlannerConfig) if isinstance(
 class PathSegment:
     kind: str  # PERIMETER, LANE, TURN or TRANSIT
     poses: List[Pose2D]
-    reverse: bool = False  # driven backwards (the middle leg of a K-turn)
-    # turns: 'u_turn', 'bulb', 'k_turn', 'detour', 'pivot'; transits replacing a turn: 'turn_fallback'
+    reverse: bool = False  # driven backwards: never (OpenMower's segment_reverse)
+    # turns: 'u_turn', 'bulb', 'detour', 'pivot'; transits replacing a turn: 'turn_fallback'
     maneuver: str = ''
     section: int = 0
     source: str = ''  # what it mows or leads to: 'loop-<i>', 'lane-<i>' (see CoveragePlan.origins)
@@ -1130,10 +1127,10 @@ class _Route:
     def _count(self, key: str) -> None:
         self.counts[key] = self.counts.get(key, 0) + 1
 
-    def add(self, kind: str, poses: List[Pose2D], reverse: bool = False, maneuver: str = '') -> None:
+    def add(self, kind: str, poses: List[Pose2D], maneuver: str = '') -> None:
         if not poses:
             return
-        self.segments.append(PathSegment(kind, poses, reverse, maneuver, self.section, self.source))
+        self.segments.append(PathSegment(kind, poses, False, maneuver, self.section, self.source))
         last = poses[-1]
         self.pos = (last.x, last.y)
         self.heading = last.yaw
@@ -1209,7 +1206,7 @@ class _Route:
                 x = (target[0] + side * d * nx, target[1] + side * d * ny)
                 if not space.is_free([x]):
                     continue
-                turn = plan_turn(Pose2D(x[0], x[1], back), target, r, False, self.step, space.is_free, None,
+                turn = plan_turn(Pose2D(x[0], x[1], back), target, r, self.step, space.is_free, None,
                                  tuple(t for t in self.cfg.allowed_turns if t in ('u_turn', 'bulb')), self.body,
                                  self.cfg.min_turn_radius)
                 way = drive(x, back) if turn is not None else None
@@ -1727,7 +1724,7 @@ class _Route:
                 math.hypot(a[0] - self.pos[0], a[1] - self.pos[1]) > 4.0 * self.cfg.turn_radius:
             return None
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
-                         self.cfg.allow_reverse, self.step, self.area.is_free, self.detour_path,
+                         self.step, self.area.is_free, self.detour_path,
                          self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0)
         if (turn is None or turn.name == 'pivot') and self.rounds:
             earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
@@ -1737,7 +1734,7 @@ class _Route:
         if turn is None:
             return None
         for piece in turn.pieces:
-            self.add(TURN, piece.poses, piece.reverse, turn.name)
+            self.add(TURN, piece.poses, turn.name)
         self._count('turns_' + turn.name)
         return a
 
@@ -1822,7 +1819,7 @@ class _Route:
                 exit_pose = Pose2D(self.pos[0], self.pos[1], self.heading)
 
                 def turn_to(entry: XY, types) -> Optional[Maneuver]:
-                    return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.cfg.allow_reverse, self.step,
+                    return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.step,
                                      self.turn_space(entry), self.detour_path, types, self.turn_body,
                                      self.cfg.min_turn_radius if self.rounds else 0.0)
 
@@ -1854,7 +1851,7 @@ class _Route:
                         self._count('lanes_earlier')
                 if turn is not None:
                     for piece in turn.pieces:
-                        self.add(TURN, piece.poses, piece.reverse, turn.name)
+                        self.add(TURN, piece.poses, turn.name)
                     self._count('turns_' + turn.name)
                 else:
                     poses = self.drive_to(a, yaw, head)
@@ -1925,7 +1922,7 @@ class _Route:
             entry = (a[0] + dn * ux, a[1] + dn * uy)
             turn = shortest(exit_pose, entry, False) if 'u_turn' in self.cfg.allowed_turns else None
             if turn is None and k:
-                turn = plan_turn(exit_pose, entry, r, self.cfg.allow_reverse, self.step, fits, self.detour_path, types,
+                turn = plan_turn(exit_pose, entry, r, self.step, fits, self.detour_path, types,
                                  self.turn_body, least, False)
             k += 1
             if turn is None:
@@ -2128,10 +2125,8 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
     """Where the path turns on the spot by more than SPIN_LIMIT (a sharp corner of a loop, a drive arriving across
     a lane, a pivot), an omega (maneuvers.omega) of turn_radius (down to SMOOTH_RADII of it) in its place if it fits in
     the space of the segment (the drivable areas for drives, with headland_turns out of the lanes' field where the turn
-    is) and the body fits: the wheels keep rolling. Where none
-    fits and it may back up (allow_reverse), a K-turn in place (maneuvers.k_point), forwards first or backwards first
-    (where it came from)."""
-    inserts: Dict[Tuple[int, int], List[Tuple[List[Pose2D], bool]]] = {}
+    is) and the body fits: the wheels keep rolling."""
+    inserts: Dict[Tuple[int, int], List[Pose2D]] = {}
     before: Optional[Pose2D] = None  # the last pose before the position the mower is at
     here: Optional[Tuple[Pose2D, int, int]] = None  # the pose it leaves this position with, where it is
 
@@ -2148,7 +2143,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
 
         if j == 0 and i > 0 and straight(i):  # where a lane starts: on the end of the segment before
             i, j = i - 1, len(route.segments[i - 1].poses)
-        if straight(i) or route.segments[i].reverse:  # (a lane keeps its heading)
+        if straight(i):  # (a lane keeps its heading)
             return
         space = route.transit.is_free if route.segments[i].kind == TRANSIT else route.area.is_free
         clear = route.clear([(p.x, p.y)])  # (headland_turns: out of the lanes' field the loop stays out of it)
@@ -2162,38 +2157,9 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
             r = share * cfg.turn_radius
             loop = omega(at, turn, r, route.step) if r >= max(1e-3, cfg.min_turn_radius - 1e-9) else None
             if loop and fits([(q.x, q.y) for q in loop]) and (body is None or body([before] + loop)):
-                inserts[(i, j)] = [(loop, False)]
+                inserts[(i, j)] = loop
                 route._count('spins_smoothed')
                 return
-        if not cfg.allow_reverse:
-            return
-        # where the body sticks out turning on the spot, one that sticks out no more is better still
-        fp = route.footprint
-        spin: Optional[float] = None
-        best = None
-        for share in SMOOTH_RADII + (0.2,):
-            for back_first in (False, True):
-                r = share * cfg.turn_radius
-                if r < max(1e-3, cfg.min_turn_radius - 1e-9):
-                    continue
-                m = k_point(at, turn, r, route.step, back_first)
-                poses = [q for piece in m.pieces for q in piece.poses]
-                if not fits([(q.x, q.y) for q in poses]):
-                    continue
-                if fp is None or fp.poses_fit([before] + poses):
-                    out = 0.0
-                else:
-                    if spin is None:
-                        spin = fp.outside([before, at, p])
-                    out = fp.outside([before] + poses) if spin > 0 else math.inf
-                if out <= 1e-9 or out <= spin + 1e-9:
-                    best = (out, m)  # the widest that fits (or sticks out no more), back up as little as that
-                    break
-            if best is not None:
-                break
-        if best is not None:
-            inserts[(i, j)] = [(piece.poses, piece.reverse) for piece in best[1].pieces]
-            route._count('spins_backed_up')
 
     for i, seg in enumerate(route.segments):
         for j, p in enumerate(seg.poses):
@@ -2204,19 +2170,9 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
                 continue
             smooth()
             before, here = (here[0] if here is not None else None), (p, i, j)
-    for (i, j), pieces in sorted(inserts.items(), reverse=True):
-        seg = route.segments[i]
-        # (the last pose is where the segment goes on from: one pose there when they're put together, a backing up
-        # segment ends there)
-        if len(pieces) == 1:
-            seg.poses[j:j] = pieces[0][0]
-            continue
-        # backing up is a segment of its own
-        parts = ([dataclasses.replace(seg, poses=seg.poses[:j])] if j else []) + \
-            [dataclasses.replace(seg, poses=poses, reverse=reverse, maneuver='k_point' if reverse else seg.maneuver)
-             for poses, reverse in pieces] + \
-            ([dataclasses.replace(seg, poses=seg.poses[j:])] if j < len(seg.poses) else [])
-        route.segments[i:i + 1] = parts
+    for (i, j), loop in sorted(inserts.items(), reverse=True):
+        # (the last pose is where the segment goes on from: one pose there when they're put together)
+        route.segments[i].poses[j:j] = loop
 
 
 def _fit_body(route: '_Route', poses: List[Pose2D],
@@ -2928,7 +2884,7 @@ def _round_corners(route: '_Route', poses: List[Pose2D],
     def straight(j: int, h: float) -> float:  # m from out[j] to out[j + 1] along h on the way, else 0
         p, q = out[j], out[j + 1]
         a, b = infos[own[j]], infos[own[j + 1]]
-        if a.section != b.section or b.reverse or angle_diff(p.yaw, h) > 1e-6 or \
+        if a.section != b.section or angle_diff(p.yaw, h) > 1e-6 or \
                 abs((q.y - p.y) * math.cos(h) - (q.x - p.x) * math.sin(h)) > 1e-6:
             return 0.0
         return math.hypot(q.x - p.x, q.y - p.y)
@@ -3027,7 +2983,7 @@ def _round_corners(route: '_Route', poses: List[Pose2D],
         into, onto = infos[own[i]], infos[own[i + 1]]  # (the ways to and from it)
         k = own[i + 1] if onto.kind == TRANSIT else own[i]
         if angle_diff(w, u) <= CORNER_ANGLE or angle_diff(w, u) > math.pi - 1e-3 or infos[k].kind != TRANSIT or \
-                not infos[own[i - 1]].section == into.section == onto.section or into.reverse or onto.reverse or \
+                not infos[own[i - 1]].section == into.section == onto.section or \
                 (p.x, p.y) in route.sharp:
             i += 1
             continue
@@ -3145,16 +3101,15 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
 
 def _turn_at(route: '_Route', poses: List[Pose2D],
              infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
-    """Where the path turns on the spot (the heading jumping by more than footprint.SPIN, not backing up) and the way in
+    """Where the path turns on the spot (the heading jumping by more than footprint.SPIN) and the way in
     is longer than twice TURN_AHEAD, a pose TURN_AHEAD before the point on it, facing the way it came (where the body
     fits so)."""
-    back = {i for info in infos if info.reverse for i in range(info.start, info.end + 1)}
     first = {info.start for k, info in enumerate(infos) if k == 0 or infos[k - 1].section != info.section}
     out, at = [], []  # (at: where the poses are put in, by the index of the one after)
     for i, p in enumerate(poses):
         q = poses[i - 1] if i else p
         d = math.hypot(p.x - q.x, p.y - q.y)
-        if i not in first and angle_diff(p.yaw, q.yaw) > SPIN and d > 2.0 * TURN_AHEAD and not {i - 1, i} & back:
+        if i not in first and angle_diff(p.yaw, q.yaw) > SPIN and d > 2.0 * TURN_AHEAD:
             f = TURN_AHEAD / d
             ahead = Pose2D(p.x + f * (q.x - p.x), p.y + f * (q.y - p.y), q.yaw)
             if route.body([ahead]):
@@ -3681,7 +3636,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         'timings': timings,
         'chosen': {'lane_spacing': round(spacing, 4), 'perimeter_passes': count, 'mode': 'fixed'},
     }
-    for key in ('turns_u_turn', 'turns_bulb', 'turns_k_turn', 'turns_detour', 'turns_pivot', 'turns_fallback'):
+    for key in ('turns_u_turn', 'turns_bulb', 'turns_detour', 'turns_pivot', 'turns_fallback'):
         stats[key] = route.counts.get(key, 0)
     if fitted is not None:
         stats['body_fit'] = fitted

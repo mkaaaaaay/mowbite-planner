@@ -299,9 +299,9 @@ def test_check_plan_finds_what_is_wrong():
     poses[k] = poses[k]._replace(x=poses[k].x + 3.0, y=-2.0)  # off the area, and a gap
     report = check_plan(dataclasses.replace(plan, poses=poses))
     assert any('outside' in h for h in report['hard']) and any('gaps' in h for h in report['hard'])
-    backwards = dataclasses.replace(plan, config=dataclasses.replace(plan.config, allow_reverse=False),
-                                    segments=[dataclasses.replace(plan.segments[0], reverse=True)] + plan.segments[1:])
-    assert 'drives backwards with allow_reverse off' in check_plan(backwards)['hard']
+    backwards = dataclasses.replace(plan, segments=[dataclasses.replace(plan.segments[0], reverse=True)] +
+                                    plan.segments[1:])
+    assert 'drives backwards' in check_plan(backwards)['hard']
 
 
 def test_check_plan_tells_left_on_purpose_from_left_out():

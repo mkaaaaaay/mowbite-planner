@@ -35,9 +35,6 @@ TURN_STEP = math.radians(10.0)
 # m, with a spin_margin a turn on the spot is checked anywhere on this much of the way in to it: OpenMower's FTC turns
 # over the way from the pose before (waypoint_spacing), halfway round the mower was up to 7 cm before the point
 SPIN_BACK = 0.1
-# outside(): at most about this many bodies along the poses, turning on the spot one every this many rad
-OUTSIDE_BODIES = 12
-OUTSIDE_TURN = math.radians(20.0)
 # m, out_by() looks at points this far apart along the body's edge (turning on the spot along the way its corners go,
 # OUT_ARC apart at least: how far out they are changes smoothly there), at the space's edges OUT_NEAR round them first
 OUT_STEP = 0.004
@@ -275,24 +272,6 @@ class Footprint:
         between lanes, on_turn, spin_margin further in), or turning on the spot where the heading jumps by more than
         SPIN from the pose before."""
         return list(self._bad(poses, on_turn=on_turn))
-
-    def outside(self, poses: Sequence) -> float:
-        """m2, about how much of the body sticks out at the poses all together, turning on the spot where the heading
-        jumps by more than SPIN (OUTSIDE_BODIES bodies at most and every OUTSIDE_TURN turning: to compare ways)."""
-        bodies = []
-        every = max(1, int(math.ceil(len(poses) / OUTSIDE_BODIES)))
-        for i, p in enumerate(poses):
-            if self.spins(poses, i):
-                turn = normalize_angle(p.yaw - poses[i - 1].yaw)
-                n = max(1, int(math.ceil(abs(turn) / OUTSIDE_TURN)))
-                bodies += [self.body(p.x, p.y, poses[i - 1].yaw + turn * k / n) for k in range(n + 1)]
-            elif (i % every == 0 or i == len(poses) - 1) and not self._safe_at(p.x, p.y):
-                bodies.append(self.body(p.x, p.y, p.yaw))
-        if not bodies:
-            return 0.0
-        swept = unary_union(bodies)
-        # (only the space around them: the whole of it can be a big polygon)
-        return swept.difference(self.space.intersection(box(*swept.bounds))).area
 
     def out_by(self, turns: Sequence, step: float = OUT_STEP, around: Optional[Sequence[float]] = None,
                on_turn: OnTurn = False) -> List[Tuple]:

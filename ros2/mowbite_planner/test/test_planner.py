@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, footprint, normalize_angle,  # noqa: E402
                              plan_coverage, planner, quaternion_to_yaw, swept_area, transit, yaw_to_quaternion)
 from mowbite_planner.maneuvers import (CORNER_ANGLE, MAX_ARC_STEP, bulb_turn, drive_polyline, dubins,  # noqa: E402
-                                       join, k_turn, omega, path_length, plan_turn, same_position, sample_arc,
+                                       join, omega, path_length, plan_turn, same_position, sample_arc,
                                        sample_straight, u_turn)
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH, FIT_ROUND, FIT_START,  # noqa: E402
@@ -82,22 +82,16 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
     for s, t in zip(segs, segs[1:]):
         assert s.start < s.end
         assert t.start in (s.end, s.end + 1)
-    # every pose faces the way it's driven to the next one, backwards only on the reverse legs of K-turns (between
-    # lanes, or in place of a turn on the spot)
-    backwards = [False] * (len(poses) - 1)
-    for s in segs:
-        assert not s.reverse or (s.kind == TURN and s.maneuver == 'k_turn') or s.maneuver == 'k_point'
-        for i in range(s.start, s.end):
-            backwards[i] = s.reverse
+    # every pose faces the way it's driven to the next one, never backwards
+    assert not any(s.reverse for s in segs)
     for i, (a, b) in enumerate(zip(poses, poses[1:])):
         if i in jumps:
             continue
         travel = math.atan2(b.y - a.y, b.x - a.x)
-        facing = a.yaw + math.pi if backwards[i] else a.yaw
-        assert angle_diff(travel, facing) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
+        assert angle_diff(travel, a.yaw) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:
-        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'k_point', 'mop_up'):
+        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'mop_up'):
             yaws = {poses[i].yaw for i in range(s.start, s.end)}
             assert len(yaws) == 1
             yaw = yaws.pop()
@@ -173,25 +167,11 @@ def test_bulb_turn_geometry(d):
     first, last = ends(m)
     assert (last.x, last.y) == pytest.approx((0.0, d), abs=1e-9)
     assert angle_diff(last.yaw, math.pi) < 1e-9
-    assert len(m.pieces) == 1 and not m.pieces[0].reverse
+    assert len(m.pieces) == 1
     poses = m.pieces[0].poses
     assert all(r >= 0.25 - 1e-6 for r in radii_of(poses))
     for a, b in zip(poses, poses[1:]):  # tangent continuous: never more than one arc step at once
         assert angle_diff(a.yaw, b.yaw) <= 10 * DEG + 1e-9
-
-
-def test_k_turn_geometry():
-    m = k_turn(0.187, 0.0, 0.25, 0.05)
-    assert [p.reverse for p in m.pieces] == [False, True, False]
-    fwd, back, fwd2 = (p.poses for p in m.pieces)
-    assert (back[0].x, back[0].y) == pytest.approx((fwd[-1].x, fwd[-1].y))
-    assert (fwd2[0].x, fwd2[0].y) == pytest.approx((back[-1].x, back[-1].y))
-    assert back[0].y > back[-1].y  # backs up
-    assert all(p.yaw == pytest.approx(math.pi / 2) for p in back)  # still facing ahead
-    assert fwd2[-1].x == pytest.approx(0.0) and fwd2[-1].y == pytest.approx(0.187)
-    assert all(r >= 0.25 - 1e-6 for r in radii_of(fwd) + radii_of(fwd2))
-    # needs only one radius of headland
-    assert max(p.x for piece in m.pieces for p in piece.poses) == pytest.approx(0.25)
 
 
 def headland(depth):
@@ -203,19 +183,16 @@ def headland(depth):
 def test_turn_choice_by_room():
     exit_pose = Pose2D(0.0, 0.0, 0.0)
     entry = (0.0, 0.187)
-    # plenty of room: forwards only, full radius
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(5.0)).name == 'bulb'
-    # one radius of room: the K-turn keeps the radius
-    m = plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.26))
-    assert m.name == 'k_turn' and m.radius == 0.25
-    # no backing up allowed: a smaller bulb
-    m = plan_turn(exit_pose, entry, 0.25, False, 0.05, headland(0.26))
+    # plenty of room: full radius
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(5.0)).name == 'bulb'
+    # one radius of room: a smaller bulb
+    m = plan_turn(exit_pose, entry, 0.25, 0.05, headland(0.26))
     assert m.name == 'bulb' and m.radius < 0.25
     # hardly any room: half circle, then turning on the spot
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.1)).name == 'u_turn'
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.01)).name == 'pivot'
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(0.1)).name == 'u_turn'
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(0.01)).name == 'pivot'
     # lanes far apart: a plain U-turn
-    assert plan_turn(exit_pose, (0.0, 0.6), 0.25, True, 0.05, headland(0.3)).name == 'u_turn'
+    assert plan_turn(exit_pose, (0.0, 0.6), 0.25, 0.05, headland(0.3)).name == 'u_turn'
 
 
 def test_turn_to_the_right_and_rotated():
@@ -223,7 +200,7 @@ def test_turn_to_the_right_and_rotated():
     h = 120 * DEG
     exit_pose = Pose2D(3.0, 1.0, h)
     entry = (3.0 + 0.187 * math.sin(h), 1.0 - 0.187 * math.cos(h))
-    m = plan_turn(exit_pose, entry, 0.25, True, 0.05, lambda pts: True)
+    m = plan_turn(exit_pose, entry, 0.25, 0.05, lambda pts: True)
     last = m.pieces[-1].poses[-1]
     assert (last.x, last.y) == pytest.approx(entry)
     assert angle_diff(last.yaw, h + math.pi) < 1e-9
@@ -309,9 +286,8 @@ def test_garden_with_obstacles():
 
 
 @pytest.mark.parametrize('kw', [
-    dict(allow_reverse=False),
+    dict(),
     dict(lane_order='skip'),
-    dict(lane_order='skip', allow_reverse=False),
     dict(perimeter_passes=0),
     dict(perimeter_passes=1, turn_radius=0.4),
     dict(perimeter_passes=4, perimeter_offset=0.0, mower_width=0.18, overlap=0.28),
@@ -325,12 +301,10 @@ def test_garden_variants(kw):
     plan = plan_coverage(GARDEN, [TREE, BED], cfg)
     check_invariants(plan, cfg, [TREE, BED])
     assert coverage(plan, cfg) > 0.99
-    if not cfg.allow_reverse:
-        assert plan.stats['turns_k_turn'] == 0
 
 
 def test_skip_order_turns_forwards_with_the_full_radius():
-    cfg = PlannerConfig(lane_order='skip', allow_reverse=False, perimeter_passes=3)
+    cfg = PlannerConfig(lane_order='skip', perimeter_passes=3)
     plan = plan_coverage(rect(0, 0, 12, 8), [], cfg)
     check_invariants(plan, cfg)
     assert coverage(plan, cfg) > 0.997
@@ -510,7 +484,6 @@ def test_random_gardens(seed):
         overlap=rnd.choice([0.0, 0.15, 0.3]),
         perimeter_passes=rnd.choice([0, 1, 2, 3]),
         turn_radius=rnd.choice([0.0, 0.2, 0.3]),
-        allow_reverse=rnd.random() < 0.5,
         lane_order=rnd.choice(['snake', 'skip']),
         angle=rnd.choice([None, rnd.uniform(-3, 3)]),
     )
@@ -600,10 +573,10 @@ def test_perimeter_direction(direction, pattern):
     cfg = PlannerConfig(perimeter_direction=direction, fill_pattern=pattern)
     plan = plan_coverage(GARDEN, [TREE, BED], cfg)
     check_invariants(plan, cfg, [TREE, BED])
-    # every loop the same way round, around the obstacles too (and concentric's rings), a K-turn in it a part of it
+    # every loop the same way round, around the obstacles too (and concentric's rings)
     loops: Dict[str, List[int]] = {}
     for s in plan.segments:
-        if s.kind == PERIMETER or s.kind == LANE and s.maneuver in ('ring', 'k_point'):
+        if s.kind == PERIMETER or s.kind == LANE and s.maneuver == 'ring':
             span = loops.setdefault(s.source, [s.start, s.end])
             span[0], span[1] = min(span[0], s.start), max(span[1], s.end)
     assert len(loops) >= 6
@@ -1883,7 +1856,7 @@ def test_round_corners_s_and_field(monkeypatch):
 def test_turn_at():
     """Where the path turns on the spot a pose TURN_AHEAD before the point, facing the way it came, the segments moved
     on: the one before ends at the point; also at a kink of more than SPIN (OpenMower's FTC turns there the same way),
-    not at one of less. Not where the way in is no longer than twice that, nor backing up."""
+    not at one of less. Not where the way in is no longer than twice that."""
     pivot = [Pose2D(5, 5, math.pi / 2)] + straight(5, 5, 5, 7)
     route, poses, infos = corner_route(Polygon(rect(0, 0, 10, 10)), [(LANE, straight(1, 5, 5, 5)), (TURN, pivot)])
     out, segs = planner._turn_at(route, poses, infos)
@@ -1894,9 +1867,6 @@ def test_turn_at():
     short = straight(1, 5, 4.96, 5) + [Pose2D(5, 5, 0.0)]
     route, poses, infos = corner_route(Polygon(rect(0, 0, 10, 10)), [(LANE, short), (TURN, pivot)])
     assert planner._turn_at(route, poses, infos) == (poses, infos)
-    route, poses, infos = corner_route(Polygon(rect(0, 0, 10, 10)), [(LANE, straight(1, 5, 5, 5)), (TURN, pivot)])
-    back = [dataclasses.replace(infos[0], reverse=True), infos[1]]
-    assert planner._turn_at(route, poses, back) == (poses, back)
     for turn, ahead in ((20, True), (12, False)):
         h = math.radians(turn)
         drive = join(straight(1, 5, 5, 5), straight(5, 5, 5 + 2 * math.cos(h), 5 + 2 * math.sin(h)))
@@ -2259,13 +2229,13 @@ def test_rounded_where_min_turn_radius_doesnt_fit():
     exit_pose, entry = Pose2D(0.0, 0.0, 0.0), (0.0, 0.27)
     free = lambda pts: True  # noqa: E731
     for spin in (True, False):
-        turn = plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn', 'pivot'), least=0.3, spin=spin)
+        turn = plan_turn(exit_pose, entry, 0.3, 0.05, free, None, ('u_turn', 'pivot'), least=0.3, spin=spin)
         assert turn.name == 'u_turn'
         assert max(p.x for p in turn.pieces[0].poses) == pytest.approx(0.135, abs=0.01)
     room = lambda pts: all(x <= 0.05 for x, _ in pts)  # noqa: E731 - a wall 5 cm ahead
-    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3).name == 'pivot'
-    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, room, None, ('u_turn', 'pivot'), least=0.3, spin=False) is None
-    assert plan_turn(exit_pose, entry, 0.3, False, 0.05, free, None, ('u_turn',), least=0.3) is None
+    assert plan_turn(exit_pose, entry, 0.3, 0.05, room, None, ('u_turn', 'pivot'), least=0.3).name == 'pivot'
+    assert plan_turn(exit_pose, entry, 0.3, 0.05, room, None, ('u_turn', 'pivot'), least=0.3, spin=False) is None
+    assert plan_turn(exit_pose, entry, 0.3, 0.05, free, None, ('u_turn',), least=0.3) is None
 
 
 
@@ -2595,27 +2565,21 @@ def test_turn_types_in_order_of_preference():
     exit_pose = Pose2D(0.0, 0.0, 0.0)
     entry = (0.0, 0.187)
     # plenty of room for both: the first one listed
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(5.0)).name == 'bulb'
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(5.0), types=('k_turn', 'bulb')).name == 'k_turn'
-    # no backing up: never a K-turn, whatever the list says
-    assert plan_turn(exit_pose, entry, 0.25, False, 0.05, headland(5.0), types=('k_turn', 'bulb')).name == 'bulb'
-    assert plan_turn(exit_pose, entry, 0.25, False, 0.05, headland(5.0), types=('k_turn',)) is None
-    # a larger radius wins over the order: one radius of headland takes a K-turn before a smaller bulb
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.26)).name == 'k_turn'
-    m = plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.26), types=('bulb', 'pivot'))
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(5.0)).name == 'bulb'
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(5.0), types=('pivot', 'bulb')).name == 'bulb'
+    # a larger radius wins over the order: a smaller bulb before turning on the spot, whatever the list says
+    m = plan_turn(exit_pose, entry, 0.25, 0.05, headland(0.26), types=('bulb', 'pivot'))
     assert m.name == 'bulb' and m.radius < 0.25
     # nothing allowed fits
-    assert plan_turn(exit_pose, entry, 0.25, True, 0.05, headland(0.01), types=('bulb', 'k_turn')) is None
-    assert PlannerConfig(allow_reverse=False).allowed_turns == ('u_turn', 'bulb', 'detour', 'pivot')
+    assert plan_turn(exit_pose, entry, 0.25, 0.05, headland(0.01), types=('bulb',)) is None
+    assert PlannerConfig().allowed_turns == ('u_turn', 'bulb', 'detour', 'pivot')
+    assert PlannerConfig(turn_on_spot=True).allowed_turns == ('u_turn', 'detour', 'pivot')
 
 
 @pytest.mark.parametrize('kw, used', [
     (dict(turn_types=('bulb', 'pivot'), perimeter_passes=4), 'bulb'),
     (dict(turn_types=('pivot',)), 'pivot'),
-    (dict(perimeter_passes=4), 'bulb'),  # a deep headland: a bulb fits as well as a K-turn
-    (dict(perimeter_passes=4, turn_types=('k_turn', 'bulb', 'u_turn', 'detour', 'pivot'), allow_reverse=True),
-     'k_turn'),
-    (dict(perimeter_passes=4, turn_types=('k_turn', 'bulb'), allow_reverse=False), 'bulb'),
+    (dict(perimeter_passes=4), 'bulb'),
 ])
 def test_turn_types_of_a_plan(kw, used):
     cfg = PlannerConfig(**kw)
@@ -2734,9 +2698,9 @@ def test_with_overrides():
     assert cfg.fill_pattern == 'concentric'
     assert base.mower_width == 0.22 and base.angle == 0.3  # a copy
     assert base.with_overrides({'turn_types': ['k_turn', 'bulb']}).turn_types == ('bulb',)  # (no setting any more)
-    other = base.with_overrides({'perimeter_offset': 0, 'angle_min': -1, 'angle_max': 1, 'allow_reverse': False})
+    other = base.with_overrides({'perimeter_offset': 0, 'angle_min': -1, 'angle_max': 1, 'allow_reverse': True})
     assert isinstance(other.perimeter_offset, float) and isinstance(other.angle_min, float)
-    assert other.allow_reverse is False
+    assert not hasattr(other, 'allow_reverse')  # (gone, a stored one of before is left out)
     assert base.with_overrides({}) == base
     with pytest.raises(PlanningError, match='blade_speed, colour'):
         base.with_overrides({'colour': 'green', 'blade_speed': 3000, 'overlap': 0.1})
@@ -2748,7 +2712,7 @@ def test_with_overrides():
     (dict(fill_pattern='concentric'), None),
     (dict(perimeter_order='last', perimeter_direction='cw'), (-0.3, 3.0)),
     (dict(angle_strategy='optimal', angle_min=0.1, angle_max=0.5), None),
-    (dict(turn_types=('k_turn', 'bulb', 'pivot'), lane_order='skip'), (6.0, -0.5)),
+    (dict(turn_types=('bulb', 'pivot'), lane_order='skip'), (6.0, -0.5)),
     (dict(MOWER, **NX60I), (1.0, 1.0)),
     (dict(MOWER, robot_outline=ROUNDED), (1.0, 1.0)),
 ])

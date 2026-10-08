@@ -429,7 +429,7 @@ def test_settings_of_before_left_out(planner):
     with open(stored_file(), 'w') as f:
         json.dump({'allow_reverse': True, 'min_turn_radius': 0.3, 'body_tolerance': 0.1, 'turn_radius': 0.3}, f)
     node = node_module.MowbitePlannerRos1()
-    assert node.current.stored == {'turn_radius': 0.3} and node.base.allow_reverse is False
+    assert node.current.stored == {'turn_radius': 0.3} and not hasattr(node.base, 'allow_reverse')
     result, error = rpc('planner.settings.set', {'smooth_spins': False, 'waypoint_spacing': 0.2, 'edge_margin': 0.06})
     assert error is None and result['settings']['edge_margin']['value'] == 0.06
     assert not {'allow_reverse', 'min_turn_radius', 'smooth_spins', 'waypoint_spacing'} & set(result['settings'])
@@ -553,7 +553,7 @@ def test_preview_plans_like_the_node(planner, props, params, settings, areas, by
     data = {'areas': [lawn, bed, moved(area('nav', [(20, 0), (24, 0), (24, 3), (20, 3)], type='nav')),
                       *map(moved, areas)],
             'docking_stations': [{'id': 'd', 'position': {'x': 22.0 + by, 'y': 1.5 + by}, 'heading': math.pi}]}
-    service = PlannerService(node_module.PlannerConfig(allow_reverse=False, lane_order='skip', mower_width=0.18)
+    service = PlannerService(node_module.PlannerConfig(lane_order='skip', mower_width=0.18)
                              .with_overrides(settings), 'angle' in settings or 'angle_strategy' in settings)
     service.on_map(json.dumps(data))
     service.on_params(json.dumps({'/mower_logic/' + k: v for k, v in params.items()}))

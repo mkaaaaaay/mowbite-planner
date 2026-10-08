@@ -9,8 +9,7 @@ TWO_PI = 2.0 * math.pi
 class Pose2D(NamedTuple):
     x: float
     y: float
-    # the way the mower faces (rad, 0 = +x of the map frame, ccw). That's the direction it drives in,
-    # except on the backward legs of a K-turn, where it drives against it
+    # the way the mower faces (rad, 0 = +x of the map frame, ccw), the direction it drives in
     yaw: float
 
 

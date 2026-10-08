@@ -7,8 +7,6 @@ keep moving while turning, on arcs of a minimum radius:
   which with a 0.19 m lane spacing means a radius of under 0.1 m.
 - Bulb (omega) turn: a short swerve away from the next lane, a loop of more than half a circle, a swerve
   back. Forwards only, but needs about radius * (1 + 2 sin(theta)) of headland.
-- K-turn: quarter arc forwards, a short straight backwards, quarter arc forwards. Needs only one radius
-  of headland and keeps the radius, at the cost of a stop.
 - Detour: quarter arc out of the lane, the shortest way through the free space along the edge, quarter
   arc into the next lane. For lanes far apart (lane_order skip) where the straight middle of a U-turn
   would leave the free space because the edge isn't square to the lanes.
@@ -17,11 +15,10 @@ keep moving while turning, on arcs of a minimum radius:
 - Dubins' ways (dubins()): arc, straight, arc or three arcs, the shortest forwards with a radius. Where the lanes
   end at a slant a U-turn that way (arc, diagonal, arc), else a loop into the next lane.
 
-Poses face the way the mower drives: on straight bits each one points at the next (OpenMower's planner
-does the same), on arcs along the arc. No two poses share a position: OpenMower's FTC controller skips
-such a pose, Nav2's regulated pure pursuit takes it for a cusp. A turn on the spot is a heading jump from
-one pose to the next. On the backwards leg of a K-turn the poses face the way the mower faces, against the
-way it drives (Nav2's convention, its controller finds the cusp from that).
+Everything drives forwards (OpenMower's FTC controller does). Poses face the way the mower drives: on straight
+bits each one points at the next (OpenMower's planner does the same), on arcs along the arc. No two poses share a
+position: OpenMower's FTC controller skips such a pose, Nav2's regulated pure pursuit takes it for a cusp. A turn on
+the spot is a heading jump from one pose to the next.
 
 Every turn is first built in a local frame: the mower leaves its lane at the origin heading +x, the next
 lane lies to the left (+y) at distance d and is driven back towards -x, starting at (dx, d). A turn to
@@ -56,15 +53,14 @@ _EPS = 1e-9
 
 @dataclass
 class Piece:
-    """Part of a maneuver driven in one direction."""
+    """Part of a maneuver."""
 
     poses: List[Pose2D]
-    reverse: bool = False
 
 
 @dataclass
 class Maneuver:
-    name: str  # 'u_turn', 'bulb', 'k_turn', 'detour' or 'pivot'
+    name: str  # 'u_turn', 'bulb', 'detour' or 'pivot'
     radius: float
     pieces: List[Piece] = field(default_factory=list)
 
@@ -174,17 +170,6 @@ def bulb_turn(d: float, dx: float, r: float, step: float) -> Optional[Maneuver]:
     return Maneuver('bulb', r, [Piece(poses)])
 
 
-def k_turn(d: float, dx: float, r: float, step: float) -> Optional[Maneuver]:
-    if d >= 2.0 * r or r <= _EPS:
-        return None
-    a, b = _extensions(dx)
-    forward = join(_lead_in(a, step), sample_arc(a, 0.0, 0.0, r, math.pi / 2, step))
-    # still facing +y, but backing up from y = r to y = d - r
-    backward = sample_straight(a + r, r, a + r, d - r, math.pi / 2, step)
-    forward2 = join(sample_arc(a + r, d - r, math.pi / 2, r, math.pi / 2, step), _lead_out(a, b, d, step))
-    return Maneuver('k_turn', r, [Piece(forward), Piece(backward, reverse=True), Piece(forward2)])
-
-
 def pivot_turn(d: float, dx: float, step: float) -> Maneuver:
     a, b = _extensions(dx)
     # facing the next lane from the corner on, facing back along it from the far corner on
@@ -212,27 +197,6 @@ def omega(at: Pose2D, turn: float, r: float, step: float) -> List[Pose2D]:
     return join(first, loop, last)
 
 
-def k_point(at: Pose2D, turn: float, r: float, step: float, back_first: bool = False) -> Maneuver:
-    """In place of turning on the spot at `at` by `turn` (rad, > 0 left), backing up once: an arc of r forwards by
-    turn / 2, straight backwards by 2 r sin(|turn| / 2), an arc forwards by turn / 2, back at the same point facing
-    at.yaw + turn (the second arc's centre is where the first one's would be after the turn). back_first: the same
-    the other way round in time, backing up first (to where it came from) and driving forwards once."""
-    if back_first:
-        m = k_point(Pose2D(at.x, at.y, normalize_angle(at.yaw + turn)), -turn, r, step)
-        return Maneuver('k_point', r, [Piece(p.poses[::-1], not p.reverse) for p in m.pieces[::-1]])
-    s = 1.0 if turn >= 0.0 else -1.0
-    half = 0.5 * turn
-    first = sample_arc(at.x, at.y, at.yaw, r, half, step)
-    h = first[-1].yaw
-    length = 2.0 * r * math.sin(0.5 * abs(turn))
-    end = (first[-1].x - length * math.cos(h), first[-1].y - length * math.sin(h))
-    # backing up the poses face the way the mower faces, against the way it drives
-    back = sample_straight(first[-1].x, first[-1].y, end[0], end[1], h, step)
-    last = sample_arc(end[0], end[1], h, r, s * abs(half), step)
-    last[-1] = Pose2D(at.x, at.y, normalize_angle(at.yaw + turn))
-    return Maneuver('k_point', r, [Piece(first), Piece(back, reverse=True), Piece(last)])
-
-
 def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
     c, s = math.cos(origin.yaw), math.sin(origin.yaw)
     pieces = []
@@ -242,7 +206,7 @@ def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
             ly = side * p.y
             poses.append(Pose2D(origin.x + p.x * c - ly * s, origin.y + p.x * s + ly * c,
                                 normalize_angle(origin.yaw + side * p.yaw)))
-        pieces.append(Piece(poses, piece.reverse))
+        pieces.append(Piece(poses))
     return Maneuver(m.name, m.radius, pieces)
 
 
@@ -422,9 +386,9 @@ def max_heading_jump(poses: Sequence[Pose2D]) -> float:
     return max((abs(normalize_angle(q.yaw - p.yaw)) for p, q in zip(poses, poses[1:])), default=0.0)
 
 
-def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, step: float,
+def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float,
               fits: Fits, route: Optional[Route] = None,
-              types: Sequence[str] = ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot'),
+              types: Sequence[str] = ('u_turn', 'bulb', 'detour', 'pivot'),
               body: Body = None, least: float = 0.0, spin: bool = True) -> Optional[Maneuver]:
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
@@ -444,10 +408,9 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, allow_reverse: bool, 
     d = abs(lateral)
     if d < 1e-6:
         return None
-    types = [t for t in types if t != 'k_turn' or allow_reverse]
-    shapes = {'u_turn': u_turn, 'bulb': bulb_turn, 'k_turn': k_turn}
+    shapes = {'u_turn': u_turn, 'bulb': bulb_turn}
     for r in turn_radii(radius, d, least):
-        # a U-turn where the lanes are two radii apart, a bulb or a K-turn where they're closer
+        # a U-turn where the lanes are two radii apart, a bulb where they're closer
         for name in types:
             if name not in shapes or (name == 'u_turn') != (d >= 2.0 * r - 1e-9):
                 continue

@@ -3,7 +3,7 @@
 
     python3 tools/plot_coverage.py                      # demo garden
     python3 tools/plot_coverage.py --radius 0.3 --passes 1 --save plan.png
-    python3 tools/plot_coverage.py --lane-order skip --no-reverse --coverage    # for a forwards-only controller
+    python3 tools/plot_coverage.py --lane-order skip --coverage    # lanes in skip order, the share mowed
     python3 tools/plot_coverage.py --json area.json     # {"boundary": [[x, y], ...], "obstacles": [[[x, y], ...], ...]}
     python3 tools/plot_coverage.py --map map.json --area "Front lawn"   # an area of OpenMower's map.json
     python3 tools/plot_coverage.py --pattern concentric --perimeter-order last --end 0 3
@@ -32,7 +32,6 @@ STYLE = {
     'perimeter': dict(color='#2a78d6', lw=1.4, ls='-', label='perimeter loop'),
     'lane': dict(color='#1baf7a', lw=1.0, ls='-', label='lane'),
     'turn': dict(color='#eb6834', lw=1.2, ls='-', label='turn'),
-    'turn_reverse': dict(color='#eb6834', lw=1.6, ls=(0, (2, 1.5)), label='turn, backing up'),
     'transit': dict(color='#4a3aa7', lw=1.4, ls=(0, (1, 1.5)), label='transit'),
 }
 
@@ -78,7 +77,6 @@ def main():
     ap.add_argument('--overlap', type=float, default=0.15, help='overlap, 0.15 = 15%%')
     ap.add_argument('--passes', type=int, default=2, help='perimeter_passes')
     ap.add_argument('--radius', type=float, default=0.25, help='turn_radius in m')
-    ap.add_argument('--no-reverse', action='store_true', help='no K-turns')
     ap.add_argument('--lane-order', default='snake', choices=['snake', 'skip'], help='lane_order')
     ap.add_argument('--offset', type=float, help='perimeter_offset in m (default: half the width)')
     ap.add_argument('--angle', type=float, help='lane angle in degrees (default: automatic)')
@@ -88,7 +86,7 @@ def main():
     ap.add_argument('--pattern', default='lanes', choices=FILL_PATTERNS, help='fill_pattern')
     ap.add_argument('--perimeter-order', default='first', choices=PERIMETER_ORDERS)
     ap.add_argument('--direction', default='auto', choices=PERIMETER_DIRECTIONS, help='perimeter_direction')
-    ap.add_argument('--turn-types', help='turns allowed, preferred first, e.g. bulb,k_turn,pivot')
+    ap.add_argument('--turn-types', help='turns allowed, preferred first, e.g. bulb,pivot')
     ap.add_argument('--end', type=float, nargs=2, metavar=('X', 'Y'), help='finish close to this point')
     ap.add_argument('--corner-radius', type=float, default=0.15, help='perimeter_corner_radius in m')
     ap.add_argument('--spacing', type=float, default=0.10, help='waypoint_spacing in m')
@@ -118,7 +116,7 @@ def main():
     try:
         cfg = PlannerConfig(
             mower_width=args.width, overlap=args.overlap, perimeter_passes=args.passes,
-            turn_radius=args.radius, allow_reverse=not args.no_reverse, lane_order=args.lane_order,
+            turn_radius=args.radius, lane_order=args.lane_order,
             perimeter_offset=args.offset, fill_pattern=args.pattern, perimeter_order=args.perimeter_order,
             perimeter_direction=args.direction, angle=None if args.angle is None else math.radians(args.angle),
             angle_strategy=args.angle_strategy, angle_min=lo, angle_max=hi,
@@ -152,7 +150,7 @@ def main():
     draw_polygonal(ax, plan.lane_region, color='#52514e', lw=0.6, ls=(0, (4, 3)))
 
     for seg in plan.segments:
-        key = 'turn_reverse' if seg.reverse else seg.kind
+        key = seg.kind
         style = {k: v for k, v in STYLE[key].items() if k != 'label'}
         pts = plan.poses[seg.start:seg.end + 1]
         ax.plot([p.x for p in pts], [p.y for p in pts], solid_capstyle='round', **style)
@@ -176,7 +174,7 @@ def main():
 
     st = plan.stats
     turns = ', '.join('{} {}'.format(int(st['turns_' + k]), k.replace('_', '-'))
-                      for k in ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot', 'fallback') if st['turns_' + k])
+                      for k in ('u_turn', 'bulb', 'detour', 'pivot', 'fallback') if st['turns_' + k])
     fill = 'concentric loops' if args.pattern == 'concentric' else 'lanes at ' + ' and '.join(
         '{:.1f}°'.format(math.degrees(a)) for a in plan.angles)
     ax.set_title('{}, spacing {:.3f} m · {:.0f} m path ({:.0f} m lanes, {:.0f} m perimeter, '

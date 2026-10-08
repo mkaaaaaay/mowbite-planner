@@ -228,12 +228,12 @@ Parameters (all in `config/mowbite_planner.yaml`, doubles need a decimal point t
 cd ros2/mowbite_planner
 pip install shapely matplotlib pytest
 python3 tools/plot_coverage.py                       # a demo garden
-python3 tools/plot_coverage.py --lane-order skip --no-reverse --coverage --save plan.png
+python3 tools/plot_coverage.py --lane-order skip --coverage --save plan.png
 python3 tools/plot_coverage.py --map map.json --area "Front lawn"   # an area of OpenMower's map.json
 python3 -m pytest test/                              # planner, node and MQTT service (rclpy stood in for)
 ```
 
-`tools/plot_coverage.py` draws the boundary, the obstacles, the loops, lanes, turns (backing up dashed)
+`tools/plot_coverage.py` draws the boundary, the obstacles, the loops, lanes, turns
 and transits, with arrows for the headings, and prints lengths, turn counts and the planning time.
 
 The planner's tests run against shapely 1.7 (Python 3.8, as on ROS Noetic), 1.8 (Ubuntu 22.04,

@@ -8,7 +8,7 @@ start slic3r with `OM_PLANNER=external` (see [Setup](#setup)).
 
 What comes on top, without touching `mower_logic`:
 
-- **Gentle turns.** OpenMower's FTC controller only drives forwards, so this node plans without K-turns and
+- **Gentle turns.** OpenMower's FTC controller only drives forwards, so this node plans only forwards and
   with `lane_order: skip`, which mows lanes k apart (k = ⌈2 · turn_radius / lane spacing⌉) and makes every
   turn a forward U-turn of `turn_radius`. A group of fewer than about 2k lanes gets bulb turns, also
   forwards only. Where the edge leaves no room it uses a smaller arc, a detour along the edge, or a pivot

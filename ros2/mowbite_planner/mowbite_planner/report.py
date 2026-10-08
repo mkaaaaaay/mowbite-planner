@@ -56,8 +56,8 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     if gaps:
         hard.append(f'{len(gaps)} gaps between poses wider than waypoint_spacing {step} m, the first after pose '
                     f'{gaps[0]}')
-    if cfg is not None and not cfg.allow_reverse and any(s.reverse for s in plan.segments):
-        hard.append('drives backwards with allow_reverse off')
+    if any(s.reverse for s in plan.segments):
+        hard.append('drives backwards')
     footprint = plan_footprint(plan)
     body = body_out(poses, plan.segments, plan.section_starts, footprint) if footprint is not None else []
     if body:

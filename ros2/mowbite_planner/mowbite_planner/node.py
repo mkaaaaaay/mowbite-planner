@@ -459,7 +459,7 @@ class MowbitePlannerNode(Node):
             path = to_path_msg(plan.poses, values['frame_id'], self.get_clock().now().to_msg())
         st = plan.stats
         turns = ', '.join(f"{int(st['turns_' + k])} {k.replace('_', '-')}"
-                          for k in ('u_turn', 'bulb', 'k_turn', 'detour', 'pivot', 'fallback') if st['turns_' + k])
+                          for k in ('u_turn', 'bulb', 'detour', 'pivot', 'fallback') if st['turns_' + k])
         message = (
             f"{len(plan.poses)} poses, {st['path_length']:.1f} m ({st['lane_length']:.1f} m lanes, "
             f"{st['perimeter_length']:.1f} m perimeter, {st['turn_length']:.1f} m turns, "
