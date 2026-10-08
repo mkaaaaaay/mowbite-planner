@@ -271,7 +271,9 @@ class PlannerConfig:
     route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
-    transit_clearance: float = 0.05  # m, transits keep this far from the outer loop and obstacle loops
+    # m, transits keep this far from the outer loop and obstacle loops where that's not a lot longer (else
+    # transit's NARROW_CLEARANCE)
+    transit_clearance: float = 0.15
     simplify_tolerance: float = 0.01  # m, the outline and obstacles are simplified this much first
     min_lane_length: float = 0.10  # m, shorter pieces of a lane are left out
     # m, a row split by an obstacle with at most this much between its pieces (a tree, a bed) becomes one lane

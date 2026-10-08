@@ -33,6 +33,9 @@ Node = Tuple[XY, XY, XY]
 # in the graph that keeps its distance from the edge, corners turning less than this aren't nodes (a recorded
 # outline has a dent every few cm, GPS noise; the distance leaves room to drive past them straight)
 MIN_REFLEX = math.radians(2.0)
+# m, path() keeps this far off the edge (at most the clearance), careful_path() first the clearance and this where
+# that's a lot longer (or there's none, a narrow passage), each before a way along the edge
+NARROW_CLEARANCE = 0.05
 # lines this close to running along a corner's edge count as touching it (sine of the angle between them)
 TANGENT_TOLERANCE = 1e-4
 
@@ -87,8 +90,9 @@ def _tangents(v, p, q, other):
 
 
 class _Graph:
-    def __init__(self, nodes: List[Node], inside=None):
+    def __init__(self, nodes: List[Node], inside=None, clearance: float = 0.0):
         self.nodes = nodes
+        self.clearance = clearance  # (how far the corners are off the edge)
         # points in here only head for a corner tangentially. One outside (closer to the edge than the shrunk
         # space) may have to get to the nearest corner across its wedge first
         self.inside = inside
@@ -102,9 +106,9 @@ class _Graph:
 class TransitPlanner:
     """Shortest paths for the mower's centre inside `space` (a Polygon or MultiPolygon).
 
-    Graph nodes come from the space shrunk by `clearance`, so drives don't scrape along the very edge.
-    Where a way only exists closer to the edge (a narrow passage), or is a lot shorter there, the unshrunk
-    corners are used. Points in different parts of the space have no way between them, that's known at once.
+    Graph nodes come from the space shrunk by NARROW_CLEARANCE (careful_path(): by `clearance` first), so drives
+    don't scrape along the very edge. Where a way only exists closer to the edge (a narrow passage), or is a lot
+    shorter there, the unshrunk corners are used. Points in different parts of the space have no way between them, that's known at once.
 
     careful_path() also weighs how much of a way runs along the edge: every metre closer than edge_distance
     counts 1 + edge_cost times, a way through the space shrunk by edge_distance wins where it's cheaper so.
@@ -196,20 +200,23 @@ class TransitPlanner:
 
     def _build_graphs(self) -> List[_Graph]:
         graphs = []
-        if self._clearance > 0:
-            shrunk = self._space.buffer(-self._clearance, 4, join_style=JOIN_MITRE, mitre_limit=3.0)
+        for clearance in sorted({self._clearance, min(self._clearance, NARROW_CLEARANCE)}, reverse=True):
+            if clearance <= 0:
+                continue
+            shrunk = self._space.buffer(-clearance, 4, join_style=JOIN_MITRE, mitre_limit=3.0)
             # simplifying keeps the real corners (as vertices of the shrunk outline, so still inside) and drops
             # the dents, which would be hundreds of useless nodes
-            shrunk = shrunk.simplify(0.5 * self._clearance, preserve_topology=True)
+            shrunk = shrunk.simplify(0.5 * clearance, preserve_topology=True)
             nodes = [n for n in reflex_nodes(shrunk, MIN_REFLEX) if self.is_free([n[0]])]
             if nodes:
-                graphs.append(_Graph(nodes, prep(shrunk)))
+                graphs.append(_Graph(nodes, prep(shrunk), clearance))
         # every corner of the space itself: exact, a way along the edge bends at each of them
         graphs.append(_Graph([n for n in reflex_nodes(self._space) if self.is_free([n[0]])]))
         return graphs
 
-    def path(self, a: XY, b: XY) -> Optional[List[XY]]:
-        """Shortest polyline from a to b inside the space, None if there's no way (or a or b lie outside)."""
+    def path(self, a: XY, b: XY, wide: bool = False) -> Optional[List[XY]]:
+        """Shortest polyline from a to b inside the space, None if there's no way (or a or b lie outside). wide: one
+        keeping the clearance off the edge first."""
         a = (float(a[0]), float(a[1]))
         b = (float(b[0]), float(b[1]))
         if self.is_free([a, b]):
@@ -222,6 +229,8 @@ class TransitPlanner:
         best = None
         straight = math.hypot(b[0] - a[0], b[1] - a[1])
         for gi, graph in enumerate(self._graphs):
+            if graph.clearance > NARROW_CLEARANCE and not wide:
+                continue
             found = self._astar(gi, graph, a, b)
             if found is not None and (best is None or _length(found) < _length(best)):
                 best = found
@@ -240,9 +249,10 @@ class TransitPlanner:
         return _length(pts) + self._edge_cost * self.edge_length(pts)
 
     def careful_path(self, a: XY, b: XY) -> Optional[List[XY]]:
-        """Like path(), but a way that keeps edge_distance off the edge where that's cheaper (see cost()):
-        straight from a into the shrunk space, through it, straight out to b."""
-        best = self.path(a, b)
+        """Like path(), but keeping the clearance off the edge where that's not a lot longer, and a way that keeps
+        edge_distance off the edge where that's cheaper (see cost()): straight from a into the shrunk space, through
+        it, straight out to b."""
+        best = self.path(a, b, True)
         if best is None or self._edge_distance <= 0.0 or self._edge_cost <= 0.0:
             return best
         if self._inner is None:
@@ -258,7 +268,7 @@ class TransitPlanner:
             q = p if inner.is_free([p]) else nearest_points(inner._space, Point(p))[0].coords[0]
             ends.append((float(q[0]), float(q[1])))
         (a2, b2) = ends
-        middle = inner.path(a2, b2) if inner.part(a2) is not None and inner.part(a2) == inner.part(b2) else None
+        middle = inner.path(a2, b2, True) if inner.part(a2) is not None and inner.part(a2) == inner.part(b2) else None
         if middle is None or not self.is_free([a, a2]) or not self.is_free([b2, b]):
             return best
         way = [a] + [p for p in middle if p != a and p != b] + [b]

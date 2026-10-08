@@ -1222,9 +1222,10 @@ def test_body_drives_through_the_area():
     """Where a drive finds no way through the transit space (to a lane's end a little out of it) it goes through the
     mowing area (_Route.go_to), with the body checked up to body_tolerance further out: no finding of check_plan, the
     body keeps the margins there (also against the real edges worked out here on their own). A pose 1 cm further out
-    is one."""
+    is one. (Drives keeping 5 cm off the edges: farther off they find a way.)"""
     trees = [circle(4, 4, 0.4), circle(8, 4.3, 0.5)]
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=3, lane_overlap_passes=2))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=3, lane_overlap_passes=2,
+                               transit_clearance=0.05))
     plan = plan_coverage(rect(0, 0, 12, 8), trees, cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, trees)
     transit_space = plan.transit_space.buffer(2e-3)
@@ -2450,7 +2451,7 @@ def test_transits_keep_off_the_edges():
     boundary = rect(0, 0, 20, 14)
     near = {}
     for d in (0.0, 0.4):
-        cfg = PlannerConfig(**dict(FORWARD, transit_edge_distance=d))
+        cfg = PlannerConfig(**dict(FORWARD, transit_edge_distance=d, transit_clearance=0.05))
         plan = plan_coverage(boundary, many, cfg, start=(1, 1, 0.0), end=(1, 1))
         check_invariants(plan, cfg, many)
         assert coverage(plan, cfg) > 0.9999
@@ -2884,6 +2885,21 @@ def test_transit_across_parts_and_through_a_narrow_passage():
     assert tp.path((1, 1), (9, 1)) is None
     assert tp.part((1, 1)) != tp.part((9, 1)) and tp.part((5, 1)) is None
     assert tp._graphs is None  # no graph needed for that
+
+
+def test_transit_keeps_its_clearance_where_there_is_room():
+    """careful_path() (the drives) keeps the clearance off a corner where that's not a lot longer, path() (detours,
+    bent lanes) NARROW_CLEARANCE; through a passage narrower than twice the clearance careful_path() still goes."""
+    block = Polygon(rect(4, 0, 6, 2.5))
+    tp = TransitPlanner(Polygon(rect(0, 0, 10, 5)).difference(block), clearance=0.15)
+    short, careful = tp.path((1, 1), (9, 1)), tp.careful_path((1, 1), (9, 1))
+    assert 0.04 < LineString(short).distance(block) < 0.06
+    assert 0.14 < LineString(careful).distance(block) < 0.16
+    assert LineString(careful).length < LineString(short).length + 0.3
+    space = Polygon(rect(0, 0, 10, 4)).difference(Polygon(rect(4.9, -1, 5.1, 1.9))).difference(
+        Polygon(rect(4.9, 2.1, 5.1, 5)))
+    way = TransitPlanner(space, clearance=0.15).careful_path((4.0, 1.0), (6.0, 1.0))
+    assert way is not None and LineString(way).length < 3.0  # through the door 20 cm wide
 
 
 def test_transit_corners_all_at_once(monkeypatch):
