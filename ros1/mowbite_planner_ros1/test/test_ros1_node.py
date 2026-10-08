@@ -13,6 +13,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import threading
 import types
 
@@ -193,10 +194,11 @@ def planner():
     rospy.log.clear()
     rospy.published.clear()
     rospy.registered.clear()
-    try:
-        os.remove(os.path.join(os.environ['ROS_HOME'], 'mowbite_planner_settings.json'))
-    except FileNotFoundError:
-        pass
+    for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json'):
+        try:
+            os.remove(os.path.join(os.environ['ROS_HOME'], name))
+        except FileNotFoundError:
+            pass
     # no plans kept from other tests, none planned ahead in the background (test_plan_ahead does that itself)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
@@ -995,6 +997,52 @@ def track_file(job, segments):
                                 'points': []}) + '\n')
             f.write(json.dumps({'type': 'append_points', 'points': [list(p) for p in pts]}) + '\n')
     return path
+
+
+def test_duration(planner):
+    """planner.plan says how long mowing it takes (duration): the model with OpenMower's FTC speeds, times what the
+    finished mows took against it. A finished job (JOB_COMPLETE) counts with the plan mower_logic got for its area (the
+    blade running in its track from start to end), kept over a restart; one far off doesn't, nor one with an area
+    planned twice (resumed)."""
+    send_map(the_map())
+    d = rpc('planner.plan', {'area_id': 'a'})[0]['duration']
+    assert d['runs'] == 0 and d['factor'] == 1.0 and d['min'] == d['model_min'] > 1.0
+    rospy.params[node_module.FTC_PARAMS] = {'speed_fast': 0.8, 'speed_slow': 0.3, 'speed_angular': 90.0}
+    assert rpc('planner.plan', {'area_id': 'a'})[0]['duration']['model_min'] == pytest.approx(0.5 * d['model_min'],
+                                                                                              rel=0.1)
+    del rospy.params[node_module.FTC_PARAMS]
+
+    def mow(job, share, plans=1):
+        start = time.time()
+        for _ in range(plans):
+            planner.handle(request())
+        took = share * planner.served[-1][2]
+        folder = os.path.join(os.environ['ROS_HOME'], 'position_history')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, '%d_%s.jsonl' % (start, job)), 'w') as f:
+            for t, blades in ((start, False), (start + 20.0, True), (start + 20.0 + took, False)):
+                f.write(json.dumps({'type': 'new_segment', 'attributes': {'job_id': job, 'blades': blades},
+                                    'started_at': t, 'points': [[1.0, 5.0]]}) + '\n')
+        rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
+            topic='events/json', payload=json.dumps({'type': 'JOB_COMPLETE', 'job_id': job})))
+        planner.drive_thread.join(60.0)
+
+    mow('j1', 0.9)
+    d = rpc('planner.plan', {'area_id': 'a'})[0]['duration']
+    assert d['runs'] == 1 and d['factor'] == pytest.approx(0.9, abs=1e-3)
+    assert d['min'] == pytest.approx(0.9 * d['model_min'], abs=0.1)
+    assert any('job j1 took' in line and 'factor now 0.90' in line for _, line in rospy.log)
+    mow('j2', 5.0)
+    assert any(level == 'warn' and 'job j2 took' in line and 'not counted' in line for level, line in rospy.log)
+    mow('j3', 1.0, plans=2)
+    assert any('job j3 not timed' in line for _, line in rospy.log)
+    again = node_module.MowbitePlannerRos1()
+    assert again.duration(100.0)['runs'] == 1 and again.duration(600.0)['min'] == pytest.approx(9.0)
+    # a track whose blade never stopped running: no time
+    unended = os.path.join(os.environ['ROS_HOME'], 'position_history', '1_open.jsonl')
+    with open(unended, 'w') as f:
+        f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'started_at': 1.0, 'points': []}))
+    assert node_module.mowing_time(unended) is None
 
 
 def test_planner_drive(planner):

@@ -57,7 +57,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
-                        plan was there already (planned ahead or asked for before)
+                        plan was there already (planned ahead or asked for before). duration: {min, model_min, factor,
+                        runs}, how long mowing it takes, see TIMING_RUNS
 
 PLAN_AHEAD_DELAY s after the map or the settings last changed every active mowing area is planned ahead like
 planner.plan plans it, so the app's preview and the next mow find their plan at once.
@@ -102,6 +103,7 @@ from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.geometry import clean_polygon, polygonal, union
 from mowbite_planner.mapfile import area_job, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
+from mowbite_planner.report import drive_time
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
 FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
@@ -156,6 +158,12 @@ DRIVE_STEP = 0.02
 DOCK_REACH = 1.0
 # s between looks at the master's /run_id, a new one means it restarted and doesn't know this node any more
 MASTER_CHECK = 5.0
+# how long mowing a plan takes: report.drive_time with OpenMower's FTC speeds (move_base_flex/FTCPlanner), times what
+# the last TIMING_RUNS finished mows took against that (from the start of the blade running to its end in the job's
+# track; one plan for each area of the job, TIMING_RANGE of the estimate at most), kept next to settings_file
+TIMING_RUNS = 10
+TIMING_RANGE = (0.5, 2.0)
+FTC_PARAMS = '/move_base_flex/FTCPlanner'
 
 
 class XbotRpc:
@@ -244,6 +252,12 @@ class MowbitePlannerRos1:
             os.environ.get('ROS_HOME', '~/.ros'), HISTORY_DIR)))
         self.drive = None  # the last finished mow's planner.drive
         self.drive_thread = None
+        # [[estimate s, took s, job id], ...] of the last finished mows, and the plans mower_logic got: [(when, area id,
+        # estimate s)]
+        self.timing_file = os.path.join(os.path.dirname(self.file), 'mowbite_planner_timing.json') if self.file else ''
+        self.timing_lock = threading.Lock()
+        self.timing = self.read_timing()
+        self.served = collections.deque(maxlen=64)
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
@@ -455,9 +469,68 @@ class MowbitePlannerRos1:
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
         self.local.kept = False
+        got = []
+        if keep is None and current.planner != 'slic3r':
+            service.planner = lambda *args, **kw: got.append(self.plan_coverage(*args, **kw)) or got[-1]
         result = service.plan(params)
         result['kept'] = self.local.kept  # planned before (ahead, or the same asked for already)
+        if got:
+            result['duration'] = self.duration(self.estimate(got[-1]))
         return result
+
+    def estimate(self, plan):
+        """s the mower takes for plan as the model says (OpenMower's FTC speeds)."""
+        return drive_time(plan.poses, rospy.get_param(FTC_PARAMS, {}))['s']
+
+    def duration(self, estimate):
+        """planner.plan's duration of a plan the model gives estimate s for: times the finished mows' factor."""
+        with self.timing_lock:
+            runs = list(self.timing)
+        factor = sum(took for _, took, _ in runs) / sum(est for est, _, _ in runs) if runs else 1.0
+        return {'min': round(estimate * factor / 60.0, 1), 'model_min': round(estimate / 60.0, 1),
+                'factor': round(factor, 3), 'runs': len(runs)}
+
+    def read_timing(self):
+        try:
+            with open(self.timing_file) as f:
+                runs = json.load(f)['runs']
+            return [[float(est), float(took), str(job)] for est, took, job in runs][-TIMING_RUNS:]
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+
+    def time_after(self, job_id):
+        """How long the finished job took against the model, kept for duration (see TIMING_RUNS), in the log."""
+        files = glob.glob(os.path.join(self.history, '*_%s.jsonl' % job_id)) if self.history and job_id else []
+        if not files:
+            return
+        try:
+            start = float(os.path.basename(files[0]).split('_', 1)[0])
+            took = mowing_time(files[0])
+        except (OSError, ValueError):
+            return
+        served = [(area, est) for t, area, est in list(self.served) if t >= start - 5.0]
+        self.served.clear()  # (those were for this job)
+        areas = [area for area, _ in served]
+        if not served or took is None or len(set(areas)) != len(areas):  # (resumed: a plan twice, not counted)
+            rospy.loginfo('MowBite Planner: job %s not timed', job_id)
+            return
+        est = sum(e for _, e in served)
+        if not TIMING_RANGE[0] * est <= took <= TIMING_RANGE[1] * est:
+            rospy.logwarn('MowBite Planner: job %s took %.0f min, %.0f min estimated: not counted', job_id, took / 60.0,
+                          est / 60.0)
+            return
+        with self.timing_lock:
+            self.timing = (self.timing + [[round(est, 1), round(took, 1), str(job_id)]])[-TIMING_RUNS:]
+            runs = list(self.timing)
+        if self.timing_file:
+            try:
+                with open(self.timing_file + '.tmp', 'w') as f:
+                    json.dump({'runs': runs}, f)
+                os.replace(self.timing_file + '.tmp', self.timing_file)
+            except OSError as e:
+                rospy.logwarn('MowBite Planner: timing not kept (%s): %s', self.timing_file, e)
+        rospy.loginfo('MowBite Planner: job %s took %.1f min, %.1f min estimated, factor now %.2f (%d mows)', job_id,
+                      took / 60.0, est / 60.0, sum(t for _, t, _ in runs) / sum(e for e, _, _ in runs), len(runs))
 
     def rpc_drive(self, params):
         if not params and self.drive is not None:
@@ -465,7 +538,11 @@ class MowbitePlannerRos1:
         return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
 
     def drive_after(self, job_id):
-        """planner.drive of a finished mow, in the log."""
+        """planner.drive of a finished mow, in the log, and how long it took (time_after)."""
+        try:
+            self.time_after(job_id)
+        except Exception as e:  # noqa: BLE001 - timing must not take the planner down
+            rospy.logerr('MowBite Planner: timing the mow failed: %s: %s', type(e).__name__, e)
         try:
             self.drive = got = self.drive_check(job_id)
         except PlanningError as e:
@@ -626,7 +703,9 @@ class MowbitePlannerRos1:
 
     def ahead_plan(self, area_id):
         try:
-            self.rpc_plan({'area_id': area_id})
+            got = self.rpc_plan({'area_id': area_id})
+            if got.get('duration'):
+                rospy.loginfo('MowBite Planner: area %s takes about %.0f min', area_id, got['duration']['min'])
             return True
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: area %s not planned ahead: %s', area_id, e)
@@ -760,6 +839,10 @@ class MowbitePlannerRos1:
         except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
             rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e)
             return res
+        try:
+            self.served.append((time.time(), job.area_id if job else None, self.estimate(plan)))
+        except Exception as e:  # noqa: BLE001 - the estimate must not keep the plan from mower_logic
+            rospy.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e)
         stamp = rospy.Time.now()
         for is_outline, first, last in plan_pieces(plan, self.max_poses):
             res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
@@ -819,6 +902,23 @@ def read_track(path):
                     pts.append((float(xy[0]), float(xy[1])))
     out = [Pose2D(x, y, math.atan2(b[1] - y, b[0] - x)) for (x, y), b in zip(pts, pts[1:])]
     return out + [Pose2D(pts[-1][0], pts[-1][1], out[-1].yaw)] if out else []
+
+
+def mowing_time(path):
+    """s from the blade starting to run to it stopping last in a position_history file (its new_segment lines with
+    started_at and blades), the runs between added up; None without a run that ended."""
+    segments = []
+    with open(path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get('type') == 'new_segment' and \
+                    isinstance(rec.get('started_at'), (int, float)):
+                segments.append((float(rec['started_at']), bool((rec.get('attributes') or {}).get('blades'))))
+    runs = [b - a for (a, blades), (b, _) in zip(segments, segments[1:]) if blades]
+    return sum(runs) if runs else None
 
 
 def master_restarted(run_id):

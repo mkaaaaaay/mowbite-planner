@@ -2,13 +2,14 @@
 left) and what's worth knowing (soft), with how much is mowed once, more than once and not at all."""
 
 import math
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 
-from .geometry import inset, polygons, union
 from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
+from .geometry import inset, polygons, union
+from .mathutil import Pose2D
 from .planner import blade_points, body_out, plan_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
@@ -20,8 +21,48 @@ LEFT_TOTAL = 0.1
 LEFT_SHARE = 5e-4
 # m, poses may be this far off the space they belong in (rounding, simplifying)
 TOLERANCE = 2e-3
+# OpenMower's FTC controller (move_base_flex/FTCPlanner): m/s where the way ahead stays straight for speed_fast_threshold
+# m (turning less than speed_fast_threshold_angle deg), m/s elsewhere, deg/s turning on the spot, m/s2 speeding up
+FTC_SPEEDS = {'speed_fast': 0.4, 'speed_slow': 0.15, 'speed_fast_threshold': 1.0, 'speed_fast_threshold_angle': 20.0,
+              'speed_angular': 45.0, 'acceleration': 0.1}
+# rad, a heading jump bigger than this from one pose to the next is turning on the spot
+SPOT_TURN = math.radians(15.0)
 
 
+def drive_time(poses: Sequence[Pose2D], speeds: Optional[Mapping[str, float]] = None) -> Dict[str, float]:
+    """About how long OpenMower's FTC takes to drive poses: fast where the way stays straight far enough ahead, slow
+    elsewhere, turning on the spot where the heading jumps (speeds: FTC_SPEEDS' names, those missing from there).
+    {'s', 'fast_m', 'slow_m', 'spin_s'}."""
+    v = dict(FTC_SPEEDS, **{k: float(x) for k, x in (speeds or {}).items() if k in FTC_SPEEDS})
+    fast, slow = v['speed_fast'], max(1e-3, v['speed_slow'])
+    ahead, bend = v['speed_fast_threshold'], math.radians(v['speed_fast_threshold_angle'])
+    omega, acc = max(1e-3, math.radians(v['speed_angular'])), max(1e-3, v['acceleration'])
+    run = [0.0]
+    for a, b in zip(poses, poses[1:]):
+        run.append(run[-1] + math.hypot(b.x - a.x, b.y - a.y))
+    s = spin = fast_m = slow_m = 0.0
+    j, was = 0, slow
+    for i in range(len(poses) - 1):
+        step = run[i + 1] - run[i]
+        if step < 1e-6:
+            spin += abs(math.remainder(poses[i + 1].yaw - poses[i].yaw, 2.0 * math.pi)) / omega
+            continue
+        if i and run[i] - run[i - 1] > 1e-6 and \
+                abs(math.remainder(poses[i].yaw - poses[i - 1].yaw, 2.0 * math.pi)) > SPOT_TURN:
+            spin += abs(math.remainder(poses[i].yaw - poses[i - 1].yaw, 2.0 * math.pi)) / omega
+        while j < len(poses) - 1 and run[j] < run[i] + ahead:
+            j += 1
+        speed = fast if all(abs(math.remainder(poses[k].yaw - poses[i].yaw, 2.0 * math.pi)) < bend
+                            for k in range(i, j + 1)) else slow
+        if speed > was:  # (speeding up: about half the time it takes lost)
+            s += 0.5 * (speed - was) / acc
+        was = speed
+        s += step / speed
+        if speed == fast:
+            fast_m += step
+        else:
+            slow_m += step
+    return {'s': s + spin, 'fast_m': fast_m, 'slow_m': slow_m, 'spin_s': spin}
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:

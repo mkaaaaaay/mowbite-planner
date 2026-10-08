@@ -17,7 +17,7 @@ from mowbite_planner import PlannerConfig, SegmentInfo, plan_coverage  # noqa: E
 from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, simplified_indices,  # noqa: E402
                                     to_openmower_json, to_studio_payload)
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
-from mowbite_planner.report import check_plan  # noqa: E402
+from mowbite_planner.report import FTC_SPEEDS, check_plan, drive_time  # noqa: E402
 
 
 def rect(x0, y0, x1, y1):
@@ -314,3 +314,19 @@ def test_check_plan_tells_left_on_purpose_from_left_out():
     short = plan_coverage(AREA, [], PlannerConfig(blade_offset=0.1, perimeter_passes=0, angle=0.0))
     report = check_plan(short)
     assert any('left unmowed' in h for h in report['hard']) and any('shortened' in s for s in report['soft'])
+
+
+def test_drive_time():
+    """drive_time: fast on a long straight way, slow where it bends within speed_fast_threshold ahead, turning on the
+    spot at speed_angular, the FTC's speeds given or the defaults."""
+    from mowbite_planner import Pose2D
+    straight = [Pose2D(0.1 * i, 0.0, 0.0) for i in range(101)]  # 10 m
+    t = drive_time(straight)
+    assert t['fast_m'] == pytest.approx(10.0) and t['slow_m'] == 0.0 and t['spin_s'] == 0.0
+    assert t['s'] == pytest.approx(10.0 / 0.4 + 0.5 * 0.25 / 0.1)
+    bend = straight + [Pose2D(10.0, 0.1 * i, math.pi / 2) for i in range(1, 11)]  # (the corner slow)
+    assert drive_time(bend)['slow_m'] == pytest.approx(1.0, abs=0.15)
+    back = straight + [Pose2D(10.0, 0.0, math.pi)] + [Pose2D(10.0 - 0.1 * i, 0.0, math.pi) for i in range(1, 11)]
+    assert drive_time(back)['spin_s'] == pytest.approx(math.pi / math.radians(FTC_SPEEDS['speed_angular']))
+    assert drive_time(straight, {'speed_fast': 0.8, 'speed_slow': 0.3})['s'] == pytest.approx(10.0 / 0.8 + 0.5 * 0.5 / 0.1)
+
