@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple, Union
 
 from .geometry import clean_polygon
-from .planner import MAX_BLADE_OFFSET, PlannerConfig, PlanningError
+from .config import MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
 # a mowing area lies in another (is nested) with this share of it in there at least

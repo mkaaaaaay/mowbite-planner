@@ -127,7 +127,7 @@ starts OpenMower's slic3r planner itself and hands it `mower_logic`'s request as
 ## Settings
 
 Settings for all areas go in `launch/mowbite_planner.launch` (`settings`), they're part of the image. It
-takes any name from `PlannerConfig` in `ros2/mowbite_planner/mowbite_planner/planner.py`. Changing one
+takes any name from `PlannerConfig` in `ros2/mowbite_planner/mowbite_planner/config.py`. Changing one
 changes the plans, so an interrupted mow starts its area again. Some come with every request of
 `mower_logic`, a value in `settings` doesn't count for them: `mower_width` and `overlap` (from
 `tool_width` and `OM_BLADE_WIDTH`), `perimeter_passes`, `perimeter_offset`, `lane_overlap_passes` and the

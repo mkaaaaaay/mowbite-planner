@@ -10,7 +10,7 @@ from shapely.geometry import Point, Polygon
 
 from .geometry import polygons, rings
 from .mathutil import Pose2D
-from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
+from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
 from .report import check_plan
 
 # OpenMower counts the poses of a path in an int16 (current_path_index), longer paths are split

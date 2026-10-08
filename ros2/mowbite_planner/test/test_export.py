@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from mowbite_planner import PlannerConfig, SegmentInfo, plan_coverage  # noqa: E402
 from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, simplified_indices,  # noqa: E402
                                     to_openmower_json, to_studio_payload)
-from mowbite_planner.planner import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
+from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
 from mowbite_planner.report import check_plan  # noqa: E402
 
 

@@ -40,9 +40,10 @@ from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
 
 from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .planner import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
-                      NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
-                      TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, plan_coverage)
+from .config import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
+                     NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
+                     TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError)
+from .planner import plan_coverage
 
 XY = Tuple[float, float]
 

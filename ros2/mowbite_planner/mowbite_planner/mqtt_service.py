@@ -28,7 +28,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .export import to_openmower_json, to_poses_json, to_studio_payload, to_trace_json
 from .mapfile import AreaJob, _number, area_job, area_settings, margins_for, settings_for
-from .planner import PlannerConfig, PlanningError, plan_coverage
+from .config import PlannerConfig, PlanningError
+from .planner import plan_coverage
 from .report import check_plan
 
 log = logging.getLogger('mowbite_planner')

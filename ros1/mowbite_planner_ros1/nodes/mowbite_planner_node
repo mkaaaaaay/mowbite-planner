@@ -96,7 +96,7 @@ from xbot_mqtt.srv import RegisterMethodsSrv
 import mowbite_planner
 from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D, SegmentInfo, plan_coverage,
                              quaternion_to_yaw, yaw_to_quaternion)
-from mowbite_planner import planner as limits
+from mowbite_planner import config as limits
 from mowbite_planner.planner import plan_footprint
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.geometry import clean_polygon, polygonal, union

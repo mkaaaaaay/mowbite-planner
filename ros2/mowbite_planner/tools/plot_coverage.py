@@ -24,8 +24,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, swept_area  # noqa: E402
 from mowbite_planner.geometry import polygons  # noqa: E402
 from mowbite_planner.mapfile import area_job  # noqa: E402
-from mowbite_planner.planner import (ANGLE_STRATEGIES, FILL_PATTERNS, PERIMETER_DIRECTIONS,  # noqa: E402
-                                     PERIMETER_ORDERS)
+from mowbite_planner.config import (ANGLE_STRATEGIES, FILL_PATTERNS, PERIMETER_DIRECTIONS,  # noqa: E402
+                                    PERIMETER_ORDERS)
 
 # categorical colours (validated for colour blindness, all pairs), the line style tells them apart as well
 STYLE = {

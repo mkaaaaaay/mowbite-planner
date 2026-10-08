@@ -8,7 +8,8 @@ from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 
 from .geometry import inset, polygons, union
-from .planner import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, blade_points, body_out, plan_footprint, swept_area
+from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
+from .planner import blade_points, body_out, plan_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
