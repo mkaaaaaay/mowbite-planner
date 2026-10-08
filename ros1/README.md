@@ -51,8 +51,8 @@ What comes on top, without touching `mower_logic`:
 - **Obstacles** come with the request, like for slic3r: a `mowing.plan` preview of an edited obstacle
   shows the edit. One with a `margin` property in the map (m, found by its outline) keeps the body that far off
   it in place of `obstacle_margin`, an area set to not mowable or inactive too.
-- **Shortest ways** between the parts of an area, also through the other lawns, 15 cm further off the edges than
-  the margins where that's not a lot longer (5 cm where it is). Not over navigation areas or areas set to not
+- **Shortest ways** between the parts of an area, also through the other lawns, the centre 15 cm in from where it
+  may go where that's not a lot longer (5 cm where it is). Not over navigation areas or areas set to not
   mowable: `mower_logic` mows a path from start to end, so a transit over a
   driveway would run with the blade on.
 - **Sections.** Parts of an area with no way between them, not even through the other lawns (a hedge

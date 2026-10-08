@@ -26,8 +26,8 @@ whole body (a rectangle, or the measured outline of your mower) and keeps a marg
 Where the body doesn't fit, only that spot changes: the mower takes another way or turns back before a place that's
 too narrow, and that bit stays unmowed. Turning on the spot and the turns between the lanes get some extra margin:
 OpenMower's FTC controller starts turning a few cm before the turn point, and in a turn the mower keeps less
-exactly to its path. Drives between the parts of the plan keep another 15 cm off the edges where that's not a lot
-longer (5 cm where it is).
+exactly to its path. Drives between the parts of the plan keep their centre 15 cm in from where it may go where
+that's not a lot longer (5 cm where it is), the body some 5-10 cm further off the edges than before.
 
 Expect a few % of the lawn near edges and obstacles to stay unmowed, depending on the margins.
 
@@ -45,7 +45,8 @@ in [`ros1/README.md`](ros1/README.md#setup). In short:
 4. Record the map with the mower's centre along the edges.
 5. Check the plan in the app before the first mow, and keep the emergency stop at hand.
 
-Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env`.
+Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env` and the
+planner's stack stopped (both would answer as `slic3r_coverage_planner`).
 
 ## Main settings
 
