@@ -1,52 +1,48 @@
 # MowBite Planner
 
-A coverage path planner for OpenMower, written in Python (shapely). It replaces the slic3r planner: it answers the
-same service with the same message, so `mower_logic` doesn't need any change. The main difference to slic3r is
-that it plans with the mower's real size and checks that the body stays off the edges and obstacles.
+A coverage path planner for OpenMower, in Python with shapely. It drops in for the slic3r planner: same service,
+same answer, so `mower_logic` doesn't notice. The big difference: it plans with the mower's real body and keeps it
+off the edges and obstacles.
 
-**Status:** experimental. Tested on one mower (YardForce NX60i with RTK) and one garden. It mows, but expect rough
-edges and settings that still change.
+**Status:** experimental. Tested on one mower (YardForce NX60i, RTK) in one garden. It mows, but expect rough edges
+and settings that still change.
 
-## Features
+## What it does
 
-- loops along the edge and around obstacles, then lanes, crosshatch or rings
-- automatic lane spacing, angle per area, optionally turning a bit further after every mow
-- forward-only turns (lanes in skip order, a small loop where no U-turn fits), or turning on the spot if you want
-- optional "clean stripes" mode: no turning inside the lanes, only in the headland
-- collision check with the mower's body and adjustable margins (below)
-- settings per area in the map, plans made ahead after every change, a preview for the app
+- loops along the edge and around obstacles, then lanes (or crosshatch, or rings)
+- forward-only turns that keep the wheels rolling, turning on the spot only if you want it
+- every pose and every turn checked against the body, with margins you set
+- picks the lane spacing and angle on its own if you let it, turns the stripes a bit after every mow
+- "clean stripes" mode: no turning inside the lanes, only in the headland
+- optional extra round at the end over the biggest bits left unmowed (`mop_up`)
+- settings per area in the map, plans made ahead so the app's preview is instant
 
-## How the collision check works
+## The body check in short
 
-You record the map by driving the mower's **centre** close along every edge and around every obstacle. The
-recorded line is then where the centre was, and the real edge is where the body was. The planner rebuilds that
-space by moving the body along the recorded lines, then checks every pose and every turn of the plan with the
-whole body (a rectangle, or the measured outline of your mower) and keeps a margin to the edges.
+You record the map by driving the mower's **centre** along the edges. So the line is where the centre was, and the
+real edge is where the body was. The planner rebuilds that from the lines, checks the whole body (a rectangle or the
+measured outline) at every pose and turn, and keeps a margin. Turning on the spot and the turns between lanes get a
+few cm extra, because OpenMower's FTC starts turning early and wobbles a bit there.
 
-Where the body doesn't fit, only that spot changes: the mower takes another way or turns back before a place that's
-too narrow, and that bit stays unmowed. Turning on the spot and the turns between the lanes get some extra margin:
-OpenMower's FTC controller starts turning a few cm before the turn point, and in a turn the mower keeps less
-exactly to its path. Drives between the parts of the plan keep their centre 15 cm in from where it may go where
-that's not a lot longer (5 cm where it is), the body some 5-10 cm further off the edges than before.
+Where the body doesn't fit, only that spot changes: another way round, or turning back before it. That bit stays
+unmowed. In our garden that's about 2 % of the lawn, mostly thin strips in corners.
 
-Expect a few % of the lawn near edges and obstacles to stay unmowed, depending on the margins.
+## Setup
 
-## Setup on OpenMower
+OpenMower's official `edge` image stays as it is, the planner runs in its own container next to it. Full steps in
+[`ros1/README.md`](ros1/README.md#setup), the short version:
 
-OpenMower's official image stays as it is, the planner runs in a container of its own next to it. The full steps are
-in [`ros1/README.md`](ros1/README.md#setup). In short:
-
-1. In OpenMower's `.env`: `OM_PLANNER=external`, with `VERSION="edge"` (open_mower_ros #363 and #364, in `edge`
+1. OpenMower's `.env`: `VERSION="edge"` and `OM_PLANNER=external` (needs open_mower_ros #363 and #364, both in `edge`
    since 8 October 2026, not in a release yet).
-2. The planner as a stack of its own with [`ros1/compose.yaml`](ros1/compose.yaml), built on the mower on the same
-   OpenMower image (about 11 MB on top), `docker compose up -d`.
-3. Set the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) with
-   `planner.settings.set` or in the MowBite app.
+2. Start the planner stack from [`ros1/compose.yaml`](ros1/compose.yaml) (`docker compose up -d`, about 11 MB on top
+   of OpenMower's image).
+3. Tell it the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) in the MowBite
+   app or with `planner.settings.set`.
 4. Record the map with the mower's centre along the edges.
-5. Check the plan in the app before the first mow, and keep the emergency stop at hand.
+5. Look at the plan in the app before the first mow, emergency stop at hand.
 
-Back to slic3r: the setting `planner` `slic3r` (the app's switch), or `OM_PLANNER` out of OpenMower's `.env` and the
-planner's stack stopped (both would answer as `slic3r_coverage_planner`).
+Back to slic3r: switch `planner` to `slic3r` in the app. Or take `OM_PLANNER` out of OpenMower's `.env` and stop the
+planner stack (both, else two planners answer the same service).
 
 ## Main settings
 
@@ -54,37 +50,37 @@ planner's stack stopped (both would answer as `slic3r_coverage_planner`).
 | --- | --- | --- |
 | `robot_width`, `robot_front`, `robot_rear` | none | body size in m around the rear axle, the check needs them |
 | `robot_outline` | none | measured outline `[[x, y], ...]` instead of the rectangle |
-| `edge_margin` | 0.05 | margin to the boundary (m) |
-| `obstacle_margin` | 0.10 | margin to obstacles (m), `margin` on an obstacle in the map overrides it |
-| `spin_margin` | 0.05 | extra margin when turning on the spot and in the turns between lanes (m) |
+| `edge_margin` | 0.05 | gap to the boundary (m) |
+| `obstacle_margin` | 0.10 | gap to obstacles (m), a `margin` on an obstacle in the map beats it |
+| `spin_margin` | 0.05 | extra gap when turning on the spot and in the turns between lanes (m) |
 | `turn_radius` | 0.25 | radius of the turns (m) |
-| `headland_turns` | false | clean stripes |
 | `turn_on_spot` | false | turn on the spot instead of loops |
-| `mop_up` | false | a round at the end over the biggest unmowed pieces the blade gets to |
-| `planner` | mowbite | `slic3r`: OpenMower's slic3r planner plans instead, for all areas (no body check) |
+| `headland_turns` | false | clean stripes |
+| `mop_up` | false | extra round at the end over the biggest unmowed bits |
+| `planner` | mowbite | `slic3r`: OpenMower's slic3r plans instead, for all areas (no body check) |
 
-All settings, the RPCs and what the plan answer contains: [`ros1/README.md`](ros1/README.md),
+Everything else, the RPCs and what a plan answer contains: [`ros1/README.md`](ros1/README.md) and
 [`ros2/README.md`](ros2/README.md).
 
 ## Known limits
 
-- slower than slic3r: 5-20 s per area on the CM4, the plans are made ahead so you rarely wait
-- the margins have to cover GPS and recording errors, ~5 cm with a good RTK fix. GPS jumps (house walls, trees)
+- slower than slic3r: 5–20 s per area on the CM4, but plans are made ahead, so you rarely wait
+- the margins have to cover GPS and recording errors, about 5 cm with a good RTK fix. GPS jumps (house walls, trees)
   aren't covered
-- obstacles closer to the edge or each other than the body plus margins can't be passed
-- tufts stay in very pointed corners
+- obstacles closer to the edge or to each other than body plus margins can't be passed
+- thin strips stay in tight corners and along edges the mower can only reach head-on
 
 ## Development
 
-The planner itself needs only shapely, the tests pytest:
+The planner only needs shapely, the tests pytest:
 
 ```bash
 python3 -m venv /tmp/venv && /tmp/venv/bin/pip install shapely pytest
 /tmp/venv/bin/python -m pytest ros2/mowbite_planner/test ros1/mowbite_planner_ros1/test
 ```
 
-`ros2/` also has a ROS 2 node, an MQTT service for OpenMower's Planner Studio and `tools/plot_coverage.py` to plot
-a plan without ROS.
+`ros2/` also has a ROS 2 node, an MQTT service for OpenMower's Planner Studio and `tools/plot_coverage.py` to draw a
+plan without ROS.
 
 ## License
 
