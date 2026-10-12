@@ -20,6 +20,11 @@ from .mathutil import Pose2D, angle_diff, normalize_angle
 from .route import _Route
 from .transit import TransitPlanner
 
+try:  # (the leftovers' passes: shapely 2 brings it)
+    import numpy
+except ImportError:
+    numpy = None
+
 
 # m, with the body checked: where the path still turns on the spot a pose this much before the point, facing the way
 # it came (where the way in is longer than twice that). OpenMower's FTC turns over the way from the pose before to the
@@ -53,6 +58,17 @@ MOP_MAX = 20
 MOP_PASS = 0.4
 MOP_HEADINGS = 16
 MOP_GAIN = 0.5
+# leftovers (what a mow really left, see _leftovers): the biggest LEFT_MAX pieces of MOP_MIN at least, straight passes
+# over each, LEFT_LENGTHS m long with the blade's way over one of a few points of what's left of it or beside it
+# (LEFT_ACROSS of half the mower's width), one of MOP_HEADINGS directions or along what's left: the one that mows the
+# most of it (counted on a grid of LEFT_POINTS points at most, LEFT_CHECKS of the best checked) where the body fits and
+# it can turn round at both ends, mowing MOP_GAIN of MOP_MIN at least; LEFT_ROUNDS of them at most, while MOP_MIN is left
+LEFT_MAX = 30
+LEFT_LENGTHS = (3.0, 2.0, 1.2, 0.8, 0.4)
+LEFT_ACROSS = (0.0, 0.4, -0.4, 0.8, -0.8)
+LEFT_POINTS = 2500
+LEFT_CHECKS = 40
+LEFT_ROUNDS = 8
 # ways _fit_body tries at most for a plan, past that the path jumps over a place (a count, not a time: the same plan
 # every time)
 FIT_TRIES = 12000
@@ -949,6 +965,127 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
         if back and fp.poses_fit(join(out[-2:], back)):
             add(TRANSIT, back)
     return out, new, {'pieces': done, 'area': round(area, 3)}
+
+
+def _leftover_passes(route: '_Route', piece) -> List[Tuple[float, List[List[Pose2D]]]]:
+    """The passes over a piece a mow left, [(m2 they mow of it, [the poses one way along, the other way where that fits
+    too])], one after the other: the next of what the ones before leave (see LEFT_MAX). None without numpy."""
+    if numpy is None:
+        return []
+    cfg, fp, half = route.cfg, route.footprint, 0.5 * route.cfg.mower_width
+    x0, y0, x1, y1 = piece.bounds
+    grid = max(0.02, math.sqrt(piece.area / LEFT_POINTS))
+    inside = prep(piece)
+    left = numpy.array([(x, y) for x in numpy.arange(x0 + 0.5 * grid, x1, grid)
+                        for y in numpy.arange(y0 + 0.5 * grid, y1, grid) if inside.contains(Point(x, y))]).reshape(-1, 2)
+    cell, out, rest = grid * grid, [], piece
+
+    def covered(a, b):
+        # which of left lie within half the mower's width of the blade's ways from a to b (arrays: one way a row)
+        d = b - a
+        n = numpy.maximum((d * d).sum(-1), 1e-12)[:, None]
+        t = numpy.clip(((left[None, :, 0] - a[:, None, 0]) * d[:, None, 0] +
+                        (left[None, :, 1] - a[:, None, 1]) * d[:, None, 1]) / n, 0.0, 1.0)
+        return numpy.hypot(left[None, :, 0] - a[:, None, 0] - t * d[:, None, 0],
+                           left[None, :, 1] - a[:, None, 1] - t * d[:, None, 1]) <= half
+
+    def fits(p: XY, q: XY, h: float) -> Optional[List[Pose2D]]:
+        # the pass from p to q where the mower may go, can turn round at both ends (it gets there and away forwards)
+        # and the body fits along it
+        p, q = (float(p[0]), float(p[1])), (float(q[0]), float(q[1]))
+        if not route.transit.is_free([p, q]) or not fp.fits_turn(p[0], p[1], h + math.pi, h) or \
+                not fp.fits_turn(q[0], q[1], h, h + math.pi):
+            return None
+        way = sample_straight(p[0], p[1], q[0], q[1], h, route.step)
+        return way if fp.poses_fit(way) else None
+
+    for _ in range(LEFT_ROUNDS):
+        if len(left) * cell < MOP_MIN:
+            break
+        # where the blade's middle goes: the point of what's left closest to its middle, and four along its longest way
+        m = left.mean(0)
+        cov = numpy.cov(left.T) if len(left) > 2 else numpy.zeros((2, 2))
+        axis = 0.5 * math.atan2(2.0 * cov[0, 1], cov[0, 0] - cov[1, 1])
+        along = left[numpy.argsort((left - m) @ numpy.array([math.cos(axis), math.sin(axis)]), kind='stable')]
+        anchors = [tuple(left[int(numpy.argmin(((left - m) ** 2).sum(-1)))])] + \
+            [tuple(along[min(len(along) - 1, int(f * len(along)))]) for f in (0.0, 0.25, 0.75, 1.0)]
+        headings = [2.0 * math.pi * k / MOP_HEADINGS for k in range(MOP_HEADINGS)] + [axis, axis + math.pi]
+        cand = numpy.array([(qx, qy, h, length, side) for qx, qy in dict.fromkeys(anchors) for h in headings
+                            for length in LEFT_LENGTHS for side in LEFT_ACROSS])
+        c, s = numpy.cos(cand[:, 2]), numpy.sin(cand[:, 2])
+        # (the blade's way: its middle beside the point by side of half the width, to the left of the way)
+        mx, my = cand[:, 0] - cand[:, 4] * half * s, cand[:, 1] + cand[:, 4] * half * c
+        d = 0.5 * cand[:, 3]
+        a, b = numpy.stack([mx - d * c, my - d * s], -1), numpy.stack([mx + d * c, my + d * s], -1)
+        gain = numpy.concatenate([cell * covered(a[i:i + 64], b[i:i + 64]).sum(-1) for i in range(0, len(cand), 64)])
+        # (the mower's centre with the blade's on its way: both ends where it may go first, quick to tell)
+        off = numpy.stack([-cfg.blade_ahead * c + cfg.blade_offset * s, -cfg.blade_ahead * s - cfg.blade_offset * c], -1)
+        ends = [k for k in range(len(cand)) if gain[k] >= MOP_GAIN * MOP_MIN and
+                route.transit.is_free([tuple(a[k] + off[k])]) and route.transit.is_free([tuple(b[k] + off[k])])]
+        best = None
+        for k in sorted(ends, key=lambda k: (-gain[k], cand[k, 3], k))[:LEFT_CHECKS]:
+            way = fits(tuple(a[k] + off[k]), tuple(b[k] + off[k]), float(cand[k, 2]))
+            if way is not None:
+                best = k, way
+                break
+        if best is None:
+            break
+        k, way = best
+        # the other way along: the blade on the same way, the mower's centre on the other side of it
+        other = fits(tuple(b[k] - off[k]), tuple(a[k] - off[k]), normalize_angle(float(cand[k, 2]) + math.pi))
+        mowed = route.blade(way)
+        out.append((rest.intersection(mowed).area, [way] + ([other] if other is not None else [])))
+        rest = rest.difference(mowed)
+        left = left[~covered(a[k:k + 1], b[k:k + 1])[0]]
+    return out
+
+
+def _leftovers(route: '_Route', free, mowed, start: XY) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
+    """What a mow really left: of free without mowed (where the blade went, see report.track_mowed) the pieces of
+    MOP_MIN at least, each with its passes (_leftover_passes). The path is those passes, the one nearest start (the
+    dock) first, then the nearest next each time with a drive to it (through the transit space, the body checked); a
+    pass there's no such drive to is left out. It ends with the last pass: the mower can turn round at any pass's ends.
+    Returns the poses, the segments (drives TRANSIT, passes LANE, 'leftover') and {left_m2: unmowed of those pieces,
+    pieces: of them mowed, passes, area: m2 the passes mow}."""
+    fp = route.footprint
+    pieces = sorted((p for p in polygons(subtract(free, [mowed])) if p.area >= MOP_MIN), key=lambda p: -p.area)
+    out: List[Pose2D] = []
+    new: List[SegmentInfo] = []
+    area, done, count = 0.0, set(), 0
+
+    def add(kind: str, way: List[Pose2D]) -> None:
+        merged = join(out[-1:], way)
+        if len(merged) > 1:
+            first = max(0, len(out) - 1)
+            new.append(SegmentInfo(kind, first, first + len(merged) - 1, False, 'leftover', 0))
+            out[first:] = merged  # (where they meet facing the way it leaves: turning on the spot there)
+
+    passes = [(gain, ways, k) for k, piece in enumerate(pieces[:LEFT_MAX])
+              for gain, ways in _leftover_passes(route, piece)]
+    while passes:
+        here = out[-1] if out else Pose2D(start[0], start[1], 0.0)
+        passes.sort(key=lambda g: min(math.hypot(w[0].x - here.x, w[0].y - here.y) for w in g[1]))
+        gain, ways, k = passes.pop(0)
+        for way in sorted(ways, key=lambda w: math.hypot(w[0].x - here.x, w[0].y - here.y)):
+            if out:
+                there = route.drive_to((way[0].x, way[0].y), way[0].yaw, None, route.transit,
+                                       ((here.x, here.y), here.yaw))
+                if not there or not same_position(there[0], here):
+                    continue
+                if len(there) > 1 and not same_position(there[0], there[1]):
+                    # turning on the spot first where it doesn't leave the way it faces
+                    yaw = math.atan2(there[1].y - there[0].y, there[1].x - there[0].x)
+                    if angle_diff(yaw, there[0].yaw) > 1e-6:
+                        there = [there[0], Pose2D(there[0].x, there[0].y, yaw)] + there[1:]
+                # (the body checked as the path will be: one pose on a position, the later, turning on the spot there)
+                if not fp.poses_fit(join(out[-2:], there, way)):
+                    continue
+                add(TRANSIT, there)
+            add(LANE, way)
+            area, done, count = area + gain, done | {k}, count + 1
+            break
+    return out, new, {'left_m2': round(sum(p.area for p in pieces), 3), 'pieces': len(done), 'passes': count,
+                      'area': round(area, 3)}
 
 
 def _turn_at(route: '_Route', poses: List[Pose2D],

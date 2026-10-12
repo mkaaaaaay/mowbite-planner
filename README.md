@@ -14,7 +14,8 @@ and settings that still change.
 - every pose and every turn checked against the body, with margins you set
 - picks the lane spacing and angle on its own if you let it, turns the stripes a bit after every mow
 - "clean stripes" mode: no turning inside the lanes, only in the headland
-- optional extra round at the end over the biggest bits left unmowed (`mop_up`)
+- optional extra round at the end over the biggest bits left unmowed (`mop_up`), and after a mow a look at the real
+  track: what did it leave, mow just that again (`planner.leftovers`)
 - settings per area in the map, plans made ahead so the app's preview is instant
 
 ## The body check in short

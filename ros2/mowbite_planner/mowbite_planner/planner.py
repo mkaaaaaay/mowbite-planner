@@ -35,7 +35,8 @@ from shapely import wkb
 from shapely.geometry import LineString, Point, Polygon
 from shapely.prepared import prep
 
-from .bodyfit import _assemble, _field_turns, _fit_body, _lanes_field, _mop_up, _round_corners, _turn_at
+from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftovers, _mop_up, _round_corners,
+                      _turn_at)
 from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, MAX_BLADE_OFFSET,
                      MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES, SWEPT_PIECE, TRANSIT, TURN, XY, CoveragePlan,
                      Lane, PlannerConfig, PlanningError, SegmentInfo, _keep)
@@ -76,14 +77,15 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   end: Optional[Sequence[float]] = None,
                   drivable: Sequence[Sequence[Sequence[float]]] = (),
                   keep_out: Sequence[Sequence[Sequence[float]]] = (),
-                  margins: Sequence[Optional[float]] = ()) -> CoveragePlan:
+                  margins: Sequence[Optional[float]] = (), mowed=None) -> CoveragePlan:
     """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
     SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
-    lane spacing and loops it was planned with."""
+    lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
+    report.track_mowed): only what that left, see _plan_coverage."""
     cfg = config or PlannerConfig()
     cfg.validate()
-    if cfg.lane_spacing_mode != 'auto':
-        return _plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins)
+    if cfg.lane_spacing_mode != 'auto' or mowed is not None:
+        return _plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, mowed=mowed)
     t0 = time.perf_counter()
     lo, hi = cfg.spacing_range
     best, best_left, best_spacing, error = None, None, 0.0, None
@@ -170,7 +172,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                    end: Optional[Sequence[float]] = None,
                    drivable: Sequence[Sequence[Sequence[float]]] = (),
                    keep_out: Sequence[Sequence[Sequence[float]]] = (), margins: Sequence[Optional[float]] = (),
-                   probe: Any = False) -> CoveragePlan:
+                   probe: Any = False, mowed=None) -> CoveragePlan:
     """Plans the coverage path of one area.
 
     boundary: [(x, y), ...] of the outline, obstacles: a list of those for no-go zones, all in metres in
@@ -179,8 +181,10 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     docking station. drivable: areas the mower may drive through between the parts of this one but doesn't
     mow (navigation areas, other lawns). keep_out: where nothing goes on the way through those (inactive areas, ones
     not to mow), with the body checked recorded like the obstacles (see edges). margins: the obstacle_margin of each
-    obstacle, then of each area to keep out of (None, or none given: the setting). Raises PlanningError when there's
-    nothing to plan, or a setting or point is out of range (every coordinate within MAX_COORDINATE of the origin).
+    obstacle, then of each area to keep out of (None, or none given: the setting). mowed (a geometry, where the blade
+    went on a mow): no loops and lanes, only passes over what that left (bodyfit._leftovers), the one nearest start
+    first; stats['leftovers'] says how much. Raises PlanningError when there's nothing to plan, or a setting or point is
+    out of range (every coordinate within MAX_COORDINATE of the origin).
     """
     t0 = time.perf_counter()
     cfg = config or PlannerConfig()
@@ -494,17 +498,18 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     def todo(k: int) -> Dict[str, Any]:
         return work.setdefault(k, {'levels': {}, 'middles': {}, 'cells': [[] for _ in passes], 'narrow': None})
 
-    for i, level in enumerate(drive_levels):
+    # (mowed: no loops, no lanes, only what's left of them, see below)
+    for i, level in enumerate(drive_levels if mowed is None else []):
         for k, geom in split(level).items():
             todo(k)['levels'][i] = geom
-    for i, middle in enumerate(middles):
+    for i, middle in enumerate(middles if mowed is None else []):
         for k, geom in split(middle).items():
             todo(k)['middles'][i] = geom
-    for pi, (a, cells) in enumerate(passes):
+    for pi, (a, cells) in enumerate(passes if mowed is None else []):
         for cell in cells:
             if cell:
                 todo(lane_part(a, cell))['cells'][pi].append(cell)
-    for k, geom in split(narrow).items():
+    for k, geom in split(narrow if mowed is None else Polygon()).items():
         todo(k)['narrow'] = geom
 
     def part_distance(k: int, p: Optional[XY]) -> float:
@@ -576,11 +581,11 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if not cfg.turn_on_spot:
         _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
-    if footprint is not None:
+    if footprint is not None and poses:
         poses, segments = _round_corners(route, poses, segments)
     took('route')
     fitted, parts = None, len({s.section for s in segments})
-    if footprint is not None and cfg.body_fit:
+    if footprint is not None and cfg.body_fit and poses:
         poses, segments, fitted = _fit_body(route, poses, segments)
         poses, segments = _round_corners(route, poses, segments)
         if fitted['fixed']:
@@ -600,7 +605,18 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if cfg.mop_up and footprint is not None and poses:
         poses, segments, mop = _mop_up(route, poses, segments, free)
         took('mop_up')
-    turning, arcs, deepest = _field_turns(route, poses, segments) if route.field is not None else ([], 0, 0.0)
+    leftover = None
+    if mowed is not None:
+        # what a mow left: passes over that alone, the one nearest the start (the dock) first
+        if footprint is None:
+            raise PlanningError('what a mow left is only planned with the body set (robot_width, robot_front, '
+                                'robot_rear)')
+        poses, segments, leftover = _leftovers(route, free, mowed, start_xy)
+        if not poses:
+            raise PlanningError(f'nothing left to mow where the mower gets to ({leftover["left_m2"]:.2f} m2 left)')
+        took('leftovers')
+    turning, arcs, deepest = _field_turns(route, poses, segments) if route.field is not None and mowed is None \
+        else ([], 0, 0.0)
     if turning:
         route.warnings.append(f'{len(turning)} places where a drive turns in the lanes\' field, no way along the '
                               'headland fits there: at ' + ', '.join(f'({x:.2f}, {y:.2f})' for x, y in turning))
@@ -625,6 +641,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         lengths[seg.kind] += path_length(poses[seg.start:seg.end + 1])
     stats: Dict[str, Any] = {
         'mop_up': mop,
+        'leftovers': leftover,
         'sections': len(section_starts),
         'path_length': sum(lengths.values()),
         'perimeter_length': lengths[PERIMETER],

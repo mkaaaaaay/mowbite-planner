@@ -33,7 +33,8 @@ from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle
 from mowbite_planner.planner import plan_footprint  # noqa: E402
 from mowbite_planner.route import _Route, _rows, _spins, best_order  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
-from mowbite_planner.report import check_plan, drive_time  # noqa: E402
+from mowbite_planner.geometry import polygons  # noqa: E402
+from mowbite_planner.report import check_plan, drive_time, track_mowed  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -1725,6 +1726,40 @@ def test_split_zones(base):
     for kw in (dict(fill_pattern='crosshatch'), dict(headland_turns=True)):
         same = plan_coverage(U_LAWN, [], PlannerConfig(**dict(base, **kw)))
         assert plan_coverage(U_LAWN, [], PlannerConfig(**dict(base, split_zones=True, **kw))).poses == same.poses
+
+
+def test_leftovers():
+    """mowed (where the blade really went on a mow, report.track_mowed of its track): the plan is only passes over what
+    that left, the nearest to the start first, drives between them, the body fitting everywhere. Here a mow that
+    missed every 15th lane: most of that gets mowed, about what the plan itself leaves stays. Nothing left: no plan."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    runs, lanes = [[]], 0
+    for s in plan.segments:
+        lanes += s.kind == LANE and not s.maneuver
+        if s.kind == LANE and not s.maneuver and lanes % 15 == 0:
+            runs.append([])
+        else:
+            runs[-1] += [(p.x, p.y) for p in plan.poses[s.start:s.end + 1]]
+    mowed = track_mowed(runs, cfg.mower_width, cfg.blade_ahead, cfg.blade_offset)
+
+    def left(*geoms):
+        return sum(p.area for p in polygons(plan.free_space.difference(unary_union(geoms))) if p.area >= 0.02)
+
+    assert left(mowed) > 8.0 and left(mowed) == pytest.approx(left(swept_area(plan, cfg.mower_width)), abs=12.0)
+    more = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1), mowed=mowed)
+    check_invariants(more, cfg, [TREE, BED])
+    stats = more.stats['leftovers']
+    assert stats['left_m2'] == pytest.approx(left(mowed), abs=0.01) and stats['passes'] >= lanes // 15
+    assert stats['area'] > 0.7 * stats['left_m2'] and check_plan(more)['body_out'] == []
+    assert left(mowed, swept_area(more, cfg.mower_width)) < left(swept_area(plan, cfg.mower_width)) + 0.5
+    assert {(s.kind, s.maneuver) for s in more.segments} == {(LANE, 'leftover'), (TRANSIT, 'leftover')}
+    assert more.stats['path_length'] < 0.2 * plan.stats['path_length'] and plan.stats['leftovers'] is None
+    assert math.hypot(more.poses[0].x - 1, more.poses[0].y - 1) < 3.0  # (the nearest to the start first)
+    with pytest.raises(PlanningError, match='nothing left to mow'):
+        plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1), mowed=Polygon(GARDEN).buffer(1.0))
+    with pytest.raises(PlanningError, match='body'):
+        plan_coverage(GARDEN, [TREE, BED], PlannerConfig(), mowed=mowed)
 
 
 def test_mop_up():

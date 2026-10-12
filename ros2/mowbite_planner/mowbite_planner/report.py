@@ -27,6 +27,8 @@ FTC_SPEEDS = {'speed_fast': 0.4, 'speed_slow': 0.15, 'speed_fast_threshold': 1.0
               'speed_angular': 45.0, 'acceleration': 0.1}
 # rad, a heading jump bigger than this from one pose to the next is turning on the spot
 SPOT_TURN = math.radians(15.0)
+# m, track_mowed: two driven points further apart than this aren't joined (a gap in the recording, not a drive)
+TRACK_GAP = 4.0
 
 
 def drive_time(poses: Sequence[Pose2D], speeds: Optional[Mapping[str, float]] = None) -> Dict[str, float]:
@@ -63,6 +65,32 @@ def drive_time(poses: Sequence[Pose2D], speeds: Optional[Mapping[str, float]] = 
         else:
             slow_m += step
     return {'s': s + spin, 'fast_m': fast_m, 'slow_m': slow_m, 'spin_s': spin}
+
+
+def track_mowed(runs: Sequence[Sequence[Sequence[float]]], mower_width: float, blade_ahead: float = 0.0,
+                blade_offset: float = 0.0):
+    """Where the blade went on a mow: runs are the driven points [(x, y), ...] of the mower's centre with the blade
+    running (OpenMower's position_history, a point every 0.1 to 2 m), each facing the next. The blade's way between
+    two points TRACK_GAP apart at most (further: a gap in the recording), mower_width wide. A geometry, for
+    plan_coverage's mowed."""
+    half, strips = 0.5 * mower_width, []
+    for run in runs:
+        pts = [(float(p[0]), float(p[1])) for p in run]
+        pts = [p for i, p in enumerate(pts) if i == 0 or math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 1e-3]
+        blade = []
+        for i, (x, y) in enumerate(pts):
+            a, b = (pts[i], pts[i + 1]) if i + 1 < len(pts) else (pts[i - 1], pts[i]) if i else (pts[i], pts[i])
+            h = math.atan2(b[1] - a[1], b[0] - a[0])
+            blade.append((x + blade_ahead * math.cos(h) - blade_offset * math.sin(h),
+                          y + blade_ahead * math.sin(h) + blade_offset * math.cos(h)))
+        line: List[Any] = []
+        for p in blade:
+            if line and math.hypot(p[0] - line[-1][0], p[1] - line[-1][1]) > TRACK_GAP:
+                strips.append(line)
+                line = []
+            line.append(p)
+        strips.append(line)
+    return union((LineString(line) if len(line) > 1 else Point(line[0])).buffer(half, 4) for line in strips if line)
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:

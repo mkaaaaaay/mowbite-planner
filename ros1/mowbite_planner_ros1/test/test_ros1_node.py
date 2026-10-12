@@ -603,7 +603,8 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.drive', 'planner.plan', 'planner.settings', 'planner.settings.set']
+    methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.plan', 'planner.settings',
+               'planner.settings.set']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -1046,6 +1047,56 @@ def test_duration(planner):
     with open(unended, 'w') as f:
         f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'started_at': 1.0, 'points': []}))
     assert node_module.mowing_time(unended) is None
+
+
+def test_leftovers(planner):
+    """planner.leftovers: what a mow's track left of the area and the passes over it. Armed, mower_logic's next plan
+    for the area is those passes alone (again while that job runs), an area with nothing left gets no paths; when
+    that job is finished it's over and counts as no mow (the lanes don't turn on). Not armed: a look only."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded',
+                                 'blade_ahead': 0.17, 'angle_increment': 0.1})
+    send_map(the_map())
+    full, _ = rpc('planner.plan', {'area_id': 'a', 'poses': True})
+    # the track: the plan as driven, but for every 12th lane
+    runs, lanes = [[]], 0
+    for seg in full['segments']:
+        lanes += seg['type'] == 'lane'
+        if seg['type'] == 'lane' and lanes % 12 == 0:
+            runs.append([])
+        else:
+            runs[-1] += [p[:2] for p in full['poses'][seg['start']:seg['end'] + 1]]
+    folder = os.path.join(os.environ['ROS_HOME'], 'position_history')
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, '1791377699_mown.jsonl'), 'w') as f:
+        for run in [r for r in runs if r]:
+            f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
+            f.write(json.dumps({'type': 'append_points', 'points': run}) + '\n')
+    result, error = rpc('planner.leftovers', {'job_id': 'mown'})
+    assert error is None and result['file'] == '1791377699_mown.jsonl' and result['armed'] == 0.0
+    a = result['areas']['a']
+    assert 'stats' in a, a
+    left = a['stats']['leftovers']
+    assert a['left_m2'] > 1.0 and left['passes'] >= 3 and left['area'] > 0.6 * a['left_m2'] and a['duration']['min'] > 0
+    assert a['paths'] and {s['maneuver'] for path in a['paths'] for s in path['segments']} == {'leftover'}
+    whole = len(poses(planner.handle(request())))  # (not armed: the plan as ever)
+    assert whole > 5 * sum(path['poses'] for path in a['paths'])
+    result, _ = rpc('planner.leftovers', {'job_id': 'mown', 'arm': True})
+    assert 0.0 < result['armed'] <= node_module.LEFTOVERS_ARMED
+    first = poses(planner.handle(request()))
+    assert 3 <= len(first) < 0.2 * whole and len(poses(planner.handle(request()))) == len(first)
+    event('JOB_COMPLETE')
+    assert any('the leftovers are mowed' in line for _, line in rospy.log)
+    assert len(poses(planner.handle(request()))) == whole and rpc('planner.settings')[0]['angle_steps'] == 0
+    # all mowed: nothing to do, armed the area gets no paths
+    with open(os.path.join(folder, '1791377700_all.jsonl'), 'w') as f:
+        f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
+        f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses']]}) + '\n')
+    result, _ = rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
+    assert result['areas']['a']['paths'] == [] and 'nothing left' in result['areas']['a']['message']
+    assert planner.handle(request()).paths == []
+    rpc('planner.settings.set', {'turn_radius': 0.3})  # (new settings: the leftovers were the old ones')
+    assert len(poses(planner.handle(request()))) > 100
+    assert rpc('planner.leftovers', {'job_id': 'nope'})[1][1].startswith('no track')
 
 
 def test_planner_drive(planner):
