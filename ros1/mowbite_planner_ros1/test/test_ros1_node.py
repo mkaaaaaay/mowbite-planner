@@ -1094,6 +1094,14 @@ def test_leftovers(planner):
     result, _ = rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
     assert result['areas']['a']['paths'] == [] and 'nothing left' in result['areas']['a']['message']
     assert planner.handle(request()).paths == []
+    # a track that isn't a mow of the area (hardly anything of it mowed): no leftovers, armed the plan as ever
+    with open(os.path.join(folder, '1791377701_short.jsonl'), 'w') as f:
+        f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
+        f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses'][:200]]}) + '\n')
+    result, _ = rpc('planner.leftovers', {'job_id': 'short', 'arm': True})
+    assert result['areas']['a']['paths'] == [] and 'most of the area is left' in result['areas']['a']['message']
+    assert len(poses(planner.handle(request()))) == whole
+    rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
     rpc('planner.settings.set', {'turn_radius': 0.3})  # (new settings: the leftovers were the old ones')
     assert len(poses(planner.handle(request()))) > 100
     assert rpc('planner.leftovers', {'job_id': 'nope'})[1][1].startswith('no track')
