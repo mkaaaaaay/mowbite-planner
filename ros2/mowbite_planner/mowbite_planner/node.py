@@ -146,6 +146,8 @@ PARAMETERS = {
     'turn_on_spot': (False, 'turning on the spot where the path would drive a loop (for lawns that take it): no bulb '
                      'between lanes, a drive arriving on the spot rather than round a loop, the body fitting turning',
                      None, ''),
+    'turn_radius_auto': (False, 'the planner picks every turn\'s radius, turn_radius the least: fewer turns tighter '
+                         'than it, wider ones where there\'s room', None, ''),
     'turn_types': (list(TURN_TYPES), 'turns allowed between lanes, preferred first: ' + ', '.join(TURN_TYPES),
                    lambda v: all(t in TURN_TYPES for t in v), 'must be some of ' + ', '.join(TURN_TYPES)),
     'lane_order': ('snake', 'snake: lane after neighbouring lane. skip: lanes far enough apart for a forward '

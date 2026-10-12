@@ -89,6 +89,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `angle_min_deg`, `angle_max_deg` | `.nan` | keep the lanes in this range |
 | `angle_step_deg` | 5.0 | step `optimal` tries |
 | `turn_radius` | 0.25 | radius of the turns (m) |
+| `turn_radius_auto` | false | the planner picks each turn's radius, `turn_radius` at least: fewer turns tighter than it, wider ones where there's room |
 | `turn_types` | all | `[u_turn, bulb, detour, pivot]`, allowed ones, preferred first |
 | `turn_on_spot` | false | turn on the spot where it would drive a loop |
 | `lane_order` | `snake` | `snake` or `skip` (forward U-turns only) |

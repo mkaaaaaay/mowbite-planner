@@ -210,11 +210,18 @@ def _to_map(m: Maneuver, origin: Pose2D, side: float) -> Maneuver:
     return Maneuver(m.name, m.radius, pieces)
 
 
-def turn_radii(radius: float, d: float, least: float = 0.0) -> List[float]:
-    """The radii to try, largest first: the wanted one, smaller ones, and the half circle d / 2, none below least."""
+# with wider turns (PlannerConfig.turn_radius_auto) a bulb's radius, of the wanted one: the widest that fits
+WIDER_TURNS = (2.0, 1.5, 1.25)
+
+
+def turn_radii(radius: float, d: float, least: float = 0.0, wider: bool = False) -> List[float]:
+    """The radii to try, largest first: the wanted one, smaller ones, and the half circle d / 2, none below least.
+    wider: wider ones first, where lanes d apart take them: the half circle of a U-turn (d at least 2 radius), WIDER_TURNS
+    of radius for a bulb (closer)."""
     out: List[float] = []
-    for r in (radius, 0.75 * radius, 0.5 * radius, 0.5 * d):
-        if max(1e-3, least - 1e-9) < r <= radius + 1e-9 and all(abs(r - o) > 1e-3 for o in out):
+    more = () if not wider else (0.5 * d,) if d >= 2.0 * radius - 1e-9 else tuple(w * radius for w in WIDER_TURNS)
+    for r in more + (radius, 0.75 * radius, 0.5 * radius, 0.5 * d):
+        if max(1e-3, least - 1e-9) < r <= max((radius,) + more) + 1e-9 and all(abs(r - o) > 1e-3 for o in out):
             out.append(r)
     return sorted(out, reverse=True)
 
@@ -389,13 +396,14 @@ def max_heading_jump(poses: Sequence[Pose2D]) -> float:
 def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float,
               fits: Fits, route: Optional[Route] = None,
               types: Sequence[str] = ('u_turn', 'bulb', 'detour', 'pivot'),
-              body: Body = None, least: float = 0.0, spin: bool = True) -> Optional[Maneuver]:
+              body: Body = None, least: float = 0.0, spin: bool = True, tight: bool = True,
+              wider: bool = False) -> Optional[Maneuver]:
     """The gentlest turn from the end of a lane (exit_pose) into the next lane, which starts at `entry`
     and is driven the opposite way. route (shortest way between two points in the free space) allows
     detours. types: the kinds allowed, preferred first; larger radii always come before smaller ones,
     detours and pivots after all radii. body: the turn's poses have to pass it too. least: no arc tighter than that,
-    but for a U-turn where none fits, as wide as fits, before a pivot (spin False: that U-turn, no pivot). None if
-    nothing allowed fits."""
+    but for a U-turn where none fits, as wide as fits, before a pivot (spin False: that U-turn, no pivot; tight False:
+    no such U-turn; wider: wider turns than radius first, see turn_radii). None if nothing allowed fits."""
 
     def ok(m: Maneuver) -> bool:
         return fits(m.points()) and (body is None or body([exit_pose] + [p for pc in m.pieces for p in pc.poses]))
@@ -409,7 +417,7 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float,
     if d < 1e-6:
         return None
     shapes = {'u_turn': u_turn, 'bulb': bulb_turn}
-    for r in turn_radii(radius, d, least):
+    for r in turn_radii(radius, d, least, wider):
         # a U-turn where the lanes are two radii apart, a bulb where they're closer
         for name in types:
             if name not in shapes or (name == 'u_turn') != (d >= 2.0 * r - 1e-9):
@@ -427,7 +435,7 @@ def plan_turn(exit_pose: Pose2D, entry: XY, radius: float, step: float,
                 return m
         elif name == 'pivot':
             # where nothing of least fits, a U-turn as wide as fits (tighter than least) before turning on the spot
-            for r in turn_radii(radius, d):
+            for r in turn_radii(radius, d) if tight else ():
                 local = u_turn(d, dx, r, step) if r < least - 1e-9 and d >= 2.0 * r - 1e-9 else None
                 if local is not None:
                     m = _to_map(local, exit_pose, side)

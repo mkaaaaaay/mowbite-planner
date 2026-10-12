@@ -767,7 +767,8 @@ class _Route:
             return None
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
                          self.step, self.area.is_free, self.detour_path,
-                         self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0)
+                         self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0,
+                         tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
         if (turn is None or turn.name == 'pivot') and self.rounds:
             earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
             if earlier is not None:
@@ -863,7 +864,8 @@ class _Route:
                 def turn_to(entry: XY, types) -> Optional[Maneuver]:
                     return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.step,
                                      self.turn_space(entry), self.detour_path, types, self.turn_body,
-                                     self.cfg.min_turn_radius if self.rounds else 0.0)
+                                     self.cfg.min_turn_radius if self.rounds else 0.0,
+                                     tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
 
                 # the turn goes level with the lane end further out, where the body may not fit (body_ends only
                 # made room for a turn level with each end): this lane starts level with the last one's end then,
@@ -891,6 +893,13 @@ class _Route:
                     if earlier is not None:
                         turn, a = earlier
                         self._count('lanes_earlier')
+                if (turn is None or turn.name == 'pivot') and self.cfg.turn_radius_auto and 'pivot' in types:
+                    # (turn_radius_auto: only now the half circle tighter than turn_radius, before turning on the spot)
+                    half = plan_turn(exit_pose, a, self.cfg.turn_radius, self.step, self.turn_space(a), None,
+                                     ('pivot',), self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0, False)
+                    if half is not None:
+                        turn = half
+                        self._count('turns_tight')
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, turn.name)
@@ -965,7 +974,8 @@ class _Route:
             turn = shortest(exit_pose, entry, False) if 'u_turn' in self.cfg.allowed_turns else None
             if turn is None and k:
                 turn = plan_turn(exit_pose, entry, r, self.step, fits, self.detour_path, types,
-                                 self.turn_body, least, False)
+                                 self.turn_body, least, False, not self.cfg.turn_radius_auto,
+                                 self.cfg.turn_radius_auto)
             k += 1
             if turn is None:
                 continue

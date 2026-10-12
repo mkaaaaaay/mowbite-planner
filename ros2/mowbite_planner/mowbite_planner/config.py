@@ -145,6 +145,11 @@ class PlannerConfig:
     # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way.
     # The body fits turning like everywhere
     turn_on_spot: bool = False
+    # the planner picks every turn's radius, turn_radius the least: between lanes no turn tighter than it (off: where
+    # none of it fits, a half circle as wide as the lanes are apart before turning on the spot), the lanes ending
+    # earlier for one where that leaves nothing unmowed, and a wider one where the lanes are further apart or there's
+    # room (WIDER_TURNS of turn_radius, the widest that fits)
+    turn_radius_auto: bool = False
     # the lanes' field kept clean (where they lie but for what the loops mow and 2 turn_radius at their ends, where the
     # turns go): in there the path only runs straight along the lanes. Drives go along the headland round it (out of the
     # field straight on from a lane's end, into it straight along the next lane), across it only straight (along a
@@ -431,7 +436,7 @@ class PlannerConfig:
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
-        for name in ('skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
+        for name in ('turn_radius_auto', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
                      'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')

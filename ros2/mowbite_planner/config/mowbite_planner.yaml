@@ -37,6 +37,8 @@
     # turning on the spot where the path would drive a loop (for lawns that take it): no bulb between lanes, a drive
     # arriving on the spot rather than round a loop, the body fitting turning
     turn_on_spot: false
+    # the planner picks every turn's radius, turn_radius the least: fewer turns tighter than it, wider where there's room
+    turn_radius_auto: false
     # the turns allowed, preferred first
     turn_types: [u_turn, bulb, detour, pivot]
     lane_order: snake

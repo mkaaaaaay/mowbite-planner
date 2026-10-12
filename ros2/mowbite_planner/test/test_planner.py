@@ -341,6 +341,41 @@ def test_obstacle_passes(base, obstacles):
             PlannerConfig(obstacle_passes=bad).validate()
 
 
+def lane_turns(plan):
+    """(maneuver, the tightest arc's radius) of every turn between lanes."""
+    out = []
+    for s in plan.segments:
+        if s.kind == TURN:
+            radii = [r for r in radii_of(plan.poses[s.start:s.end + 1]) if r < 1e6]
+            out.append((s.maneuver, min(radii, default=math.inf)))
+    return out
+
+
+def test_turn_radius_auto():
+    """turn_radius_auto: the planner picks every turn's radius, turn_radius the least. With room the bulbs get wider (an
+    open lawn, a deep headland); between lots of trees fewer turns are tighter than turn_radius (the lanes end earlier
+    for a turn of it where that leaves nothing, the tight half circle only before turning on the spot), no more of them
+    on the spot, as much mowed. Off: the plan as ever."""
+    open_lawn = dict(perimeter_passes=6, turn_radius=0.25)
+    plain = plan_coverage(rect(0, 0, 12, 8), [], PlannerConfig(**open_lawn))
+    cfg = PlannerConfig(**dict(open_lawn, turn_radius_auto=True))
+    wide = plan_coverage(rect(0, 0, 12, 8), [], cfg)
+    check_invariants(wide, cfg)
+    assert all(m == 'bulb' and r == pytest.approx(0.25, abs=0.01) for m, r in lane_turns(plain))
+    assert all(m == 'bulb' and r > 0.3 for m, r in lane_turns(wide)) and coverage(wide, cfg) > 0.999
+    trees = dict(MOWER, **NX60I, turn_radius=0.35)
+    plain = plan_coverage(rect(0, 0, 26, 18), TREES, PlannerConfig(**trees), start=(1, 1, 0.0), end=(1, 1))
+    cfg = PlannerConfig(**dict(trees, turn_radius_auto=True))
+    auto = plan_coverage(rect(0, 0, 26, 18), TREES, cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(auto, cfg, TREES)
+    tight = [sum(1 for _, r in lane_turns(p) if r < 0.9 * 0.35) for p in (plain, auto)]
+    assert tight[1] < 0.5 * tight[0] and auto.stats['turns_pivot'] <= plain.stats['turns_pivot']
+    assert check_plan(auto)['body_out'] == [] and coverage(auto, cfg) > coverage(plain, cfg) - 0.001
+    assert auto.stats['path_length'] < 1.05 * plain.stats['path_length']
+    with pytest.raises(PlanningError, match='turn_radius_auto'):
+        PlannerConfig(turn_radius_auto=1).validate()
+
+
 def test_skip_order_turns_forwards_with_the_full_radius():
     cfg = PlannerConfig(lane_order='skip', perimeter_passes=3)
     plan = plan_coverage(rect(0, 0, 12, 8), [], cfg)
@@ -535,7 +570,8 @@ def test_random_gardens(seed):
 @pytest.mark.parametrize('seed', range(40))
 def test_random_gardens_with_obstacle_passes(seed):
     """Random gardens with islands, their loops of another number than the outline's (obstacle_passes), with and without
-    the body checked: the plan keeps its invariants and mows about as much as with as many (but with none)."""
+    the body checked, some with turn_radius_auto: the plan keeps its invariants and mows about as much as with as many
+    (but with none)."""
     rnd = random.Random(1000 + seed)
     boundary = random_polygon(rnd, 0, 0, 4, 9, rnd.randint(5, 14))
     obstacles = [random_polygon(rnd, rnd.uniform(-4, 4), rnd.uniform(-4, 4), 0.3, 1.2, rnd.randint(3, 8))
@@ -546,7 +582,7 @@ def test_random_gardens_with_obstacle_passes(seed):
     count = rnd.choice([0, 1, 2, 4])
     try:
         same = plan_coverage(boundary, obstacles, PlannerConfig(**base))
-        cfg = PlannerConfig(**dict(base, obstacle_passes=count))
+        cfg = PlannerConfig(**dict(base, obstacle_passes=count, turn_radius_auto=seed % 3 == 0))
         plan = plan_coverage(boundary, obstacles, cfg)
     except PlanningError:
         return
