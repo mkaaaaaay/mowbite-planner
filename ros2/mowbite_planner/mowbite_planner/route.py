@@ -8,13 +8,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
-from .config import (EARLIER_LEFT, LANE, ORDER_BUDGET, PERIMETER, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE,
-                     TRANSIT, TURN, XY, Lane, PathSegment, PlannerConfig)
-from .footprint import TURN_STEP, Footprint
+from .config import (EARLIER_LEFT, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRIES, ORDER_BUDGET, PERIMETER, ROUND_STEP,
+                     SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, XY, Lane, PathSegment, PlannerConfig)
+from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
-from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, join, omega,
-                        path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
+from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, extend,
+                        join, omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
 
@@ -149,6 +149,7 @@ class _Route:
         # lines they lie on (lane frame y) of every set, the field's pieces on those (see rows())
         self.field = self._field = self.headland = None
         self.loop_counts: Optional[Tuple[int, int]] = None  # (obstacle_passes: see left_out)
+        self.loop_side: Dict[str, float] = {}  # loop -> 1 driven with the mowable side on its left, -1 on its right
         self.angle = 0.0
         self.lane_ys: Dict[float, List[float]] = {}
         self._rows: Dict[float, List[Tuple[float, List[Tuple[float, float]]]]] = {}
@@ -520,6 +521,143 @@ class _Route:
                                CORNER_CUT * self.cfg.mower_width, level, spacing, self.cfg.mower_width, self.body)
         self.add(kind, poses, maneuver=maneuver)
         self.loops.append([(p.x, p.y) for p in poses])
+        self.loop_side[name] = -1.0 if flip else 1.0
+
+    def loops_in(self, places: Sequence[Sequence[float]]) -> Dict[int, List[Pose2D]]:
+        """The loops further in round those places (loop_in): [x, y, m], where the body sticks out on the path and m of
+        it are left out for that. Their segments get the new poses, returns the poses they had (by segment)."""
+        before: Dict[int, List[Pose2D]] = {}
+        for k, seg in enumerate(self.segments):
+            side = self.loop_side.get(seg.source) if seg.kind == PERIMETER else None
+            if side is None or len(seg.poses) < 3:
+                continue
+            at = [0.0]
+            for a, b in zip(seg.poses, seg.poses[1:]):
+                at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
+            # (a place is given to the cm)
+            near = [(at[i], m) for x, y, m in places for i, p in enumerate(seg.poses)
+                    if abs(p.x - x) < 0.006 and abs(p.y - y) < 0.006]
+            if not near:
+                continue
+            poses = self.loop_in(seg.poses, side, lambda i: any(abs(at[i] - d) <= m for d, m in near))
+            if poses is not seg.poses:
+                before[k], seg.poses = seg.poses, poses
+                self.loops[int(seg.source.split('-')[1])] = [(p.x, p.y) for p in poses]
+        return before
+
+    def loops_back(self, before: Dict[int, List[Pose2D]]) -> None:
+        """The loops as they were before loops_in."""
+        for k, poses in before.items():
+            self.segments[k].poses = poses
+            self.loops[int(self.segments[k].source.split('-')[1])] = [(p.x, p.y) for p in poses]
+
+    def loop_in(self, poses: List[Pose2D], side: float, here=None) -> List[Pose2D]:
+        """With the body checked: where it would stick out on a loop (round a bend of the edge the front swings out),
+        that stretch runs further in, as little as it takes (see LOOP_IN), so the blade still mows along the edge there
+        (side: 1 with the mowable side on the left, -1 on the right; here: only stretches with a pose it says so for,
+        by index). Not at the loop's ends, where it turns on the spot or where a pose fits no further in either: what
+        still sticks out, bodyfit._fit_body drives another way. poses itself where nothing is moved."""
+        fp = self.footprint
+        if fp is None or self.cfg.blade_offset != 0 or len(poses) < 3:
+            return poses
+        fit = fp.fit(poses)
+        if all(fit):
+            return poses
+        n, (step, most) = len(poses), LOOP_IN
+        at = [0.0]
+        for a, b in zip(poses, poses[1:]):
+            at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
+        # across the way the loop goes at each pose (over the poses next to it: at a bend halfway), to the mowable side
+        normal = []
+        for i in range(n):
+            a, b = poses[max(0, i - 1)], poses[min(n - 1, i + 1)]
+            d = math.hypot(b.x - a.x, b.y - a.y) or 1.0
+            normal.append((-side * (b.y - a.y) / d, side * (b.x - a.x) / d))
+        # how far in each pose that sticks out fits, facing the way it does
+        need: Dict[int, float] = {}
+        left, by = [i for i in range(n) if not fit[i]], step
+        while left and by <= most + 1e-9:
+            ok = fp.fit([Pose2D(poses[i].x + by * normal[i][0], poses[i].y + by * normal[i][1], poses[i].yaw)
+                         for i in left])
+            need.update((i, by) for i, f in zip(left, ok) if f)
+            left, by = [i for i, f in zip(left, ok) if not f], by + step
+        # what stays where it is: the loop's ends, where it turns on the spot, the poses that fit no further in either
+        stay = sorted({0, n - 1, *left, *(k for i in range(1, n) if angle_diff(poses[i].yaw, poses[i - 1].yaw) > SPIN
+                                          for k in (i - 1, i))})
+        for i in stay:
+            need.pop(i, None)
+        tries = [0]
+
+        def spins(path: Sequence[Pose2D]) -> int:
+            return sum(1 for a, b in zip(path, path[1:]) if angle_diff(a.yaw, b.yaw) > SPIN)
+
+        def moved(j0: int, i0: int, i1: int, j1: int, by: float) -> Optional[List[Pose2D]]:
+            # poses j0..j1 with i0..i1 that far in, the others on the way there and back, each facing the next (the
+            # last as it did). Without the ones that would go backwards: on the inside of a bend they get closer
+            pts: List[Tuple[int, float, float]] = []
+            for j in range(j0, j1 + 1):
+                t = (at[j] - at[j0]) / (at[i0] - at[j0]) if j < i0 else \
+                    (at[j1] - at[j]) / (at[j1] - at[i1]) if j > i1 else 1.0
+                o, p = by * t * t * (3.0 - 2.0 * t), poses[j]
+                x, y = p.x + o * normal[j][0], p.y + o * normal[j][1]
+                if pts:
+                    k, u, v = pts[-1]
+                    if (x - u) * (p.x - poses[k].x) + (y - v) * (p.y - poses[k].y) <= 0.0:
+                        continue
+                pts.append((j, x, y))
+            # (step apart at most: on the outside of a bend they get further apart)
+            new = join(*(sample_straight(x, y, u, v, math.atan2(v - y, u - x), self.step)[:-1]
+                         for (_, x, y), (_, u, v) in zip(pts, pts[1:])), [poses[j1]])
+            if spins(poses[j0 - 1:j0] + new) > spins(poses[j0 - 1:j1 + 1]) or not all(fp.fit(new)) or \
+                    not self.area.is_free([(p.x, p.y) for p in new]):
+                return None
+            return new
+
+        def further_in(i0: int, i1: int) -> Optional[Tuple[int, int, List[Pose2D]]]:
+            # the stretch i0..i1 as little further in as fits, over the shortest way there and back, between the poses
+            # that stay and what's moved already: (the first and the last pose it replaces, the poses in their place)
+            lo, hi = stay[bisect.bisect_left(stay, i0) - 1], stay[bisect.bisect_left(stay, i1)]
+            for k in range(int(round(max(need[i] for i in range(i0, i1 + 1) if i in need) / step)),
+                           int(round(most / step)) + 1):
+                for ease in LOOP_EASE:
+                    j0, j1 = bisect.bisect_left(at, at[i0] - ease), bisect.bisect_right(at, at[i1] + ease) - 1
+                    if max(lo, done - 1) < j0 < i0 and i1 < j1 < hi and tries[0] < LOOP_TRIES:
+                        tries[0] += 1
+                        new = moved(j0, i0, i1, j1, k * step)
+                        if new is not None:
+                            return j0, j1, new
+            return None
+
+        # the stretches: poses that don't fit one after the other
+        runs: List[List[int]] = []
+        for i in sorted(need):
+            if runs and i == runs[-1][1] + 1:
+                runs[-1][1] = i
+            else:
+                runs.append([i, i])
+        if here is not None:
+            runs = [run for run in runs if any(here(i) for i in range(run[0], run[1] + 1))]
+        out: List[Pose2D] = []
+        done, k = 0, 0  # (done: the poses before it are in out)
+        while k < len(runs):
+            # the ones close after it with nothing between them that stays: their ways in and out would meet
+            end = k
+            while end + 1 < len(runs) and at[runs[end + 1][0]] - at[runs[end][1]] <= 2.0 * LOOP_EASE[0] and \
+                    bisect.bisect_left(stay, runs[end + 1][0]) == bisect.bisect_left(stay, runs[end][1]):
+                end += 1
+            got = None
+            for last in list(range(k, min(end, k + LOOP_JOIN) + 1)) + [end] * (end > k + LOOP_JOIN):
+                got = further_in(runs[k][0], runs[last][1])
+                if got is not None:
+                    break
+            if got is None:
+                k += 1
+                continue
+            j0, j1, new = got
+            out += poses[done:j0] + new
+            done, k = j1 + 1, last + 1
+            self._count('loops_in')
+        return out + poses[done:] if done else poses
 
     def perimeter(self, levels: List[object], base_holes: List[List[XY]], last: bool = False,
                   finish: bool = False) -> None:

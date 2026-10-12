@@ -1063,6 +1063,32 @@ def test_body_in_the_garden():
         assert report['left_m2'] < 2.0
 
 
+def test_loop_further_in_round_a_bend(monkeypatch):
+    """Round a bend of the edge the body's front swings out on the first loop: that stretch runs a little further in
+    (_Route.loops_in) and the blade still mows along the edge, where the loop was left out all along the bend."""
+    r = 1.5
+    bend = [(4 + r * math.cos(a), r + r * math.sin(a)) for a in (math.radians(d) for d in range(-90, 91, 6))]
+    lawn = [(0, 0)] + bend + [(0, 2 * r)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    plan = plan_coverage(lawn, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg)
+    assert check_plan(plan)['body_out'] == []
+    # the strip along the bend, but for where it begins and ends
+    disc = Polygon(bend)
+    strip = disc.difference(disc.buffer(-0.15)).intersection(Polygon(rect(4.0, 0.3 * r, 6.0, 1.7 * r)))
+
+    def left(p):
+        return strip.difference(swept_area(p, cfg.mower_width)).area
+
+    monkeypatch.setattr(_Route, 'loops_in', lambda self, places: {})
+    before = plan_coverage(lawn, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    assert left(before) > 0.15 and left(plan) < 0.08
+    assert plan.stats['body_fit']['skipped_m'] < before.stats['body_fit']['skipped_m'] - 4.0
+    # (the first loop only, the others are as they were)
+    loops, were = plan.perimeter_loops, before.perimeter_loops
+    assert loops[0] != were[0] and loops[1:] == were[1:]
+
+
 def test_body_bent_lanes():
     """Lanes bending around trees get their ends pulled back too: U-turns, nothing replaced by a drive."""
     trees = [circle(4, 4, 0.4), circle(9, 10, 0.5)]

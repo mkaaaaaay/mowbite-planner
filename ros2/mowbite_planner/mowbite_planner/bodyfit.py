@@ -892,6 +892,13 @@ def _round_corners(route: '_Route', poses: List[Pose2D],
     return out, kept
 
 
+def _unmowed(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo], free):
+    """What the path leaves unmowed of free (the blade's way along it, section by section)."""
+    starts = [k for k, info in enumerate(infos) if k == 0 or info.section != infos[k - 1].section]
+    bounds = [infos[k].start for k in starts] + [len(poses)]
+    return subtract(free, [route.blade(*[poses[a:b] for a, b in zip(bounds, bounds[1:]) if b - a > 1], whole=True)])
+
+
 def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
             free) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """mop_up: of what the path leaves unmowed of free the pieces of MOP_MIN at least (the biggest MOP_MAX), each with a
@@ -900,10 +907,8 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
     where the path ended. Returns the poses, the segments (drives TRANSIT, passes LANE, 'mop_up') and {pieces, area: m2
     mowed of them}."""
     cfg, fp = route.cfg, route.footprint
-    starts = [k for k, info in enumerate(infos) if k == 0 or info.section != infos[k - 1].section]
-    bounds = [infos[k].start for k in starts] + [len(poses)]
-    mowed = route.blade(*[poses[a:b] for a, b in zip(bounds, bounds[1:]) if b - a > 1], whole=True)
-    pieces = sorted((p for p in polygons(subtract(free, [mowed])) if p.area >= MOP_MIN), key=lambda p: -p.area)
+    pieces = sorted((p for p in polygons(_unmowed(route, poses, infos, free)) if p.area >= MOP_MIN),
+                    key=lambda p: -p.area)
     passes = []
     for piece in pieces[:MOP_MAX]:
         best = None

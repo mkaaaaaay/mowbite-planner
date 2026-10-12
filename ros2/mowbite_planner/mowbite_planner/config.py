@@ -64,6 +64,18 @@ MAX_BLADE_OFFSET = 1.0
 # rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow
 ROUND_STEP = 0.05
 EARLIER_LEFT = 1e-3
+# m, with the body checked: where the path goes another way at a place and leaves LOOP_LEFT m or more of a loop out
+# there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in
+# instead: a step of LOOP_IN[0] at a time, LOOP_IN[1] at most (the next loop mows what's further in), getting there and
+# back over LOOP_EASE m, the least and the shortest that fit. A stretch on its own, else with the next LOOP_JOIN ones
+# close after it, else with all of those; LOOP_TRIES tried at most for a loop (_Route.loop_in). Kept where the path
+# then leaves LOOP_GAIN m2 less unmowed
+LOOP_LEFT = 1.5
+LOOP_GAIN = 0.05
+LOOP_IN = (0.02, 0.1)
+LOOP_EASE = (0.5, 1.0, 2.0)
+LOOP_JOIN = 3
+LOOP_TRIES = 300
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
