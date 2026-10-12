@@ -194,7 +194,7 @@ def planner():
     rospy.log.clear()
     rospy.published.clear()
     rospy.registered.clear()
-    for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json'):
+    for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json', 'mowbite_planner_angle.json'):
         try:
             os.remove(os.path.join(os.environ['ROS_HOME'], name))
         except FileNotFoundError:
@@ -1071,8 +1071,15 @@ def test_leftovers(planner):
         for run in [r for r in runs if r]:
             f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
             f.write(json.dumps({'type': 'append_points', 'points': run}) + '\n')
+    # (the job went on after a restart: a file of its own, hardly anything in it. Both count for the job)
+    with open(os.path.join(folder, '1791377800_mown.jsonl'), 'w') as f:
+        f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': False}, 'points': [[1.0, 5.0]]}) + '\n')
+    os.utime(os.path.join(folder, '1791377699_mown.jsonl'), (1.0, 1.0))
+    assert 'most of the area' in rpc('planner.leftovers', {'file': '1791377800_mown.jsonl'})[0]['areas']['a']['message']
+    assert rpc('planner.leftovers')[0]['files'] == ['1791377699_mown.jsonl', '1791377800_mown.jsonl']
     result, error = rpc('planner.leftovers', {'job_id': 'mown'})
-    assert error is None and result['file'] == '1791377699_mown.jsonl' and result['armed'] == 0.0
+    assert error is None and result['file'] == '1791377800_mown.jsonl' and result['armed'] == 0.0
+    assert result['files'] == ['1791377699_mown.jsonl', '1791377800_mown.jsonl']
     a = result['areas']['a']
     assert 'stats' in a, a
     left = a['stats']['leftovers']
@@ -1084,9 +1091,10 @@ def test_leftovers(planner):
     assert 0.0 < result['armed'] <= node_module.LEFTOVERS_ARMED
     first = poses(planner.handle(request()))
     assert 3 <= len(first) < 0.2 * whole and len(poses(planner.handle(request()))) == len(first)
+    steps = rpc('planner.settings')[0]['angle_steps']
     event('JOB_COMPLETE')
     assert any('the leftovers are mowed' in line for _, line in rospy.log)
-    assert len(poses(planner.handle(request()))) == whole and rpc('planner.settings')[0]['angle_steps'] == 0
+    assert len(poses(planner.handle(request()))) == whole and rpc('planner.settings')[0]['angle_steps'] == steps
     # all mowed: nothing to do, armed the area gets no paths
     with open(os.path.join(folder, '1791377700_all.jsonl'), 'w') as f:
         f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')

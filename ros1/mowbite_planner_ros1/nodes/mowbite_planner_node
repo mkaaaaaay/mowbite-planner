@@ -55,8 +55,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         DRIVE_OFF; not within DOCK_REACH of a docking station), worst}}}. After every finished
                         mow (JOB_COMPLETE) the same for that job, in the log and as the answer without params
   planner.leftovers     what a mow really left (its track with the blade running against the area, the blade's way
-                        between two driven points) and the passes over it: {job_id or file (of position_history,
-                        default: the latest), area_id (default: every active mowing area), poses, arm} gives {file,
+                        between two driven points) and the passes over it: {job_id (all of its position_history files:
+                        a restart begins a new one) or file (that one), default: the latest file's job, area_id
+                        (default: every active mowing area), poses, arm} gives {file, files,
                         areas: {id: like planner.plan's answer with only those passes (the one nearest the dock
                         first; paths empty and message where there's nothing to do), left_m2: unmowed pieces of 0.02 m2 at
                         least, stats.leftovers: {pieces, passes, area: m2 the passes mow}}}. With more than half of
@@ -584,8 +585,13 @@ class MowbitePlannerRos1:
         """planner.leftovers, see the top."""
         if self.current.planner == 'slic3r':
             raise PlanningError('planner slic3r: no leftovers planned')
-        path = self.track_files(params.get('job_id'), params.get('file'))[-1]
-        runs = [pts for blades, pts in read_runs(path) if blades and pts]
+        files = self.track_files(params.get('job_id'), params.get('file'))
+        if not params.get('job_id'):
+            # (a file, or the latest: with the other files of its job, mower_logic starts a new one when it restarts)
+            job = os.path.basename(files[-1])[:-len('.jsonl')].split('_', 1)[-1]
+            files = self.track_files(job) if job and not params.get('file') else files[-1:]
+        path = files[-1]
+        runs = [pts for f in files for blades, pts in read_runs(f) if blades and pts]
         with self.lock:
             data = self.map
         ids = [params['area_id']] if params.get('area_id') is not None else [
@@ -620,7 +626,7 @@ class MowbitePlannerRos1:
                 '%s %s' % (i, 'nothing' if p is None else '%.2f m2 in %d passes' % (
                     p.stats['leftovers']['area'], p.stats['leftovers']['passes'])) for i, p in plans.items()))
         armed = self.armed
-        return {'file': os.path.basename(path), 'areas': out,
+        return {'file': os.path.basename(path), 'files': [os.path.basename(f) for f in files], 'areas': out,
                 'armed': max(0.0, round(armed['until'] - time.time(), 1)) if armed else 0.0}
 
     def rpc_drive(self, params):
