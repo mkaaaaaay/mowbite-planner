@@ -936,9 +936,9 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
         gain, way = passes.pop(0)
         drive = leave(route.drive_to((way[0].x, way[0].y), way[0].yaw, None, route.transit,
                                      ((here.x, here.y), here.yaw)), here)
-        # (the body checked from the pose before it leaves on, turning on the spot where they meet too: one pose on a
-        # position, the later)
-        if not drive or not fp.poses_fit(out[-2:-1] + drive + way[1:]):
+        # (the body checked from the pose before it leaves on, as the path will be: one pose on a position, the later,
+        # turning on the spot there, where the drive and the pass meet too)
+        if not drive or not fp.poses_fit(join(out[-2:], drive, way)):
             continue
         add(TRANSIT, drive)
         add(LANE, way)
@@ -946,7 +946,7 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
     if done:
         back = leave(route.drive_to((end.x, end.y), None, None, route.transit, ((out[-1].x, out[-1].y), out[-1].yaw)),
                      out[-1])
-        if back and fp.poses_fit(out[-2:-1] + back):
+        if back and fp.poses_fit(join(out[-2:], back)):
             add(TRANSIT, back)
     return out, new, {'pieces': done, 'area': round(area, 3)}
 

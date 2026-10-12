@@ -148,6 +148,7 @@ class _Route:
         # headland_turns: the lanes' field (and prepared), the transit space but the field, the lanes' direction and the
         # lines they lie on (lane frame y) of every set, the field's pieces on those (see rows())
         self.field = self._field = self.headland = None
+        self.loop_counts: Optional[Tuple[int, int]] = None  # (obstacle_passes: see left_out)
         self.angle = 0.0
         self.lane_ys: Dict[float, List[float]] = {}
         self._rows: Dict[float, List[Tuple[float, List[Tuple[float, float]]]]] = {}
@@ -450,6 +451,14 @@ class _Route:
                     self.blade_in.add(id(ring))
         return found
 
+    def left_out(self, kind: str, depth: float) -> bool:
+        """Whether the ring ('outline' or 'hole') of loop level depth isn't driven: with obstacle_passes (loop_counts:
+        how many along the outline and round the islands) past its side's number, where it only says where that side's
+        lanes begin."""
+        if self.loop_counts is None or depth != int(depth) or depth >= max(self.loop_counts):
+            return False
+        return depth >= self.loop_counts[1 if kind == 'hole' else 0]
+
     def _ring_distance(self, ring: List[XY]) -> float:
         if self.pos is None:
             return 0.0
@@ -525,7 +534,7 @@ class _Route:
         groups: Dict[int, List[Tuple[int, List[XY]]]] = {}
         spare = len(hole_polys)
         for k, level in enumerate(levels):
-            level_rings = self.centre_rings(level)
+            level_rings = [(kind, ring) for kind, ring in self.centre_rings(level) if not self.left_out(kind, k)]
             outlines.append((k, [ring for kind, ring in level_rings if kind == 'outline']))
             for kind, ring in level_rings:
                 if kind != 'hole':
@@ -601,6 +610,7 @@ class _Route:
             for kind, ring in self.centre_rings(geom):
                 if depth < perimeter:
                     skip = self.cfg.skip_obstacle_loops if kind == 'hole' else self.cfg.skip_outline_loops
+                    skip = skip or self.left_out(kind, depth)
                 else:
                     skip = self.cfg.skip_lanes
                 if not skip:

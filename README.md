@@ -53,6 +53,7 @@ planner stack (both, else two planners answer the same service).
 | `edge_margin` | 0.05 | gap to the boundary (m) |
 | `obstacle_margin` | 0.10 | gap to obstacles (m), a `margin` on an obstacle in the map beats it |
 | `spin_margin` | 0.05 | extra gap when turning on the spot and in the turns between lanes (m) |
+| `obstacle_passes` | -1 | loops round the islands in the lawn, -1: as many as along the edge, 0: none |
 | `turn_radius` | 0.25 | radius of the turns (m) |
 | `turn_on_spot` | false | turn on the spot instead of loops |
 | `headland_turns` | false | clean stripes |

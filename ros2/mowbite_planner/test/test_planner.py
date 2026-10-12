@@ -307,6 +307,40 @@ def test_garden_variants(kw):
     assert coverage(plan, cfg) > 0.99
 
 
+@pytest.mark.parametrize('base, obstacles', [
+    (dict(perimeter_passes=3), [TREE, BED]),
+    (dict(perimeter_passes=3, narrow_parts='loops'), [TREE, BED]),
+    (dict(perimeter_passes=2), [rect(1.0, 6, 3, 8), BED]),  # (an island by the edge: its loops run into the outline's)
+])
+def test_obstacle_passes(base, obstacles):
+    """obstacle_passes: the islands get that many loops, the outline perimeter_passes as ever; -1 (the default) as many
+    as the outline, the plan as without. With none the lanes go up to the islands (their turns leave a little there),
+    with fewer or more nothing more stays than with as many. Not for fill_pattern concentric."""
+    def plan(**kw):
+        cfg = PlannerConfig(**dict(base, **kw))
+        got = plan_coverage(GARDEN, obstacles, cfg, start=(1, 1, 0.0), end=(1, 1))
+        check_invariants(got, cfg, obstacles)
+        loops = [o['kind'] for o in got.origins.values() if str(o.get('parent', '')).startswith('level-')]
+        return got, cfg, loops.count('outline'), loops.count('obstacle')
+
+    same, cfg, outline, islands = plan()
+    count = base['perimeter_passes']
+    assert (outline, islands) == (count, 2 * count)
+    assert plan(obstacle_passes=count)[0].poses == same.poses
+    for n in (1, 2, 5):
+        got, cfg, outline, islands = plan(obstacle_passes=n)
+        assert (outline, islands) == (count, 2 * n)
+        assert coverage(got, cfg) > 0.9995 and check_plan(got)['hard'] == []
+    none, cfg, outline, islands = plan(obstacle_passes=0)
+    assert (outline, islands) == (count, 0) and 0.995 < coverage(none, cfg) < coverage(same, cfg)
+    assert none.stats['path_length'] < same.stats['path_length']
+    rings = plan(fill_pattern='concentric')[0]
+    assert plan(fill_pattern='concentric', obstacle_passes=1)[0].poses == rings.poses
+    for bad in (-2, 256, 1.5, True):
+        with pytest.raises(PlanningError, match='obstacle_passes'):
+            PlannerConfig(obstacle_passes=bad).validate()
+
+
 def test_skip_order_turns_forwards_with_the_full_radius():
     cfg = PlannerConfig(lane_order='skip', perimeter_passes=3)
     plan = plan_coverage(rect(0, 0, 12, 8), [], cfg)
@@ -496,6 +530,30 @@ def test_random_gardens(seed):
     except PlanningError:
         return
     check_invariants(plan, cfg, obstacles)
+
+
+@pytest.mark.parametrize('seed', range(40))
+def test_random_gardens_with_obstacle_passes(seed):
+    """Random gardens with islands, their loops of another number than the outline's (obstacle_passes), with and without
+    the body checked: the plan keeps its invariants and mows about as much as with as many (but with none)."""
+    rnd = random.Random(1000 + seed)
+    boundary = random_polygon(rnd, 0, 0, 4, 9, rnd.randint(5, 14))
+    obstacles = [random_polygon(rnd, rnd.uniform(-4, 4), rnd.uniform(-4, 4), 0.3, 1.2, rnd.randint(3, 8))
+                 for _ in range(rnd.randint(1, 4))]
+    base = dict(MOWER, **NX60I) if seed % 4 == 0 else dict(
+        mower_width=rnd.choice([0.18, 0.22]), turn_radius=rnd.choice([0.2, 0.3]), lane_order=rnd.choice(['snake', 'skip']))
+    base.update(perimeter_passes=rnd.choice([1, 2, 3]), narrow_parts=rnd.choice(['lanes', 'loops']))
+    count = rnd.choice([0, 1, 2, 4])
+    try:
+        same = plan_coverage(boundary, obstacles, PlannerConfig(**base))
+        cfg = PlannerConfig(**dict(base, obstacle_passes=count))
+        plan = plan_coverage(boundary, obstacles, cfg)
+    except PlanningError:
+        return
+    check_invariants(plan, cfg, obstacles)
+    assert check_plan(plan)['body_out'] == []
+    if count:
+        assert coverage(plan, cfg) > coverage(same, cfg) - 0.01
 
 
 # fill patterns ---------------------------------------------------------------------------------------------

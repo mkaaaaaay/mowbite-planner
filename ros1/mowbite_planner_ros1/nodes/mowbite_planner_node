@@ -118,7 +118,7 @@ CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIM
            'edges': limits.EDGES, 'narrow_parts': limits.NARROW_PARTS,
            'lane_spacing_mode': limits.LANE_SPACING_MODES, 'headland_corners': limits.HEADLAND_CORNERS}
 # the value that means "the planner works it out"
-AUTO_VALUES = {'perimeter_passes': -1}
+AUTO_VALUES = {'perimeter_passes': -1, 'obstacle_passes': -1}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle', 'angle_increment')
 # may be negative (perimeter_offset: outside the outline, blade_offset: right of the centre)
 SIGNED = RAD + ('perimeter_offset', 'blade_offset', 'blade_ahead')
@@ -133,7 +133,8 @@ CLASSIC_WAIT = 5.0  # s it waits for that service
 Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'angle_increment_every': (1, None),
-          'perimeter_passes': (-1, limits.MAX_PASSES), 'lane_overlap_passes': (0, limits.MAX_PASSES),
+          'perimeter_passes': (-1, limits.MAX_PASSES), 'obstacle_passes': (-1, limits.MAX_PASSES),
+          'lane_overlap_passes': (0, limits.MAX_PASSES),
           'angle_step': (limits.MIN_ANGLE_STEP, None),
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),

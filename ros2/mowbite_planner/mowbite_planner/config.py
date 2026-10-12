@@ -93,6 +93,9 @@ class PlannerConfig:
     lane_spacing_max: Optional[float] = None
     # loops along the outline and around every obstacle, -1: as many as the lanes' turns need (see passes)
     perimeter_passes: int = 2
+    # loops round the obstacles that lie in the lawn like islands, -1: as many as along the outline. 0: none, the lanes
+    # go up to them. Not with fill_pattern 'concentric'. (An obstacle at the edge is part of the outline)
+    obstacle_passes: int = -1
     fill_pattern: str = 'lanes'  # 'lanes', 'crosshatch' or 'concentric'
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
@@ -241,6 +244,12 @@ class PlannerConfig:
             end = self.centre_offset + self.turn_radius
         strip = end + abs(self.blade_ahead) - half  # from the edge in, what the lanes leave
         return max(1, int(math.ceil((strip - half - self.blade_loop_offset) / self.lane_spacing - 1e-9)) + 1)
+
+    @property
+    def island_passes(self) -> int:
+        """The loops round the islands: obstacle_passes, -1 as many as along the outline (passes)."""
+        return self.passes if self.obstacle_passes < 0 or self.fill_pattern == 'concentric' else \
+            int(self.obstacle_passes)
 
     @property
     def spacing_range(self) -> Tuple[float, float]:
@@ -404,7 +413,7 @@ class PlannerConfig:
             raise PlanningError(f'lane_spacing_min must be <= lane_spacing_max, got {lo} > {hi}')
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
         finite('blade_ahead', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)
-        for name, lo in (('perimeter_passes', -1), ('lane_overlap_passes', 0)):
+        for name, lo in (('perimeter_passes', -1), ('obstacle_passes', -1), ('lane_overlap_passes', 0)):
             v = getattr(self, name)
             whole = isinstance(v, int) or isinstance(v, float) and math.isfinite(v) and v == int(v)
             if isinstance(v, bool) or not whole or not lo <= v <= MAX_PASSES:

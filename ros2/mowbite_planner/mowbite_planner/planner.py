@@ -144,10 +144,10 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     return best
 
 
-def _left_alone(free, rings_of: List[object], passes, half: float) -> float:
-    """(for lane_spacing_mode 'auto') m2 the loops (the rings of rings_of) and the lanes alone leave, no turns, no
-    drives: quick to compare."""
-    bands = [LineString(ring + [ring[0]]).buffer(half, 4) for geom in rings_of for _, ring in rings(geom)]
+def _left_alone(free, loop_rings: List[List[XY]], passes, half: float) -> float:
+    """(for lane_spacing_mode 'auto') m2 the loops (their rings) and the lanes alone leave, no turns, no drives: quick
+    to compare."""
+    bands = [LineString(ring + [ring[0]]).buffer(half, 4) for ring in loop_rings]
     bands += [LineString(Lane(0, x0, x1, lane.y).ends(a)).buffer(half, 4) for a, cells in passes for cell in cells
               for lane in cell for x0, x1 in lane.pieces()]
     return sum(p.area for p in polygons(subtract(free, bands)) if p.area >= LEFT_TUFT)
@@ -262,47 +262,90 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     # 1. perimeter loops, level 0 runs perimeter_offset inside the edges. concentric goes on until
     # nothing is left, the last bit (narrower than a lane spacing) gets one more loop halfway in
     count = cfg.passes
+    # obstacle_passes: the islands (the holes of the area) with loops of their own number. Level k then is the outline
+    # min(k, count) loops in and the islands min(k, islands) loops out: past its number a side stays where its lanes
+    # would begin, its rings there aren't driven (see _Route.left_out)
+    islands = cfg.island_passes
+    most = max(count, islands)
     # concentric loops meet at the corners: at a right angle the corners of two loops are spacing * sqrt(2)
     # apart, which the blade only covers up to mower_width / sqrt(2)
     loop_spacing = min(spacing, cfg.mower_width / math.sqrt(2.0)) if concentric else spacing
+    shell = holes_in = None
+    if islands != count:
+        shell = polygonal(union(Polygon(p.exterior) for p in polygons(free)))
+        holes_in = polygonal(shell.difference(free))
+
+    def shrunk(out: int, isl: int):
+        # the area with its outline `out` loops in and its islands `isl` loops out
+        if out == isl:
+            return blade_space if out == 0 else inset(free, first + out * loop_spacing)
+        outer = inset(shell, first + out * loop_spacing)
+        return outer if holes_in.is_empty or outer.is_empty else polygonal(outer.difference(
+            holes_in.buffer(first + isl * loop_spacing, QUAD_SEGS)))
+
+    def level_at(k: int):
+        return shrunk(min(k, count), min(k, islands)) if k < most else shrunk(count + k - most, islands + k - most)
+
+    def driven(k: int, kind: str) -> bool:  # (whether the ring of loop level k is driven: not past its side's number)
+        return k >= most or k < (islands if kind == 'hole' else count)
+
     levels = []
-    while concentric or len(levels) < count:
-        level = blade_space if not levels else inset(free, first + len(levels) * loop_spacing)
+    while concentric or len(levels) < most:
+        level = level_at(len(levels))
         if level.is_empty:
             break
         levels.append(level)
         if len(levels) > MAX_ROWS:
             raise PlanningError('too many loops: the area is too big for this lane spacing')
-    perimeter_levels = levels[:count]
+    # what the route drives the loops of: the levels, but with more loops round the islands than along the outline those
+    # further ones each round its island alone (the island that much bigger). Where an island lies by the edge the
+    # level's ring runs into the outline's there: the loop is the strip from the loop before to this one then, as far
+    # as the outline's lanes begin, round that (along this one and back along the one before)
+    drive_levels = list(levels)
+    if islands > count and not holes_in.is_empty:
+        inside = inset(shell, first + count * loop_spacing)
+        before = holes_in.buffer(first + (count - 1) * loop_spacing, QUAD_SEGS) if count else holes_in
+        for k in range(count, min(most, len(levels))):
+            blobs = holes_in.buffer(first + k * loop_spacing, QUAD_SEGS)
+            strips = [Polygon(strip.exterior) for a in polygons(inside)
+                      for strip in polygons(blobs.difference(before).intersection(a)) if strip.area >= half * half]
+            drive_levels[k] = polygonal(inside.buffer(1.0, QUAD_SEGS).difference(union(strips)))
+            before = blobs
+    perimeter_levels = drive_levels[:most]
     took('perimeter')
 
-    def middle(k: int, inner, step: float):
-        # where the area ends inside loop level k (loops `step` apart) and `inner`, the next level in, doesn't
+    def middle(outer, inner, step: float):
+        # where the area ends inside a loop level (outer, loops `step` apart) and `inner`, the next level in, doesn't
         # get there, what's left is narrower than a step: one more loop halfway in mows it (insets add up:
-        # that's level k shrunk by half a step, quicker than free shrunk again)
-        half_in = inset(levels[k], 0.5 * step)
+        # that's the level shrunk by half a step, quicker than free shrunk again)
+        half_in = inset(outer, 0.5 * step)
         if not half_in.is_empty and not inner.is_empty:
             half_in = half_in.difference(inner.buffer(step, QUAD_SEGS))
         return polygonal(union(p for p in polygons(half_in) if p.area >= half * half))
 
-    middles = [middle(k, inner, loop_spacing) for k, inner in enumerate(levels[1:] + [Polygon()])] \
+    middles = [middle(levels[k], inner, loop_spacing) for k, inner in enumerate(levels[1:] + [Polygon()])] \
         if concentric else []
 
     # 2. what's left after the loops (kept for checks and plots, the lanes use the same edge directly)
     remaining = polygonal(subtract(free, [LineString(ring + [ring[0]]).buffer(half, QUAD_SEGS)
-                                          for level in perimeter_levels for _, ring in rings(level)]))
-    lane_passes = max(0, count - int(cfg.lane_overlap_passes))
-    lane_region = inset(free, first + lane_passes * spacing)
+                                          for k, level in enumerate(perimeter_levels)
+                                          for kind, ring in rings(level) if driven(k, kind)]))
+    # (the lanes reach lane_overlap_passes loops further out, of the outline's and of the islands')
+    lane_out, lane_isl = max(0, count - int(cfg.lane_overlap_passes)), max(0, islands - int(cfg.lane_overlap_passes))
+    lane_passes = min(lane_out, lane_isl)
+    lane_region = inset(free, first + lane_passes * spacing) if lane_out == lane_isl else shrunk(lane_out, lane_isl)
     # where the area is too narrow for lanes but wider than the loops reach (a strip of 0.8 to 1 m with the
     # defaults, or narrower ones where the loops stop earlier), what the loops leave in the middle gets a
     # loop of its own, halfway between the last loop there and the next one in (or where the lanes would be)
+    towards = levels[:lane_passes] if lane_out == lane_isl else \
+        [shrunk(min(k, lane_out), min(k, lane_isl)) for k in range(max(lane_out, lane_isl))]
     narrow = Polygon() if concentric or cfg.skip_lanes else polygonal(union(
-        middle(k, inner, spacing) for k, inner in enumerate((levels[:lane_passes] + [lane_region])[1:])))
+        middle(outer, inner, spacing) for outer, inner in zip(towards, towards[1:] + [lane_region])))
     # the loops go on in where the lane region is narrower than a U-turn, the lanes only where it's wider: all the
     # loops are driven part by part like concentric's
     ringed = concentric
     if cfg.narrow_parts == 'loops' and not concentric and not cfg.skip_lanes and cfg.turn_radius > 0 and \
-            len(levels) == count and not lane_region.is_empty:
+            len(levels) == most and not lane_region.is_empty:
         r = cfg.turn_radius
         opened = lane_region.buffer(-r, QUAD_SEGS).buffer(r, QUAD_SEGS)
         # what that takes away: narrow parts, and the tips of corners (smaller than r * r), which keep their lanes
@@ -314,15 +357,16 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             wide = polygonal(union(p for p in polygons(wide) if p.area >= (4.0 * r) ** 2))
             keep_off = None if wide.is_empty else wide.buffer(half, QUAD_SEGS)  # the lanes mow that far round it
             while len(levels) < MAX_ROWS:
-                level = inset(free, first + len(levels) * spacing)
+                level = level_at(len(levels))
                 if keep_off is not None and not level.is_empty:
                     level = polygonal(union(p for p in polygons(level.difference(keep_off)) if p.area >= half * half))
                 if level.is_empty:
                     break
                 levels.append(level)
-            middles = [middle(k, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
+            middles = [middle(levels[k], union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
                        for k, inner in enumerate(levels[1:] + [Polygon()])]
             lane_region, narrow, ringed = wide, Polygon(), True
+    drive_levels += levels[len(drive_levels):]
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 
@@ -373,10 +417,12 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
 
         narrow = polygonal(union(p for p in polygons(narrow) if left(p) > 1e-4))  # more than a cm2
     took('lanes')
+    loop_rings = [ring for k, geom in enumerate(drive_levels) for kind, ring in rings(geom) if driven(k, kind)] + \
+        [ring for geom in middles + [narrow] for _, ring in rings(geom)]
     if probe is True:
-        return _left_alone(free, levels + middles + [narrow], passes, half)
+        return _left_alone(free, loop_rings, passes, half)
     if isinstance(probe, dict):  # (what _left_alone needs: plan_coverage may ask for this spacing's later)
-        probe['alone'] = (free, levels + middles + [narrow], passes, half)
+        probe['alone'] = (free, loop_rings, passes, half)
 
     # 4. route
     start_xy = _point(start)
@@ -398,6 +444,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     transit = area_space if transit_space is drive_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
+    route.loop_counts = (count, islands) if islands != count else None
     route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
                      for ci, cell in enumerate(cells) for lane in cell}
     # headland_turns: the lanes' field, where they lie but for what the loops mow and 2 turn_radius at their ends (where
@@ -437,7 +484,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     def todo(k: int) -> Dict[str, Any]:
         return work.setdefault(k, {'levels': {}, 'middles': {}, 'cells': [[] for _ in passes], 'narrow': None})
 
-    for i, level in enumerate(levels):
+    for i, level in enumerate(drive_levels):
         for k, geom in split(level).items():
             todo(k)['levels'][i] = geom
     for i, middle in enumerate(middles):
@@ -473,14 +520,15 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         # the end point counts for what's mowed last: the loops with last, else the lanes, else the strips too
         # narrow for lanes, else the loops
         skip = {'outline': cfg.skip_outline_loops, 'hole': cfg.skip_obstacle_loops}
-        loops_here = not ringed and any(not skip[kind] for g in w['levels'].values() for kind, _ in rings(g))
+        loops_here = not ringed and any(not skip[kind] and not route.left_out(kind, i)
+                                        for i, g in w['levels'].items() for kind, _ in rings(g))
         loops_end = loops_here and (last or not any(w['cells']) and w['narrow'] is None)
         last_pass = max((i for i, cells in enumerate(w['cells']) if cells), default=None)
 
         def loops():
             if ringed:
                 route.concentric([w['levels'].get(i, empty) for i in range(len(levels))],
-                                 [w['middles'].get(i, empty) for i in range(len(middles))], count, last,
+                                 [w['middles'].get(i, empty) for i in range(len(middles))], most, last,
                                  loop_spacing, last or not any(w['cells']),
                                  not concentric or cfg.narrow_parts == 'loops')
             else:

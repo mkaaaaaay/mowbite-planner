@@ -77,6 +77,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `mower_width` | 0.22 | blade width (m) |
 | `overlap` | 0.15 | how much neighbouring lanes overlap (share of the width) |
 | `perimeter_passes` | 2 | loops along the edge and around obstacles, -1: as many as the turns need |
+| `obstacle_passes` | -1 | loops round the obstacles lying in the lawn like islands, -1: as many as along the edge, 0: none (the lanes go up to them) |
 | `perimeter_offset` | -1.0 | first loop's distance from the outline (m), negative: half the blade |
 | `perimeter_order` | `first` | loops `first` or `last` |
 | `perimeter_direction` | `auto` | `ccw`, `cw` or `auto` (the way the mower faces) |

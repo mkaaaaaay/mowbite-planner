@@ -8,6 +8,8 @@
     overlap: 0.15
     # loops along the outline and around every obstacle before the lanes (0..255)
     perimeter_passes: 2
+    # loops round the obstacles lying in the lawn like islands, -1: as many as along the outline, 0: none
+    obstacle_passes: -1
     # first loop this far inside the outline. Negative: mower_width / 2 (the blade's edge on the outline).
     # 0.0 for outlines recorded by driving the mower's centre along the edge, like OpenMower does
     perimeter_offset: -1.0

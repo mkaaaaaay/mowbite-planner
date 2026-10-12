@@ -640,6 +640,9 @@ def test_rpc_settings(planner):
                           'settable': True, 'choices': ['recorded', 'hard']}
     assert s['blade_ahead']['min'] == -1.0 and s['blade_offset']['min'] == -1.0
     assert s['perimeter_passes']['auto_value'] == -1 and s['perimeter_passes']['min'] == -1
+    # (the islands' loops: -1 as many as the outline's)
+    assert s['obstacle_passes'] == {'value': -1, 'default': -1, 'stored': False, 'type': 'integer', 'settable': True,
+                                    'auto_value': -1, 'min': -1, 'max': 255}
     assert s['lane_spacing_mode']['choices'] == ['fixed', 'auto'] and s['lane_spacing_mode']['value'] == 'fixed'
     assert s['lane_spacing_min']['nullable'] and s['lane_spacing_min']['unit'] == 'm'
     assert s['transit_edge_cost']['unit'] == ''
