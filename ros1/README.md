@@ -36,12 +36,11 @@ On OpenMowerOS v2:
 1. OpenMower's `.env` (Dockge, stack `openmower`): `VERSION="edge"` and `OM_PLANNER=external`. OpenMower then
    doesn't start slic3r.
 2. A stack of its own, e.g. `/opt/stacks/mowbite-planner/`, with [`compose.yaml`](compose.yaml). It builds the planner
-   on the mower on top of OpenMower's image. While this repo is private: `git clone` it into the stack's folder (e.g.
-   as `src`) and set `context: ./src` in `compose.yaml`.
+   on the mower from this repository, on top of OpenMower's image.
 3. `docker compose up -d` there (Dockge: Deploy), then restart OpenMower's stack.
 
-Updating: `git pull` in the clone, then `docker compose up -d --build`. Going back: `VERSION` as before, `OM_PLANNER`
-out of OpenMower's `.env`, the planner stack stopped.
+Updating: `docker compose up -d --build`. Going back: `VERSION` as before, `OM_PLANNER` out of OpenMower's `.env`, the
+planner stack stopped.
 
 Settings and plans live where OpenMower keeps its ROS data (`/home/openmower/ros`). When OpenMower restarts, the
 planner container ends and comes back on its own (`restart: unless-stopped`).
