@@ -41,7 +41,7 @@ from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LE
                      Lane, PlannerConfig, PlanningError, SegmentInfo, _keep)
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
-from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells
+from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells, zone_angles
 from .maneuvers import path_length
 from .mathutil import Pose2D
 from .route import _driven, _pieces, _Route, _smooth_spins
@@ -381,15 +381,25 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
     area_space = TransitPlanner(drive_space, cfg.transit_clearance, **edges)
 
-    # 3. lanes, for crosshatch a second time across them
+    # 3. lanes, for crosshatch a second time across them. split_zones: the zones mowed another way than the rest, each
+    # a set of lanes of its own (the rest's lanes end where a zone begins)
     passes: List[Tuple[float, List[List[Lane]]]] = []
+    zones: List[Tuple[float, object]] = []
     if not concentric and not cfg.skip_lanes and not lane_region.is_empty:
         angles = [angle]
         if cfg.fill_pattern == 'crosshatch':
             second = math.fmod(angle + cfg.crosshatch_angle, math.pi)
             angles.append(second + math.pi if second < 0 else second)
-        for a in angles:
-            rows = scan_lanes(lane_region, a, spacing, cfg.min_lane_length, remaining, robot_space, half)
+        elif cfg.split_zones and not cfg.headland_turns:
+            zones = zone_angles(lane_region, angle, spacing, cfg.min_lane_length, remaining, robot_space, half,
+                                cfg.angle_min, cfg.angle_max)
+        taken = union(zone for _, zone in zones)
+        todo_lanes = [(a, lane_region, remaining) for a in angles] if not zones else \
+            [(angle, polygonal(lane_region.difference(taken)),
+              polygonal(remaining.difference(taken.buffer(spacing, 4))))] + \
+            [(a, zone, polygonal(remaining.intersection(zone.buffer(spacing, 4)))) for a, zone in zones]
+        for a, where, mow in todo_lanes:
+            rows = scan_lanes(where, a, spacing, cfg.min_lane_length, mow, robot_space, half)
             if cfg.bend_max_gap > 0 and cfg.blade_offset == 0:
                 rows = bend_lanes(rows, a, area_space, cfg.bend_max_gap, cfg.bend_max_offset)
             passes.append((a, split_cells(rows)))
@@ -539,8 +549,23 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             # the strips too narrow for lanes first, so the lanes can end at the end point
             if w['narrow'] is not None:
                 route.extra_loops(w['narrow'], finish=not loops_end and last_pass is None)
-            for i, (a, _) in enumerate(passes):
-                route.cells(w['cells'][i], a, finish=not loops_end and i == last_pass)
+            sets = [i for i in range(len(passes)) if not zones or i == 0]
+            for i in sets:
+                route.cells(w['cells'][i], passes[i][0], finish=not loops_end and i == last_pass and not zones)
+            # split_zones: the rest first, then the zones, the nearest next (the one closest to the end point last)
+            later = [i for i in range(len(passes)) if zones and i > 0 and w['cells'][i]]
+
+            def near(i: int, p: Optional[XY]) -> float:
+                a = passes[i][0]
+                return min(route._distance(p, lane.ends(a)[k]) for cell in w['cells'][i] for lane in cell
+                           for k in (0, 1))
+
+            final = min(later, key=lambda i: (near(i, route.end), i)) if later and route.end is not None and \
+                not loops_end else None
+            while later:
+                i = min([j for j in later if j != final] or later, key=lambda j: (near(j, route.pos), j))
+                later.remove(i)
+                route.cells(w['cells'][i], passes[i][0], finish=not loops_end and not later)
 
         if last:
             lanes()
@@ -618,6 +643,12 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     }
     for key in ('turns_u_turn', 'turns_bulb', 'turns_detour', 'turns_pivot', 'turns_fallback'):
         stats[key] = route.counts.get(key, 0)
+    if cfg.split_zones:
+        # the zones mowed another way than the rest: their lanes' direction, how many, their outlines
+        stats['zones'] = [{'angle': round(a, 6), 'lanes': sum(len(cell) for cell in cells),
+                           'outlines': [[[round(x, 3), round(y, 3)] for x, y in poly.exterior.coords[:-1]]
+                                        for poly in polygons(zone)]}
+                          for (a, zone), (_, cells) in zip(zones, passes[1:])]
     if fitted is not None:
         stats['body_fit'] = fitted
     if cfg.headland_turns:

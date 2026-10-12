@@ -150,6 +150,10 @@ class PlannerConfig:
     # earlier for one where that leaves nothing unmowed, and a wider one where the lanes are further apart or there's
     # room (WIDER_TURNS of turn_radius, the widest that fits)
     turn_radius_auto: bool = False
+    # zones with a lane direction of their own: where the obstacles cut the lanes into groups, a group mowed another way
+    # where that takes a lot fewer lanes (see lanes.zone_angles), each zone after the rest, the nearest next. Not with
+    # fill_pattern crosshatch or concentric, nor with headland_turns
+    split_zones: bool = False
     # the lanes' field kept clean (where they lie but for what the loops mow and 2 turn_radius at their ends, where the
     # turns go): in there the path only runs straight along the lanes. Drives go along the headland round it (out of the
     # field straight on from a lane's end, into it straight along the next lane), across it only straight (along a
@@ -436,7 +440,7 @@ class PlannerConfig:
         if not isinstance(self.turn_types, (tuple, list)) or not self.turn_types or \
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
-        for name in ('turn_radius_auto', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
+        for name in ('turn_radius_auto', 'split_zones', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
                      'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')

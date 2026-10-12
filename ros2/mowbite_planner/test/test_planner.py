@@ -33,7 +33,7 @@ from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle
 from mowbite_planner.planner import plan_footprint  # noqa: E402
 from mowbite_planner.route import _Route, _rows, _spins, best_order  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
-from mowbite_planner.report import check_plan  # noqa: E402
+from mowbite_planner.report import check_plan, drive_time  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -570,8 +570,8 @@ def test_random_gardens(seed):
 @pytest.mark.parametrize('seed', range(40))
 def test_random_gardens_with_obstacle_passes(seed):
     """Random gardens with islands, their loops of another number than the outline's (obstacle_passes), with and without
-    the body checked, some with turn_radius_auto: the plan keeps its invariants and mows about as much as with as many
-    (but with none)."""
+    the body checked, some with turn_radius_auto, some with split_zones: the plan keeps its invariants and mows about
+    as much as with as many (but with none)."""
     rnd = random.Random(1000 + seed)
     boundary = random_polygon(rnd, 0, 0, 4, 9, rnd.randint(5, 14))
     obstacles = [random_polygon(rnd, rnd.uniform(-4, 4), rnd.uniform(-4, 4), 0.3, 1.2, rnd.randint(3, 8))
@@ -582,7 +582,8 @@ def test_random_gardens_with_obstacle_passes(seed):
     count = rnd.choice([0, 1, 2, 4])
     try:
         same = plan_coverage(boundary, obstacles, PlannerConfig(**base))
-        cfg = PlannerConfig(**dict(base, obstacle_passes=count, turn_radius_auto=seed % 3 == 0))
+        cfg = PlannerConfig(**dict(base, obstacle_passes=count, turn_radius_auto=seed % 3 == 0,
+                                   split_zones=seed % 2 == 1))
         plan = plan_coverage(boundary, obstacles, cfg)
     except PlanningError:
         return
@@ -1693,6 +1694,37 @@ def turn_poses(plan):
             out += [i for i in range(seg.start + 1, seg.end + 1) if i not in starts and
                     angle_diff(plan.poses[i].yaw, plan.poses[i - 1].yaw) <= footprint.SPIN]
     return out
+
+
+U_LAWN = [(0, 0), (14, 0), (14, 10), (10, 10), (10, 3), (4, 3), (4, 10), (0, 10)]
+
+
+@pytest.mark.parametrize('base', [dict(angle=0.0), dict(MOWER, **NX60I, angle=0.0)])
+def test_split_zones(base):
+    """split_zones: a part of the lawn better mowed another way gets lanes of its own direction. A U's two wings across
+    the lanes: along them a lot fewer lanes and turns, as much mowed, stats['zones'] says which. The rest keeps its
+    direction and is mowed first. A plain lawn stays as it is (not turned as a whole), so does one where zones gain
+    nothing; not with crosshatch or headland_turns."""
+    plain = plan_coverage(U_LAWN, [], PlannerConfig(**base), start=(1, 1, 0.0), end=(1, 1))
+    cfg = PlannerConfig(**dict(base, split_zones=True))
+    plan = plan_coverage(U_LAWN, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, cfg)
+    zones = plan.stats['zones']
+    assert [round(math.degrees(z['angle'])) for z in zones] == [90, 90] and 'zones' not in plain.stats
+    assert all(len(z['outlines']) == 1 and Polygon(z['outlines'][0]).area > 15.0 for z in zones)
+    assert plan.stats['lanes'] < 0.65 * plain.stats['lanes'] and sorted(plan.angles) == pytest.approx([0.0] + [math.pi / 2] * 2)
+    assert coverage(plan, cfg) > coverage(plain, cfg) - 0.0005 and check_plan(plan)['body_out'] == []
+    assert drive_time(plan.poses)['s'] < drive_time(plain.poses)['s']
+    # the rest (the lanes at 0) before the zones
+    yaws = [round(math.degrees(plan.poses[s.start].yaw)) % 180 for s in straight_lanes(plan)]
+    assert yaws.index(90) > max(i for i, y in enumerate(yaws) if y == 0)
+    for kw, area, obstacles in ((dict(angle=0.3), rect(0, 0, 10, 6), []), (dict(base), GARDEN, [TREE, BED])):
+        same = plan_coverage(area, obstacles, PlannerConfig(**kw))
+        split = plan_coverage(area, obstacles, PlannerConfig(**dict(kw, split_zones=True)))
+        assert split.poses == same.poses and split.stats['zones'] == []
+    for kw in (dict(fill_pattern='crosshatch'), dict(headland_turns=True)):
+        same = plan_coverage(U_LAWN, [], PlannerConfig(**dict(base, **kw)))
+        assert plan_coverage(U_LAWN, [], PlannerConfig(**dict(base, split_zones=True, **kw))).poses == same.poses
 
 
 def test_mop_up():

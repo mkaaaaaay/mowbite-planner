@@ -58,6 +58,7 @@ planner stack (both, else two planners answer the same service).
 | `turn_radius_auto` | false | the planner picks each turn's radius, `turn_radius` at least: fewer tight turns, wider ones where there's room |
 | `turn_on_spot` | false | turn on the spot instead of loops |
 | `headland_turns` | false | clean stripes |
+| `split_zones` | false | parts of the lawn better mowed another way get their own lane direction |
 | `mop_up` | false | extra round at the end over the biggest unmowed bits |
 | `planner` | mowbite | `slic3r`: OpenMower's slic3r plans instead, for all areas (no body check) |
 

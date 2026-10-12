@@ -39,6 +39,8 @@
     turn_on_spot: false
     # the planner picks every turn's radius, turn_radius the least: fewer turns tighter than it, wider where there's room
     turn_radius_auto: false
+    # a part of the lawn better mowed another way gets lanes of its own direction (where the whole takes fewer lanes)
+    split_zones: false
     # the turns allowed, preferred first
     turn_types: [u_turn, bulb, detour, pivot]
     lane_order: snake

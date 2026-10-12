@@ -148,6 +148,8 @@ PARAMETERS = {
                      None, ''),
     'turn_radius_auto': (False, 'the planner picks every turn\'s radius, turn_radius the least: fewer turns tighter '
                          'than it, wider ones where there\'s room', None, ''),
+    'split_zones': (False, 'a part of the lawn better mowed another way gets lanes of its own direction, where the '
+                    'whole then takes fewer lanes', None, ''),
     'turn_types': (list(TURN_TYPES), 'turns allowed between lanes, preferred first: ' + ', '.join(TURN_TYPES),
                    lambda v: all(t in TURN_TYPES for t in v), 'must be some of ' + ', '.join(TURN_TYPES)),
     'lane_order': ('snake', 'snake: lane after neighbouring lane. skip: lanes far enough apart for a forward '

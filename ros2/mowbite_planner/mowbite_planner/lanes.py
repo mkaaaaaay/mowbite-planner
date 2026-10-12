@@ -5,9 +5,10 @@ import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Polygon
+from shapely.ops import unary_union
 
 from .config import MAX_ROWS, ON_EDGE, XY, Lane, PlannerConfig, PlanningError
-from .geometry import polygons, rings
+from .geometry import polygonal, polygons, rings
 from .mathutil import angle_diff
 from .transit import TransitPlanner
 
@@ -377,3 +378,74 @@ def split_cells(rows: List[List[Lane]]) -> List[List[Lane]]:
         open_cells = now_open
         prev = lanes
     return cells
+
+
+# split_zones: a group of lanes may get a direction of its own (one of ZONE_ANGLES round) where it has ZONE_LANES lanes
+# at least; it does where the whole of the lanes and groups then costs ZONE_LESS less (see _lane_cost: the lanes at
+# the seams count), the ones that promise the most first
+ZONE_LESS = 3.0
+ZONE_ANGLES = 12
+ZONE_LANES = 4
+# of where the lanes lie, the zones together at most: the lanes' direction as set (or turned on every mow) stays the
+# lawn's
+ZONE_SHARE = 0.75
+
+
+def zone_angles(region, angle: float, spacing: float, min_length: float, target=None, room=None, reach: float = 0.0,
+                lo: Optional[float] = None, hi: Optional[float] = None) -> List[Tuple[float, object]]:
+    """split_zones: the zones of region (where the lanes' centres lie) better mowed another way than at angle, [(the
+    zone's angle, the zone)]. A zone is a group of lanes at angle (a cell, see split_cells: the strips its lanes mow),
+    neighbours that take the same direction one zone where that's no worse. Only zones that make the whole cheaper:
+    the rest's lanes (they end where a zone begins) and the zones' own counted as they get planned. lo, hi: the range
+    the directions stay in (angle_in_range). target, room, reach as for scan_lanes."""
+    rows = scan_lanes(region, angle, spacing, min_length, target, room, reach)
+    c, s = math.cos(angle), math.sin(angle)
+    tried = sorted({round(a, 9): a for a in (angle_in_range(k * math.pi / ZONE_ANGLES, lo, hi) % math.pi
+                                             for k in range(ZONE_ANGLES))}.values())
+
+    def own(zone, a: float) -> float:  # what the zone's lanes cost at a
+        within = None if target is None else polygonal(target.intersection(zone.buffer(spacing, 4)))
+        return _lane_cost(zone, a, spacing, min_length, within, room, reach)
+
+    def whole(zones: List[Tuple[float, object]]) -> float:  # what the rest's lanes and the zones' cost together
+        if not zones:
+            return sum(len(r) for r in rows) + 3.0 * len(split_cells(rows))
+        taken = unary_union([zone for _, zone in zones])
+        rest = polygonal(region.difference(taken))
+        # (what the zones' lanes mow round them isn't the rest's to mow: its lanes aren't carried on along a zone)
+        left = None if target is None else polygonal(target.difference(taken.buffer(spacing, 4)))
+        return (0.0 if rest.is_empty else _lane_cost(rest, angle, spacing, min_length, left, room, reach)) + \
+            sum(own(zone, a) for a, zone in zones)
+
+    maybe = []
+    for cell in split_cells(rows):
+        if len(cell) < ZONE_LANES or any(lane.bends for lane in cell):
+            continue
+        step = (cell[-1].y - cell[0].y) / (len(cell) - 1)
+        strips = []
+        for lane in cell:
+            box = [(lane.x0 - reach, lane.y - 0.5 * step), (lane.x1 + reach, lane.y - 0.5 * step),
+                   (lane.x1 + reach, lane.y + 0.5 * step), (lane.x0 - reach, lane.y + 0.5 * step)]
+            strips.append(Polygon([(x * c - y * s, x * s + y * c) for x, y in box]))
+        zone = polygonal(unary_union(strips).buffer(1e-6, 1).intersection(region))
+        if zone.is_empty:
+            continue
+        best = min(((own(zone, a), angle_diff(2 * a, 2 * angle), a) for a in tried
+                    if angle_diff(2 * a, 2 * angle) > 1e-6), default=None)
+        if best is not None and best[0] < len(cell) + 3.0:  # (less than it costs as a part of the whole)
+            maybe.append((len(cell) + 3.0 - best[0], len(maybe), best[2], zone))
+    zones: List[Tuple[float, object]] = []
+    cost = whole(zones)
+    most = ZONE_SHARE * region.area
+    for _, _, a, zone in sorted(maybe, key=lambda m: (-m[0], m[1])):
+        if sum(z.area for _, z in zones) + zone.area > most:  # (the rest keeps its direction for most of the lawn)
+            continue
+        # (with a neighbour that takes the same direction: one zone, where that's no worse)
+        near = [i for i, (b, other) in enumerate(zones) if abs(a - b) < 1e-9 and other.distance(zone) < 1e-3]
+        joined = [z for i, z in enumerate(zones) if i not in near] + [(a, polygonal(unary_union(
+            [zones[i][1] for i in near] + [zone]).buffer(1e-6, 1).intersection(region)))]
+        with_it = min(((whole(trial), k, trial) for k, trial in enumerate([joined, zones + [(a, zone)]] if near
+                                                                               else [zones + [(a, zone)]])))
+        if with_it[0] <= cost - ZONE_LESS:
+            cost, zones = with_it[0], with_it[2]
+    return zones
