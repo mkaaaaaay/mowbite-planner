@@ -15,7 +15,7 @@ and settings that still change.
 - picks the lane spacing and angle on its own if you let it, turns the stripes a bit after every mow
 - "clean stripes" mode: no turning inside the lanes, only in the headland
 - optional extra round at the end over the biggest bits left unmowed (`mop_up`), and after a mow a look at the real
-  track: what did it leave, mow just that again (`planner.leftovers`)
+  track: what did it leave, mow just that again (`planner.leftovers`, by itself with `leftovers_auto`)
 - settings per area in the map, plans made ahead so the app's preview is instant
 
 ## The body check in short
@@ -61,6 +61,7 @@ planner stack (both, else two planners answer the same service).
 | `headland_turns` | false | clean stripes |
 | `split_zones` | false | parts of the lawn better mowed another way get their own lane direction |
 | `mop_up` | false | extra round at the end over the biggest unmowed bits |
+| `leftovers_auto` | false | after a mow the mower goes out again by itself for what it really left, from 0.3 m² |
 | `planner` | mowbite | `slic3r`: OpenMower's slic3r plans instead, for all areas (no body check) |
 
 Everything else, the RPCs and what a plan answer contains: [`ros1/README.md`](ros1/README.md) and

@@ -43,7 +43,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
                         choices, settable. Not settable: the skip flags of mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
-                        type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r
+                        type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r.
+                        leftovers_auto (the node's too): see below
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
@@ -72,6 +73,10 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         plan was there already (planned ahead or asked for before). duration: {min, model_min, factor,
                         runs}, how long mowing it takes, see TIMING_RUNS
 
+leftovers_auto: after every finished mow planner.leftovers by itself, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2
+at least the mower is sent out again for them (the start_mowing action), once it's idle in its dock with no emergency
+and no rain (rain only counts with /mower_logic/rain_mode on). Once a mow: the leftovers' job starts no other.
+
 PLAN_AHEAD_DELAY s after the map or the settings last changed every active mowing area is planned ahead like
 planner.plan plans it, so the app's preview and the next mow find their plan at once.
 
@@ -99,6 +104,7 @@ import time
 import rospy
 from shapely.geometry import Point as Spot
 from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion
+from mower_msgs.msg import HighLevelStatus, Status
 from nav_msgs.msg import Path
 from slic3r_coverage_planner.msg import Path as PlannerPath
 from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
@@ -141,8 +147,10 @@ POINTS = ('robot_outline',)
 PLANNERS = ('mowbite', 'slic3r')
 CLASSIC_SERVICE = '/slic3r_classic/plan_path'
 CLASSIC_WAIT = 5.0  # s it waits for that service
+# the node's own settings, kept with the planner's: which planner, and leftovers_auto (see the top)
+NODE_SETTINGS = ('planner', 'leftovers_auto')
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
-Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner')
+Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner leftovers_auto')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'angle_increment_every': (1, None),
           'perimeter_passes': (-1, limits.MAX_PASSES), 'obstacle_passes': (-1, limits.MAX_PASSES),
@@ -182,6 +190,14 @@ LEFTOVERS_ARMED = 900.0
 LEFTOVERS_JOB = 6 * 3600.0
 # m2, an unmowed piece planner.leftovers counts (bodyfit's MOP_MIN)
 LEFT_PIECE = 0.02
+# leftovers_auto: m2 the passes mow at least for the mower to go out again (under it the drive there isn't worth it),
+# the action that starts it like the app's button, what tells whether it's ready, s between two looks at that
+LEFTOVERS_AUTO_MIN = 0.3
+START_ACTION = 'mower_logic:idle/start_mowing'
+ACTION_TOPIC = '/xbot/action'
+STATE_TOPIC = '/mower_logic/current_state'
+STATUS_TOPIC = '/ll/mower_status'
+READY_POLL = 2.0
 # of an area: with more left than this, planner.leftovers plans nothing for it (that track wasn't a mow of it)
 LEFT_MOST = 0.5
 TIMING_RANGE = (0.5, 2.0)
@@ -286,6 +302,7 @@ class MowbitePlannerRos1:
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
+        self.action = rospy.Publisher(ACTION_TOPIC, String, queue_size=1)
         self.classic_name = rospy.get_param('~classic_service', CLASSIC_SERVICE)
         self.classic = None
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
@@ -313,6 +330,9 @@ class MowbitePlannerRos1:
         planner = settings.pop('planner', PLANNERS[0])
         if planner not in PLANNERS:
             raise PlanningError('planner must be one of %s' % ', '.join(PLANNERS))
+        leftovers_auto = settings.pop('leftovers_auto', False)
+        if not isinstance(leftovers_auto, bool):
+            raise PlanningError('leftovers_auto must be true or false')
         # OpenMower's FTC controller only drives forwards: lanes far enough apart that every turn is a forward U-turn
         # of turn_radius. ~settings can change that (and anything else)
         base = PlannerConfig(lane_order='skip').with_overrides(settings)
@@ -323,10 +343,11 @@ class MowbitePlannerRos1:
         # has its own
         own_angle = 'angle' in settings or 'angle_strategy' in settings
         # as the planner took them: ints of a float setting as floats, turn_types as a list
-        stored = {n: planner if n == 'planner' else getattr(blade if n == 'mower_width' else base, n) for n in stored}
+        node = {'planner': planner, 'leftovers_auto': leftovers_auto}
+        stored = {n: node[n] if n in node else getattr(blade if n == 'mower_width' else base, n) for n in stored}
         return Setup(blade.mower_width, base, own_angle,
                      {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()},
-                     frozenset(n for n in settings if n in MOWER_LOGIC), planner)
+                     frozenset(n for n in settings if n in MOWER_LOGIC), planner, leftovers_auto)
 
     def read_stored(self):
         if not self.file or not os.path.exists(self.file):
@@ -388,6 +409,8 @@ class MowbitePlannerRos1:
             out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
         out['planner'] = {'value': current.planner, 'default': defaults.planner, 'stored': 'planner' in current.stored,
                           'type': 'string', 'settable': True, 'choices': list(PLANNERS)}
+        out['leftovers_auto'] = {'value': current.leftovers_auto, 'default': defaults.leftovers_auto,
+                                 'stored': 'leftovers_auto' in current.stored, 'type': 'boolean', 'settable': True}
         # angle_increment: the steps turned so far and the finished mows towards the next one
         steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
@@ -438,7 +461,7 @@ class MowbitePlannerRos1:
             rospy.loginfo('MowBite Planner: the leftovers are mowed')
             self.served.clear()
             return
-        self.drive_thread = threading.Thread(target=self.drive_after, args=(event.get('job_id'),), daemon=True)
+        self.drive_thread = threading.Thread(target=self.after_mow, args=(event.get('job_id'),), daemon=True)
         self.drive_thread.start()
         base = self.current.base
         with self.lock:
@@ -465,7 +488,7 @@ class MowbitePlannerRos1:
             raise PlanningError('not settable here: %s' % ', '.join('%s (%s)' % (n, FIXED[n]) for n in fixed))
         # (settings of before an app may still send: left out)
         params = {n: v for n, v in params.items() if n not in limits.INTERNAL and n not in limits.RETIRED}
-        unknown = sorted(set(params) - set(PlannerConfig.names()) - {'planner'})
+        unknown = sorted(set(params) - set(PlannerConfig.names()) - set(NODE_SETTINGS))
         if unknown:
             raise PlanningError('unknown planner settings: %s' % ', '.join(unknown))
         with self.set_lock:
@@ -633,6 +656,52 @@ class MowbitePlannerRos1:
         if not params and self.drive is not None:
             return self.drive
         return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
+
+    def after_mow(self, job_id):
+        """What follows a finished mow: its planner.drive and timing, then with leftovers_auto what it left."""
+        self.drive_after(job_id)
+        if not self.current.leftovers_auto:
+            return
+        try:
+            self.leftovers_after(job_id)
+        except PlanningError as e:
+            rospy.loginfo('MowBite Planner: no leftovers mowed by itself: %s', e)
+        except Exception as e:  # noqa: BLE001 - the leftovers must not take the planner down
+            rospy.logerr('MowBite Planner: the leftovers failed: %s: %s', type(e).__name__, e)
+
+    def leftovers_after(self, job_id):
+        """leftovers_auto: planner.leftovers of the finished mow, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2 at
+        least the mower is sent out for them as soon as it's ready (the mow's JOB_COMPLETE comes before it docks), while
+        they're armed and not asked for yet."""
+        self.rpc_leftovers({'job_id': job_id, 'arm': True})
+        armed = self.armed
+        area = sum(p.stats['leftovers']['area'] for p in armed['plans'].values() if p is not None) if armed else 0.0
+        if area < LEFTOVERS_AUTO_MIN:
+            if self.armed is armed:
+                self.armed = None
+            rospy.loginfo('MowBite Planner: %.2f m2 of leftovers to mow, under %.2f: the mower stays in', area,
+                          LEFTOVERS_AUTO_MIN)
+            return
+        while self.armed is armed and not armed['served'] and time.time() < armed['until']:
+            if self.mower_ready():
+                self.action.publish(String(data=START_ACTION))
+                rospy.loginfo('MowBite Planner: the mower sent out for %.2f m2 of leftovers', area)
+                return
+            time.sleep(READY_POLL)
+        rospy.loginfo('MowBite Planner: the mower not sent out for the leftovers, not ready while they were armed')
+
+    @staticmethod
+    def mower_ready():
+        """Whether the mower is idle in its dock with no emergency and no rain (the sensor as it is, only with
+        /mower_logic/rain_mode on: a start by action doesn't wait for the rain to end)."""
+        try:
+            state = rospy.wait_for_message(STATE_TOPIC, HighLevelStatus, timeout=READY_POLL)
+            if state.state_name != 'IDLE' or not state.is_charging or state.emergency:
+                return False
+            return not (rospy.get_param('/mower_logic/rain_mode', 0) and
+                        rospy.wait_for_message(STATUS_TOPIC, Status, timeout=READY_POLL).rain_detected)
+        except rospy.ROSException:
+            return False
 
     def drive_after(self, job_id):
         """planner.drive of a finished mow, in the log, and how long it took (time_after)."""

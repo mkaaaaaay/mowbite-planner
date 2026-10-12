@@ -86,6 +86,9 @@ A few worth knowing:
 - `angle_increment` (rad): turns the stripes a bit every `angle_increment_every` finished mows, within an area's
   `angle_min`..`angle_max`. Leave OpenMower's `mow_angle_increment` at 0, else both add up.
 - `lane_spacing_mode: auto`: the planner picks the lane spacing, `perimeter_passes: -1` the number of loops.
+- `leftovers_auto`: after every finished mow the planner looks at what it left (like `planner.leftovers`). If the
+  passes over that mow 0.3 m² or more, it sends the mower out again once it's idle in the dock. Not in an emergency
+  and, with OpenMower's `rain_mode` on, not in the rain. Once per mow.
 - Body: `robot_width`, `robot_front`, `robot_rear` (m from the middle of the drive wheels) or `robot_outline`
   (`[[x, y], ...]`, x ahead, y left). Blade: `blade_ahead`, `blade_offset`.
 

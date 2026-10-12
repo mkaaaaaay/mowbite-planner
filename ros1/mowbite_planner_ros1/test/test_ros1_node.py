@@ -63,6 +63,7 @@ def install():
         subscribers = {}
         published = []
         registered = []
+        messages = {}  # (the last one on a topic, for wait_for_message)
 
         class ROSException(Exception):
             pass
@@ -89,6 +90,11 @@ def install():
 
         def wait_for_service(self, name, timeout=None):
             pass
+
+        def wait_for_message(self, topic, kind, timeout=None):
+            if topic not in self.messages:
+                raise self.ROSException('timeout exceeded while waiting for message on topic %s' % topic)
+            return self.messages[topic]
 
         def Service(self, name, kind, handler):
             self.services[name] = handler
@@ -119,6 +125,10 @@ def install():
         'geometry_msgs': types.ModuleType('geometry_msgs'),
         'geometry_msgs.msg': types.SimpleNamespace(Point=point, Point32=point32, Pose=pose, PoseStamped=pose_stamped,
                                                    Quaternion=quat, Polygon=polygon),
+        'mower_msgs': types.ModuleType('mower_msgs'),
+        'mower_msgs.msg': types.SimpleNamespace(
+            HighLevelStatus=msg('HighLevelStatus', state_name=str, is_charging=bool, emergency=bool),
+            Status=msg('Status', rain_detected=bool)),
         'nav_msgs': types.ModuleType('nav_msgs'),
         'nav_msgs.msg': types.SimpleNamespace(Path=nav_path),
         'slic3r_coverage_planner': types.ModuleType('slic3r_coverage_planner'),
@@ -194,6 +204,7 @@ def planner():
     rospy.log.clear()
     rospy.published.clear()
     rospy.registered.clear()
+    rospy.messages.clear()
     for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json', 'mowbite_planner_angle.json'):
         try:
             os.remove(os.path.join(os.environ['ROS_HOME'], name))
@@ -616,7 +627,9 @@ def test_rpc_settings(planner):
     result, error = rpc('planner.settings')
     assert error is None and result['file'] == stored_file() and result['own_angle'] is False
     s = result['settings']
-    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner'}
+    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner', 'leftovers_auto'}
+    assert s['leftovers_auto'] == {'value': False, 'default': False, 'stored': False, 'type': 'boolean',
+                                   'settable': True}
     assert s['planner'] == {'value': 'mowbite', 'default': 'mowbite', 'stored': False, 'type': 'string',
                             'settable': True, 'choices': ['mowbite', 'slic3r']}
     assert s['turn_radius'] == {'value': 0.25, 'default': 0.25, 'stored': False, 'type': 'number', 'settable': True,
@@ -746,6 +759,7 @@ def test_rpc_settings_angle(planner):
     ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
     ({'nope': 1}, 'unknown planner settings: nope'),
     ({'planner': 'fast'}, 'planner must be one of mowbite, slic3r'),
+    ({'leftovers_auto': 1}, 'leftovers_auto must be true or false'),
 ])
 def test_rpc_settings_set_refused(planner, params, message):
     rpc('planner.settings.set', {'turn_radius': 0.3})
@@ -1113,6 +1127,81 @@ def test_leftovers(planner):
     rpc('planner.settings.set', {'turn_radius': 0.3})  # (new settings: the leftovers were the old ones')
     assert len(poses(planner.handle(request()))) > 100
     assert rpc('planner.leftovers', {'job_id': 'nope'})[1][1].startswith('no track')
+
+
+def test_leftovers_auto(planner, monkeypatch):
+    """leftovers_auto: after a finished mow its leftovers by themselves. Where their passes mow enough the mower is sent
+    out for them once it's idle in its dock (no emergency, no rain with rain_mode on) and mower_logic's next plan is
+    those passes; that job done starts nothing again. Little left, the mower not ready in time or the setting off: it
+    stays in."""
+    monkeypatch.setattr(node_module, 'READY_POLL', 0.01)
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded',
+                                 'blade_ahead': 0.17})
+    send_map(the_map())
+    full, _ = rpc('planner.plan', {'area_id': 'a', 'poses': True})
+    # the tracks: the plan as driven but for every 12th lane, and all of it
+    runs, lanes = [[]], 0
+    for seg in full['segments']:
+        lanes += seg['type'] == 'lane'
+        if seg['type'] == 'lane' and lanes % 12 == 0:
+            runs.append([])
+        else:
+            runs[-1] += [p[:2] for p in full['poses'][seg['start']:seg['end'] + 1]]
+    track_file('mown', [(True, run) for run in runs if run])
+    track_file('all', [(True, [p[:2] for p in full['poses']])])
+    state, status, start = '/mower_logic/current_state', '/ll/mower_status', 'mower_logic:idle/start_mowing'
+    idle = node_module.HighLevelStatus(state_name='IDLE', is_charging=True)
+
+    def finished(job):
+        """A mow of that job finished: the actions the node sent after it."""
+        rospy.published.clear()
+        rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
+            topic='events/json', payload=json.dumps({'type': 'JOB_COMPLETE', 'job_id': job})))
+        planner.drive_thread.join(120.0)
+        return [m.data for topic, m in rospy.published if topic == '/xbot/action']
+
+    rospy.messages[state] = idle
+    whole = len(poses(planner.handle(request())))
+    assert finished('all') == [] and planner.armed is None  # (off)
+    result, error = rpc('planner.settings.set', {'leftovers_auto': True})
+    assert error is None and result['settings']['leftovers_auto'] == {
+        'value': True, 'default': False, 'stored': True, 'type': 'boolean', 'settable': True}
+    with open(stored_file()) as f:
+        assert json.load(f)['leftovers_auto'] is True
+    # still docking when the mow's event comes: sent out when it's in
+    rospy.messages[state] = node_module.HighLevelStatus(state_name='DOCKING')
+    timer = threading.Timer(0.2, rospy.messages.update, [{state: idle}])
+    timer.start()
+    assert finished('mown') == [start]
+    timer.join()
+    assert any('the mower sent out for' in line for _, line in rospy.log)
+    assert 3 <= len(poses(planner.handle(request()))) < 0.2 * whole
+    # the leftovers' job done: no mow of its own, nothing sent again
+    assert finished('mown') == [] and any('the leftovers are mowed' in line for _, line in rospy.log)
+    assert len(poses(planner.handle(request()))) == whole
+    # nothing left: the mower stays in, the next plan is the whole one
+    assert finished('all') == [] and planner.armed is None
+    assert any('the mower stays in' in line for _, line in rospy.log)
+    # ready: idle in its dock, no emergency, no rain (that only counts with mower_logic's rain_mode on)
+    rain = node_module.Status(rain_detected=True)
+    for messages, rain_mode, ready in (
+            ({state: node_module.HighLevelStatus(state_name='MOWING')}, 0, False),
+            ({state: node_module.HighLevelStatus(state_name='IDLE')}, 0, False),
+            ({state: node_module.HighLevelStatus(state_name='IDLE', is_charging=True, emergency=True)}, 0, False),
+            ({}, 0, False), ({state: idle}, 1, False), ({state: idle, status: rain}, 1, False),
+            ({state: idle, status: rain}, 0, True), ({state: idle, status: node_module.Status()}, 1, True)):
+        rospy.messages.clear()
+        rospy.messages.update(messages)
+        rospy.params['/mower_logic/rain_mode'] = rain_mode
+        assert planner.mower_ready() is ready, (messages, rain_mode)
+    # not ready while the leftovers are armed: not sent out
+    monkeypatch.setattr(node_module, 'LEFTOVERS_ARMED', 0.2)
+    rospy.messages[state] = node_module.HighLevelStatus(state_name='IDLE')
+    assert finished('mown') == [] and any('the mower not sent out' in line for _, line in rospy.log)
+    # planner slic3r: no leftovers
+    rospy.messages[state] = idle
+    rpc('planner.settings.set', {'planner': 'slic3r'})
+    assert finished('mown') == [] and any('no leftovers mowed by itself' in line for _, line in rospy.log)
 
 
 def test_planner_drive(planner):
