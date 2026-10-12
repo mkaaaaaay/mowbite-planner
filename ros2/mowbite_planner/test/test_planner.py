@@ -373,6 +373,16 @@ def test_turn_radius_auto():
     assert tight[1] < 0.5 * tight[0] and auto.stats['turns_pivot'] <= plain.stats['turns_pivot']
     assert check_plan(auto)['body_out'] == [] and coverage(auto, cfg) > coverage(plain, cfg) - 0.001
     assert auto.stats['path_length'] < 1.05 * plain.stats['path_length']
+    # a strip with a slanted end, its lanes ending at different heights: the tight half circle only fits with the next
+    # lane starting a little later. That before turning on the spot, like without
+    strip = dict(MOWER, **NX60I, turn_radius=0.4, perimeter_passes=2, lane_overlap_passes=0, angle=math.pi / 2)
+    slanted = [(0, 0), (1.4, 0), (1.4, 4), (0, 6)]
+    plain = plan_coverage(slanted, [], PlannerConfig(**strip), start=(1, 1, 0.0), end=(1, 1))
+    cfg = PlannerConfig(**dict(strip, turn_radius_auto=True))
+    auto = plan_coverage(slanted, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(auto, cfg)
+    assert [p.stats['turns_pivot'] + p.stats['turns_fallback'] for p in (plain, auto)] == [0, 0]
+    assert check_plan(auto)['body_out'] == [] and coverage(auto, cfg) > coverage(plain, cfg) - 0.001
     with pytest.raises(PlanningError, match='turn_radius_auto'):
         PlannerConfig(turn_radius_auto=1).validate()
 

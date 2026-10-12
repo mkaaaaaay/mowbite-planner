@@ -769,11 +769,16 @@ class _Route:
                          self.step, self.area.is_free, self.detour_path,
                          self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0,
                          tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
+        rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
         if (turn is None or turn.name == 'pivot') and self.rounds:
-            earlier = self.round_earlier(a, yaw, math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length)
+            earlier = self.round_earlier(a, yaw, rest)
             if earlier is not None:
                 turn, a = earlier
                 self._count('lanes_earlier')
+        if (turn is None or turn.name == 'pivot') and 'pivot' in self.cfg.allowed_turns:
+            half = self.half_circle(Pose2D(self.pos[0], self.pos[1], self.heading), a, yaw, rest, self.area.is_free)
+            if half is not None:
+                turn, a = half
         if turn is None:
             return None
         for piece in turn.pieces:
@@ -893,13 +898,10 @@ class _Route:
                     if earlier is not None:
                         turn, a = earlier
                         self._count('lanes_earlier')
-                if (turn is None or turn.name == 'pivot') and self.cfg.turn_radius_auto and 'pivot' in types:
-                    # (turn_radius_auto: only now the half circle tighter than turn_radius, before turning on the spot)
-                    half = plan_turn(exit_pose, a, self.cfg.turn_radius, self.step, self.turn_space(a), None,
-                                     ('pivot',), self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0, False)
+                if (turn is None or turn.name == 'pivot') and 'pivot' in types:
+                    half = self.half_circle(exit_pose, a, yaw, rest, self.turn_space(a))
                     if half is not None:
-                        turn = half
-                        self._count('turns_tight')
+                        turn, a = half
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, turn.name)
@@ -920,13 +922,29 @@ class _Route:
             driven += 1
         return None
 
-    def round_earlier(self, a: XY, yaw: float, rest: float) -> Optional[Tuple[Maneuver, XY]]:
+    def half_circle(self, exit_pose: Pose2D, a: XY, yaw: float, rest: float,
+                    fits: Fits) -> Optional[Tuple[Maneuver, XY]]:
+        """turn_radius_auto, where no turn of turn_radius gets from exit_pose into the next lane (from a, facing yaw,
+        rest m of it to spare), the lanes ending earlier for one neither: only now the half circle tighter than
+        turn_radius, as wide as the lanes are apart, there or with the lanes ending earlier (round_earlier), before
+        turning on the spot. The turn and where the lane starts then, None where none fits."""
+        if not self.cfg.turn_radius_auto:
+            return None  # (plan_turn and round_earlier tried it)
+        half = plan_turn(exit_pose, a, self.cfg.turn_radius, self.step, fits, None, ('pivot',), self.turn_body,
+                         self.cfg.min_turn_radius if self.rounds else 0.0, False)
+        found = (half, a) if half is not None else self.round_earlier(a, yaw, rest, True) if self.rounds else None
+        if found is not None:
+            self._count('turns_tight')
+        return found
+
+    def round_earlier(self, a: XY, yaw: float, rest: float, half: bool = False) -> Optional[Tuple[Maneuver, XY]]:
         """In place of turning on the spot (or a drive) from the lane just mowed into the next (from a, facing yaw, rest
         m of it to spare): a rounded turn level with the end of the shorter of the two, the longer one ending (or
         starting) earlier, then both, ROUND_STEP at a time up to turn_radius more: a U-turn (at a slant where they end
         at one), a bulb, a detour between lanes far apart. The first that fits, where the turn or what's mowed already
         (the loops next to them) mows what they leave (but EARLIER_LEFT): the lane just mowed is shortened then. Else a
-        loop into the next lane (Dubins' shortest way that fits). None where none fits."""
+        loop into the next lane (Dubins' shortest way that fits). None where none fits. half: only the half circle
+        tighter than turn_radius (see half_circle, the rest is tried by then)."""
         last = self.segments[-1] if self.segments else None
         if last is None or last.kind != LANE or last.maneuver or len(last.poses) < 2:
             return None
@@ -971,8 +989,10 @@ class _Route:
                 break
             exit_pose = Pose2D(end.x - de * hx, end.y - de * hy, h)
             entry = (a[0] + dn * ux, a[1] + dn * uy)
-            turn = shortest(exit_pose, entry, False) if 'u_turn' in self.cfg.allowed_turns else None
-            if turn is None and k:
+            turn = shortest(exit_pose, entry, False) if 'u_turn' in self.cfg.allowed_turns and not half else None
+            if turn is None and k and half:
+                turn = plan_turn(exit_pose, entry, r, self.step, fits, None, ('pivot',), self.turn_body, least, False)
+            elif turn is None and k:
                 turn = plan_turn(exit_pose, entry, r, self.step, fits, self.detour_path, types,
                                  self.turn_body, least, False, not self.cfg.turn_radius_auto,
                                  self.cfg.turn_radius_auto)
@@ -993,7 +1013,7 @@ class _Route:
                 self.pos, self.heading = (exit_pose.x, exit_pose.y), h
                 self.lanes[-1] = (self.lanes[-1][0], (exit_pose.x, exit_pose.y))
             return turn, entry
-        turn = shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns else None
+        turn = shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns and not half else None
         return None if turn is None else (turn, a)
 
     def blade(self, *runs: Sequence[Pose2D], whole: bool = False):

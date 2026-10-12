@@ -145,10 +145,10 @@ class PlannerConfig:
     # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way.
     # The body fits turning like everywhere
     turn_on_spot: bool = False
-    # the planner picks every turn's radius, turn_radius the least: between lanes no turn tighter than it (off: where
-    # none of it fits, a half circle as wide as the lanes are apart before turning on the spot), the lanes ending
-    # earlier for one where that leaves nothing unmowed, and a wider one where the lanes are further apart or there's
-    # room (WIDER_TURNS of turn_radius, the widest that fits)
+    # the planner picks every turn's radius, turn_radius the least: a wider one where the lanes are further apart or
+    # there's room (WIDER_TURNS of turn_radius, the widest that fits), the lanes ending earlier for a turn of it where
+    # that leaves nothing unmowed, and one tighter than it (a half circle as wide as the lanes are apart) only where
+    # that doesn't fit either, before turning on the spot (off: that half circle before the lanes end earlier)
     turn_radius_auto: bool = False
     # zones with a lane direction of their own: where the obstacles cut the lanes into groups, a group mowed another way
     # where that takes a lot fewer lanes (see lanes.zone_angles), each zone after the rest, the nearest next. Not with
