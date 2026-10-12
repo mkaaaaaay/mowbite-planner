@@ -39,7 +39,8 @@ from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftove
                       _turn_at, _unmowed)
 from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, LOOP_GAIN,
                      LOOP_LEFT, MAX_BLADE_OFFSET, MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES, SWEPT_PIECE,
-                     TRANSIT, TURN, XY, CoveragePlan, Lane, PlannerConfig, PlanningError, SegmentInfo, _keep)
+                     TRANSIT, TURN, TURN_REACH, XY, CoveragePlan, Lane, PlannerConfig, PlanningError, SegmentInfo,
+                     _keep)
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells, zone_angles
@@ -459,6 +460,10 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                                                                              **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
     route.loop_counts = (count, islands) if islands != count else None
+    if cfg.lane_overlap_limit and passes and not lane_region.is_empty:
+        # as far out as the lanes reach (_Route.in_reach)
+        route.reach = lane_region.buffer(TURN_REACH, QUAD_SEGS)
+        route._reach = prep(route.reach)
     route.cell_of = {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
                      for ci, cell in enumerate(cells) for lane in cell}
     # headland_turns: the lanes' field, where they lie but for what the loops mow and 2 turn_radius at their ends (where

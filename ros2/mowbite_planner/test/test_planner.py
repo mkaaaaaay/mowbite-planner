@@ -1063,6 +1063,56 @@ def test_body_in_the_garden():
         assert report['left_m2'] < 2.0
 
 
+def test_lane_overlap_limit():
+    """lane_overlap_limit: the turns between the lanes go no further out than the lanes reach, on the spot where no
+    rounded one fits in there, nothing more left unmowed for it. Without it they take the headland's room. Where the
+    rounded ones keep within the lanes' reach anyway (the body checked, the lanes reaching two loops out), the path
+    stays as it is. Without the body checked the lanes start blade_ahead further out for the blade's first cut: with
+    the limit that much later where the loops mowed, the mower a good deal further off the edge on the lanes."""
+    area = rect(0, 0, 10, 6)
+    edge = Polygon(area).boundary
+
+    def planned(body=NX60I, **more):
+        cfg = PlannerConfig(**dict(MOWER, **body, angle=0.0, perimeter_passes=3, **more))
+        plan = plan_coverage(area, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+        check_invariants(plan, cfg)
+
+        def past(p):  # how far past where the lanes lie
+            return plan.lane_region.distance(Point(p.x, p.y))
+
+        # of every turn, of every lane's start, and how close to the edge the lanes and turns get
+        return (plan, [max(past(p) for p in plan.poses[s.start:s.end + 1]) for s in plan.segments if s.kind == TURN],
+                [past(plan.poses[s.start]) for s in plan.segments if s.kind == LANE],
+                min(edge.distance(Point(p.x, p.y)) for s in plan.segments if s.kind in (LANE, TURN)
+                    for p in plan.poses[s.start:s.end + 1]))
+
+    reach = config.TURN_REACH + 1e-6
+    free, turns, _, _ = planned(lane_overlap_passes=1)
+    assert free.stats['turns_u_turn'] == len(turns) > 30 and min(turns) > reach
+    kept, turns, _, _ = planned(lane_overlap_passes=1, lane_overlap_limit=True)
+    assert len(turns) > 30 and max(turns) <= reach
+    assert kept.stats['turns_pivot'] >= len(turns) - 1 and kept.stats['turns_fallback'] == 0
+    assert check_plan(kept)['left_m2'] <= check_plan(free)['left_m2'] + 1e-3
+    free, _, _, _ = planned(lane_overlap_passes=2)
+    kept, turns, _, _ = planned(lane_overlap_passes=2, lane_overlap_limit=True)
+    assert max(turns) <= reach and kept.stats['turns_u_turn'] == len(turns)
+    assert [(p.x, p.y, p.yaw) for p in kept.poses] == [(p.x, p.y, p.yaw) for p in free.poses]
+
+    free, turns, starts, close = planned({}, lane_overlap_passes=2)
+    assert min(turns) > reach and close < 0.05
+    kept, turns, starts, closer = planned({}, lane_overlap_passes=2, lane_overlap_limit=True)
+    assert len(turns) > 30 and max(turns) <= reach and max(starts) <= reach and closer > close + 0.08
+    assert kept.stats['turns_u_turn'] > 2 * kept.stats['turns_pivot'] > 0 and kept.stats['turns_fallback'] == 0
+    assert check_plan(kept)['left_m2'] <= check_plan(free)['left_m2'] + 1e-3
+    # (one loop out the loops haven't mowed every lane's start: those start where they did, the mower still further in)
+    _, _, starts, close = planned({}, lane_overlap_passes=1)
+    kept, _, later, closer = planned({}, lane_overlap_passes=1, lane_overlap_limit=True)
+    assert sum(d > reach for d in later) < sum(d > reach for d in starts) / 2 and closer > close + 0.05
+    assert check_plan(kept)['left_m2'] <= 0.01
+    with pytest.raises(PlanningError, match='lane_overlap_limit'):
+        PlannerConfig(lane_overlap_limit=1).validate()
+
+
 def test_loop_further_in_round_a_bend(monkeypatch):
     """Round a bend of the edge the body's front swings out on the first loop: that stretch runs a little further in
     (_Route.loops_in) and the blade still mows along the edge, where the loop was left out all along the bend."""

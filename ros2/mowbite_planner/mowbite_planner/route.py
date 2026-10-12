@@ -9,7 +9,8 @@ from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
 from .config import (EARLIER_LEFT, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRIES, ORDER_BUDGET, PERIMETER, ROUND_STEP,
-                     SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, XY, Lane, PathSegment, PlannerConfig)
+                     SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, Lane, PathSegment,
+                     PlannerConfig)
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
@@ -148,6 +149,8 @@ class _Route:
         # headland_turns: the lanes' field (and prepared), the transit space but the field, the lanes' direction and the
         # lines they lie on (lane frame y) of every set, the field's pieces on those (see rows())
         self.field = self._field = self.headland = None
+        # lane_overlap_limit: where the lanes lie (and prepared), see in_reach
+        self.reach = self._reach = None
         self.loop_counts: Optional[Tuple[int, int]] = None  # (obstacle_passes: see left_out)
         self.loop_side: Dict[str, float] = {}  # loop -> 1 driven with the mowable side on its left, -1 on its right
         self.angle = 0.0
@@ -298,17 +301,32 @@ class _Route:
         """The shortest way a detour between lanes takes, with headland_turns through the headland."""
         return (self.headland or self.transit).path(a, b)
 
-    def turn_space(self, a: XY) -> Fits:
+    def turn_space(self, a: XY, reach: bool = True) -> Fits:
         """What a turn from where the mower is into a lane starting at a keeps in: the mowing area, with headland_turns
-        out of the lanes' field too where the lanes are more than 4 turn_radius apart (a long U-turn)."""
+        out of the lanes' field too where the lanes are more than 4 turn_radius apart (a long U-turn), with
+        lane_overlap_limit within the lanes' reach (in_reach, reach False: not that)."""
         (x, y), h = self.pos, self.heading
-        if self.field is None or abs((a[1] - y) * math.cos(h) - (a[0] - x) * math.sin(h)) <= 4.0 * self.cfg.turn_radius:
+        ux, uy = math.cos(h), math.sin(h)
+        near = self.field is None or abs((a[1] - y) * ux - (a[0] - x) * uy) <= 4.0 * self.cfg.turn_radius
+        reach = reach and self._reach is not None
+        if near and not reach:
             return self.area.is_free
+        # the way turning on the spot takes: straight on level with the lane that ends further out, across there
+        on = (a[0] - x) * ux + (a[1] - y) * uy
+        spot = [self.pos, (x + on * ux, y + on * uy) if on >= 0.0 else (a[0] - on * ux, a[1] - on * uy), a]
 
         def fits(pts: Sequence[XY]) -> bool:
-            return self.area.is_free(pts) and self.clear(pts)
+            return self.area.is_free(pts) and (near or self.clear(pts)) and (not reach or self.in_reach(pts, spot))
 
         return fits
+
+    def in_reach(self, pts: Sequence[XY], spot: Sequence[XY]) -> bool:
+        """lane_overlap_limit: whether pts (of a turn between two lanes) keep where the lanes lie or on the way turning
+        on the spot takes (spot), give or take TURN_REACH. Always without."""
+        if self._reach is None or self._reach.covers(LineString(pts) if len(pts) > 1 else Point(pts[0])):
+            return True
+        way = LineString(spot) if len(spot) > 1 else Point(spot[0])
+        return all(self._reach.covers(Point(p)) or way.distance(Point(p)) <= TURN_REACH for p in pts)
 
     def clear(self, pts: Sequence[XY]) -> bool:
         """Whether pts keep out of the lanes' field (on its edge at most), always without headland_turns."""
@@ -903,8 +921,9 @@ class _Route:
         if not self.started or self.heading is None or angle_diff(yaw, self.heading + math.pi) > 1e-3 or \
                 math.hypot(a[0] - self.pos[0], a[1] - self.pos[1]) > 4.0 * self.cfg.turn_radius:
             return None
+        space = self.turn_space(a)
         turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
-                         self.step, self.area.is_free, self.detour_path,
+                         self.step, space, self.detour_path,
                          self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0,
                          tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
         rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
@@ -914,9 +933,14 @@ class _Route:
                 turn, a = earlier
                 self._count('lanes_earlier')
         if (turn is None or turn.name == 'pivot') and 'pivot' in self.cfg.allowed_turns:
-            half = self.half_circle(Pose2D(self.pos[0], self.pos[1], self.heading), a, yaw, rest, self.area.is_free)
+            half = self.half_circle(Pose2D(self.pos[0], self.pos[1], self.heading), a, yaw, rest, space)
             if half is not None:
                 turn, a = half
+        if turn is None and self._reach is not None:
+            turn = plan_turn(Pose2D(self.pos[0], self.pos[1], self.heading), a, self.cfg.turn_radius,
+                             self.step, self.turn_space(a, False), self.detour_path,
+                             self.cfg.allowed_turns, self.turn_body, self.cfg.min_turn_radius if self.rounds else 0.0,
+                             tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
         if turn is None:
             return None
         for piece in turn.pieces:
@@ -991,6 +1015,8 @@ class _Route:
                     continue
                 a, b = ends
                 head = head if lane.bends else b  # (where the body lets it end)
+            if self._reach is not None:
+                a = self.start_in_reach(a, head, yaw)
             name = f'lane-{len(self.lanes)}'
             self.source = name
             self.origins[name] = {'parent': self.cell_of.get(id(lane), ''),
@@ -1004,9 +1030,9 @@ class _Route:
             else:
                 exit_pose = Pose2D(self.pos[0], self.pos[1], self.heading)
 
-                def turn_to(entry: XY, types) -> Optional[Maneuver]:
+                def turn_to(entry: XY, types, reach: bool = True) -> Optional[Maneuver]:
                     return plan_turn(exit_pose, entry, self.cfg.turn_radius, self.step,
-                                     self.turn_space(entry), self.detour_path, types, self.turn_body,
+                                     self.turn_space(entry, reach), self.detour_path, types, self.turn_body,
                                      self.cfg.min_turn_radius if self.rounds else 0.0,
                                      tight=not self.cfg.turn_radius_auto, wider=self.cfg.turn_radius_auto)
 
@@ -1018,28 +1044,36 @@ class _Route:
                 rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
                 # (not by more than a turn reaches: what it leaves of the lane would stay unmowed)
                 most = min(rest, self.footprint.reach + self.cfg.turn_radius) if self.footprint is not None else 0.0
-                turn, types = None, self.cfg.allowed_turns
-                if self.footprint is not None and 1e-6 < level < most:
-                    gentle = tuple(t for t in self.cfg.allowed_turns if t not in ('detour', 'pivot'))
-                    turn = turn_to(a, gentle)
+
+                def find(a: XY, reach: bool) -> Tuple[Optional[Maneuver], XY]:
+                    turn, types = None, self.cfg.allowed_turns
+                    if self.footprint is not None and 1e-6 < level < most:
+                        gentle = tuple(t for t in self.cfg.allowed_turns if t not in ('detour', 'pivot'))
+                        turn = turn_to(a, gentle, reach)
+                        if turn is None:
+                            types = tuple(t for t in types if t not in gentle)  # (those don't fit at a)
+                            start = (a[0] + level * ux, a[1] + level * uy)
+                            turn = turn_to(start, gentle, reach)
+                            if turn is not None:
+                                a = start
+                                self._count('lanes_body')
                     if turn is None:
-                        types = tuple(t for t in types if t not in gentle)  # (those don't fit at a)
-                        start = (a[0] + level * ux, a[1] + level * uy)
-                        turn = turn_to(start, gentle)
-                        if turn is not None:
-                            a = start
-                            self._count('lanes_body')
-                if turn is None:
-                    turn = turn_to(a, types)
-                if (turn is None or turn.name == 'pivot') and self.rounds:
-                    earlier = self.round_earlier(a, yaw, rest)
-                    if earlier is not None:
-                        turn, a = earlier
-                        self._count('lanes_earlier')
-                if (turn is None or turn.name == 'pivot') and 'pivot' in types:
-                    half = self.half_circle(exit_pose, a, yaw, rest, self.turn_space(a))
-                    if half is not None:
-                        turn, a = half
+                        turn = turn_to(a, types, reach)
+                    if (turn is None or turn.name == 'pivot') and self.rounds:
+                        earlier = self.round_earlier(a, yaw, rest, reach=reach)
+                        if earlier is not None:
+                            turn, a = earlier
+                            self._count('lanes_earlier')
+                    if (turn is None or turn.name == 'pivot') and 'pivot' in types:
+                        half = self.half_circle(exit_pose, a, yaw, rest, self.turn_space(a, reach), reach)
+                        if half is not None:
+                            turn, a = half
+                    return turn, a
+
+                turn, a = find(a, True)
+                if turn is None and self._reach is not None:
+                    # (none within the lanes' reach, on the spot neither: one that takes its room, before a drive)
+                    turn, a = find(a, False)
                 if turn is not None:
                     for piece in turn.pieces:
                         self.add(TURN, piece.poses, turn.name)
@@ -1060,29 +1094,58 @@ class _Route:
             driven += 1
         return None
 
+    def start_in_reach(self, a: XY, head: XY, yaw: float) -> XY:
+        """lane_overlap_limit: where the lane from a (facing yaw, straight to head) starts for the centre to keep where
+        the lanes lie. It starts blade_ahead further out for the blade's first cut: that much later (TURN_REACH less
+        where that leaves something), where what the lane then leaves is mowed already (the loops, but EARLIER_LEFT).
+        a where it isn't, or where a is in the lanes' reach as it is."""
+        back = self.cfg.blade_ahead
+        if back <= TURN_REACH or self._reach.covers(Point(a)):
+            return a
+        ux, uy = math.cos(yaw), math.sin(yaw)
+        rest = math.hypot(head[0] - a[0], head[1] - a[1]) - self.cfg.min_lane_length
+        end = Pose2D(head[0], head[1], yaw)
+        mowed = None
+        for later in (back, back - TURN_REACH):
+            at = Pose2D(a[0] + later * ux, a[1] + later * uy, yaw)
+            if later > rest or not self._reach.covers(Point(at.x, at.y)):
+                continue
+            left = subtract(self.blade([Pose2D(a[0], a[1], yaw), at]), [self.blade([at, end])])
+            if left.area > EARLIER_LEFT:
+                if mowed is None:
+                    mowed = self.mowed([(a[0], a[1], a[0] + back * ux, a[1] + back * uy)], self.segments)
+                if subtract(left, [mowed]).area > EARLIER_LEFT:
+                    continue
+            self._count('lanes_later')
+            return (at.x, at.y)
+        return a
+
     def half_circle(self, exit_pose: Pose2D, a: XY, yaw: float, rest: float,
-                    fits: Fits) -> Optional[Tuple[Maneuver, XY]]:
+                    fits: Fits, reach: bool = True) -> Optional[Tuple[Maneuver, XY]]:
         """turn_radius_auto, where no turn of turn_radius gets from exit_pose into the next lane (from a, facing yaw,
         rest m of it to spare), the lanes ending earlier for one neither: only now the half circle tighter than
         turn_radius, as wide as the lanes are apart, there or with the lanes ending earlier (round_earlier), before
-        turning on the spot. The turn and where the lane starts then, None where none fits."""
+        turning on the spot. The turn and where the lane starts then, None where none fits. reach: as for turn_space
+        (fits is of the same)."""
         if not self.cfg.turn_radius_auto:
             return None  # (plan_turn and round_earlier tried it)
         half = plan_turn(exit_pose, a, self.cfg.turn_radius, self.step, fits, None, ('pivot',), self.turn_body,
                          self.cfg.min_turn_radius if self.rounds else 0.0, False)
-        found = (half, a) if half is not None else self.round_earlier(a, yaw, rest, True) if self.rounds else None
+        found = (half, a) if half is not None else self.round_earlier(a, yaw, rest, True, reach) if self.rounds \
+            else None
         if found is not None:
             self._count('turns_tight')
         return found
 
-    def round_earlier(self, a: XY, yaw: float, rest: float, half: bool = False) -> Optional[Tuple[Maneuver, XY]]:
+    def round_earlier(self, a: XY, yaw: float, rest: float, half: bool = False,
+                      reach: bool = True) -> Optional[Tuple[Maneuver, XY]]:
         """In place of turning on the spot (or a drive) from the lane just mowed into the next (from a, facing yaw, rest
         m of it to spare): a rounded turn level with the end of the shorter of the two, the longer one ending (or
         starting) earlier, then both, ROUND_STEP at a time up to turn_radius more: a U-turn (at a slant where they end
         at one), a bulb, a detour between lanes far apart. The first that fits, where the turn or what's mowed already
         (the loops next to them) mows what they leave (but EARLIER_LEFT): the lane just mowed is shortened then. Else a
         loop into the next lane (Dubins' shortest way that fits). None where none fits. half: only the half circle
-        tighter than turn_radius (see half_circle, the rest is tried by then)."""
+        tighter than turn_radius (see half_circle, the rest is tried by then). reach: as for turn_space."""
         last = self.segments[-1] if self.segments else None
         if last is None or last.kind != LANE or last.maneuver or len(last.poses) < 2:
             return None
@@ -1098,7 +1161,7 @@ class _Route:
         types = tuple(t for t in self.cfg.allowed_turns if t != 'pivot' and (far or t != 'detour')) + ('pivot',)
         most_e = min(max(0.0, -dx) + r, length - self.cfg.min_lane_length)
         most_n = min(max(0.0, dx) + r, rest)
-        fits = self.turn_space(a)
+        fits = self.turn_space(a, reach)
 
         def shortest(exit_pose: Pose2D, entry: XY, loops: bool) -> Optional[Maneuver]:
             # Dubins' shortest way that fits, the widest first
@@ -1364,7 +1427,8 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
         clear = route.clear([(p.x, p.y)])  # (headland_turns: out of the lanes' field the loop stays out of it)
 
         def fits(pts: Sequence[XY]) -> bool:
-            return space(pts) and (not clear or route.clear(pts))
+            return space(pts) and (not clear or route.clear(pts)) and \
+                (route.segments[i].kind != TURN or route.in_reach(pts, [(p.x, p.y)]))
 
         at = Pose2D(p.x, p.y, before.yaw)
         body = route.turn_body if route.segments[i].kind == TURN else route.body  # (on a turn spin_margin too)

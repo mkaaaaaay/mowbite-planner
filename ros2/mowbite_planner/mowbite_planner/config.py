@@ -76,6 +76,8 @@ LOOP_IN = (0.02, 0.1)
 LOOP_EASE = (0.5, 1.0, 2.0)
 LOOP_JOIN = 3
 LOOP_TRIES = 300
+# m, lane_overlap_limit: how much further out than the lanes reach a turn between them may get (a sampled arc)
+TURN_REACH = 0.02
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
@@ -198,6 +200,12 @@ class PlannerConfig:
     transit_edge_cost: float = 2.0
     # lanes reach this many perimeter loops further out (OpenMower's outline_overlap_count)
     lane_overlap_passes: int = 0
+    # the mower gets no further out on the lanes than they reach. The turns between them stay in there, or where
+    # turning on the spot would take it (_Route.in_reach): a rounded one where it fits, with the lanes ending earlier
+    # where the loops mowed, else on the spot; one that takes its room only where neither fits. And a lane starts
+    # blade_ahead later where the loops mowed that (_Route.start_in_reach). Off: the turns take the room there is in
+    # the headland
+    lane_overlap_limit: bool = False
     # leave parts out (OpenMower's skip_area_outline, skip_obstacle_outlines, skip_fill), the rest is
     # planned as if they were there
     skip_outline_loops: bool = False
@@ -453,7 +461,7 @@ class PlannerConfig:
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
         for name in ('turn_radius_auto', 'split_zones', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
-                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up'):
+                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up', 'lane_overlap_limit'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 

@@ -122,6 +122,9 @@ PARAMETERS = {
                             lambda v: v in PERIMETER_DIRECTIONS, 'must be auto, ccw or cw'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),
+    'lane_overlap_limit': (False, 'the mower gets no further out on the lanes than they reach: the turns between '
+                           'them on the spot where no rounded one fits in there, a lane starting later where the '
+                           'loops mowed', None, ''),
     'fill_pattern': ('lanes', 'inside the loops: lanes, crosshatch (lanes, then lanes across them) or '
                      'concentric (loops further and further in)', lambda v: v in FILL_PATTERNS,
                      'must be lanes, crosshatch or concentric'),

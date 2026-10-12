@@ -82,6 +82,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `perimeter_order` | `first` | loops `first` or `last` |
 | `perimeter_direction` | `auto` | `ccw`, `cw` or `auto` (the way the mower faces) |
 | `lane_overlap_passes` | 0 | lanes reach this many loops further out (OpenMower's `outline_overlap_count`) |
+| `lane_overlap_limit` | false | on the lanes and their turns the mower gets no further out than the lanes reach |
 | `fill_pattern` | `lanes` | `lanes`, `crosshatch` or `concentric` |
 | `crosshatch_angle_deg` | 90.0 | angle of crosshatch's second lanes |
 | `angle_strategy` | `longest_edge` | `longest_edge`, `min_width`, `optimal` (fewest lanes) or `fixed` |
