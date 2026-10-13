@@ -165,7 +165,7 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         yield straight(a, b)
         # (round: no turning on the spot, the body needs no room round where it would. Tries of their own, the ways
         # after them get as many as before; with headland_turns not into the lanes' field)
-        for share in FIT_ARCS:
+        for share in FIT_ARCS if route.cfg.turn_radius > 0.0 else ():
             for m in dubins(a, b, share * route.cfg.turn_radius, step, turning=math.pi)[:FIT_DUBINS]:
                 way = m.pieces[0].poses
                 if route.field is None or route.clear([(q.x, q.y) for q in way]):
@@ -221,7 +221,9 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         k, pts = int(math.ceil(ahead / step)), []
         for i in range(k - last if last else 0, k):
             t = ahead * i / k
-            o = math.copysign(min(abs(off), FIT_EASE_OFF * math.expm1(min(30.0, t / (FIT_EASE * end)))), off)
+            # (a body that doesn't reach out that way: beside the line at once)
+            ease_in = min(30.0, t / (FIT_EASE * end)) if end > 0.0 else 30.0 if t > 0.0 else 0.0
+            o = math.copysign(min(abs(off), FIT_EASE_OFF * math.expm1(ease_in)), off)
             pts.append((p.x + t * c - o * s, p.y + t * s + o * c))
         return pts + [(x, y)]
 
@@ -921,7 +923,8 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
                 y = q.y - cfg.blade_ahead * s - cfg.blade_offset * c
                 d = 0.5 * MOP_PASS
                 a, b = (x - d * c, y - d * s), (x + d * c, y + d * s)
-                if not route.transit.is_free([a, b]):
+                # (in the mowing area: the transit space has the drivable areas too)
+                if not (route.transit.is_free([a, b]) and route.area.is_free([a, b])):
                     continue
                 way = sample_straight(a[0], a[1], b[0], b[1], h, route.step)
                 if not fp.poses_fit(way):
@@ -998,8 +1001,8 @@ def _leftover_passes(route: '_Route', piece) -> List[Tuple[float, List[List[Pose
         # the pass from p to q where the mower may go, can turn round at both ends (it gets there and away forwards)
         # and the body fits along it
         p, q = (float(p[0]), float(p[1])), (float(q[0]), float(q[1]))
-        if not route.transit.is_free([p, q]) or not fp.fits_turn(p[0], p[1], h + math.pi, h) or \
-                not fp.fits_turn(q[0], q[1], h, h + math.pi):
+        if not (route.transit.is_free([p, q]) and route.area.is_free([p, q])) or \
+                not fp.fits_turn(p[0], p[1], h + math.pi, h) or not fp.fits_turn(q[0], q[1], h, h + math.pi):
             return None
         way = sample_straight(p[0], p[1], q[0], q[1], h, route.step)
         return way if fp.poses_fit(way) else None

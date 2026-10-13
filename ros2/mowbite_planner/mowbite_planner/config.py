@@ -60,6 +60,8 @@ LEFT_PIECE = 0.05
 LEFT_TOTAL = 0.1
 # m, a blade further off the mower's centre is a mistake
 MAX_BLADE_OFFSET = 1.0
+# m, the body reaches this far from base_link at most (a size in mm is caught, not checked on a grid of that size)
+MAX_BODY = 5.0
 # m, where the only turn between two lanes is on the spot (or a drive), they end this much earlier at a time for a
 # rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow
 ROUND_STEP = 0.05
@@ -417,19 +419,21 @@ class PlannerConfig:
             finite('perimeter_offset')
         for name in ('robot_width', 'robot_front', 'robot_rear'):
             if getattr(self, name) is not None:
-                finite(name, 0.0)
+                finite(name, 0.0, 2.0 * MAX_BODY if name == 'robot_width' else MAX_BODY)
         if self.robot_outline is not None:
             try:
                 pts = [(float(x), float(y)) for x, y in self.robot_outline
                        if not isinstance(x, (bool, str)) and not isinstance(y, (bool, str))]
-                ok = len(pts) == len(self.robot_outline) >= 3 and all(math.isfinite(c) for p in pts for c in p)
+                ok = len(pts) == len(self.robot_outline) >= 3 and all(abs(c) <= MAX_BODY for p in pts for c in p)
             except (TypeError, ValueError, OverflowError):
                 ok = False
             shape = Polygon(pts) if ok else None
             if shape is None or not shape.is_valid or shape.area <= 0.0 or not shape.covers(Point(0.0, 0.0)):
                 raise PlanningError('robot_outline must be [[x, y], ...] (m, x ahead of base_link, y to the left), 3 '
-                                    f'points at least round base_link, the outline not crossing itself, got '
-                                    f'{self.robot_outline!r}')
+                                    f'points at least round base_link, none further than {MAX_BODY} m from it, the '
+                                    f'outline not crossing itself, got {self.robot_outline!r}')
+        if self.body and not self.waypoint_spacing > 0.0:
+            raise PlanningError('waypoint_spacing must be > 0 with the body checked (robot_width, ...)')
         finite('body_tolerance', 0.0, MAX_BLADE_OFFSET)
         finite('edge_margin', 0.0, MAX_BLADE_OFFSET)
         finite('obstacle_margin', 0.0, MAX_BLADE_OFFSET)

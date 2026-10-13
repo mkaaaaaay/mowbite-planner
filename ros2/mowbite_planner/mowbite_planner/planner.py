@@ -314,6 +314,9 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             blobs = holes_in.buffer(first + k * loop_spacing, QUAD_SEGS)
             strips = [Polygon(strip.exterior) for a in polygons(inside)
                       for strip in polygons(blobs.difference(before).intersection(a)) if strip.area >= half * half]
+            if not k:
+                # (no loop before the first one: by the edge there's none to go back along, the island gets none)
+                strips = [s for s in strips if robot_space.buffer(1e-6).covers(s.exterior)]
             drive_levels[k] = polygonal(inside.buffer(1.0, QUAD_SEGS).difference(union(strips)))
             before = blobs
     perimeter_levels = drive_levels[:most]
@@ -328,7 +331,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             half_in = half_in.difference(inner.buffer(step, QUAD_SEGS))
         return polygonal(union(p for p in polygons(half_in) if p.area >= half * half))
 
-    middles = [middle(levels[k], inner, loop_spacing) for k, inner in enumerate(levels[1:] + [Polygon()])] \
+    middles = [middle(outer, inner, loop_spacing) for outer, inner in zip(levels, levels[1:] + [Polygon()])] \
         if concentric else []
 
     # 2. what's left after the loops (kept for checks and plots, the lanes use the same edge directly)
@@ -368,8 +371,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                 if level.is_empty:
                     break
                 levels.append(level)
-            middles = [middle(levels[k], union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
-                       for k, inner in enumerate(levels[1:] + [Polygon()])]
+            middles = [middle(outer, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing)
+                       for k, (outer, inner) in enumerate(zip(levels, levels[1:] + [Polygon()]))]
             lane_region, narrow, ringed = wide, Polygon(), True
     drive_levels += levels[len(drive_levels):]
     took('remaining')

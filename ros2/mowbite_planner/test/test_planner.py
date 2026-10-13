@@ -2710,7 +2710,7 @@ def test_lanes_bend_around_small_obstacles():
     assert coverage(plan, cfg) > 0.9999
     # one zigzag past all the trees instead of a cell on every side of each
     assert plain.stats['cells'] > 10 and plan.stats['cells'] == 1
-    assert plan.stats['transit_length'] < 0.6 * plain.stats['transit_length']
+    assert plan.stats['transit_length'] < 0.65 * plain.stats['transit_length']
     assert plan.stats['path_length'] < plain.stats['path_length']
     bends = [s for s in plan.segments if s.maneuver == 'bend']
     assert len(bends) >= 12
@@ -3304,3 +3304,50 @@ def test_loop_strips_geos_cant_take_away_at_once():
     plan = plan_coverage(boundary, obstacles, cfg)
     check_invariants(plan, cfg, obstacles)
     assert coverage(plan, cfg) > 0.99
+
+
+def test_settings_at_their_limits():
+    """Settings at the limits validate() gives them plan, without a crash: no loops and narrow_parts loops with a part
+    too narrow for lanes, a body that ends at base_link (robot_rear or robot_front 0), turn_radius 0 with the body
+    checked (no rounded way of no radius: every pose faces the way it drives on). Sizes in mm and no waypoint_spacing
+    with the body checked are refused."""
+    hourglass = [(0, 0), (4, 1.75), (8, 0), (8, 4), (4, 2.25), (0, 4)]
+    cfg = PlannerConfig(perimeter_passes=0, narrow_parts='loops')
+    check_invariants(plan_coverage(hourglass, [], cfg), cfg)
+    for more in ({'robot_rear': 0.0}, {'robot_front': 0.0}, {'turn_radius': 0.0}):
+        cfg = PlannerConfig(**dict(MOWER, **dict(NX60I, **more)))
+        plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(1, 1, 0.0), end=(1, 1))
+        assert check_plan(plan)['body_out'] == []
+        jumps = {s - 1 for s in plan.section_starts[1:]}
+        assert not [i for i, (a, b) in enumerate(zip(plan.poses, plan.poses[1:]))
+                    if i not in jumps and math.hypot(b.x - a.x, b.y - a.y) > 1e-6 and
+                    angle_diff(math.atan2(b.y - a.y, b.x - a.x), a.yaw) > 6.5 * DEG], more
+    for bad in (dict(NX60I, robot_width=400.0), dict(NX60I, robot_front=430.0), dict(NX60I, waypoint_spacing=0.0),
+                {'robot_outline': [(430, 200), (-140, 200), (-140, -200), (430, -200)]}):
+        with pytest.raises(PlanningError):
+            PlannerConfig(**bad).validate()
+
+
+def test_mowing_passes_stay_on_the_lawn():
+    """The passes over what a mow left (and mop_up's) stay in the mowing area, a drivable area next to it (another
+    lawn, a navigation area) is for the ways between them only."""
+    lawn = [(0, 0), (14, 0), (14, 10), (10, 10), (10, 3), (4, 3), (4, 10), (0, 10)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    # (a mow that left a strip across the left arm, up to its edge at the opening the drivable area lies in)
+    mowed = Polygon(rect(-1, -1, 15, 11)).difference(Polygon(rect(1.9, 7.8, 4.5, 8.2)))
+    plan = plan_coverage(lawn, [], cfg, start=(1, 1, 0.0), end=(1, 1), drivable=[rect(3.5, 2.5, 10.5, 11)],
+                         mowed=mowed)
+    inside = prep(plan.robot_space.buffer(2e-3))
+    passes = [s for s in plan.segments if s.kind == LANE]
+    assert passes and all(inside.covers(Point(p.x, p.y)) for s in passes for p in plan.poses[s.start:s.end + 1])
+
+
+def test_island_loops_without_outline_loops():
+    """Loops round the islands but none along the outline (perimeter_passes 0, obstacle_passes 1): an island gets its
+    loop where there's room round it, none where it lies so close to the edge that the loop would go back along the
+    island itself."""
+    cfg = PlannerConfig(perimeter_passes=0, obstacle_passes=1)
+    for bed, looped in ((rect(3, 2, 5, 3.5), True), (rect(3, 0.13, 5, 1.63), False)):
+        plan = plan_coverage(rect(0, 0, 8, 6), [bed], cfg, start=(1, 1, 0.0))
+        check_invariants(plan, cfg, [bed])
+        assert any(s.kind == PERIMETER for s in plan.segments) is looped

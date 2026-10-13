@@ -36,7 +36,7 @@ def drive_time(poses: Sequence[Pose2D], speeds: Optional[Mapping[str, float]] = 
     elsewhere, turning on the spot where the heading jumps (speeds: FTC_SPEEDS' names, those missing from there).
     {'s', 'fast_m', 'slow_m', 'spin_s'}."""
     v = dict(FTC_SPEEDS, **{k: float(x) for k, x in (speeds or {}).items() if k in FTC_SPEEDS})
-    fast, slow = v['speed_fast'], max(1e-3, v['speed_slow'])
+    fast, slow = max(1e-3, v['speed_fast']), max(1e-3, v['speed_slow'])
     ahead, bend = v['speed_fast_threshold'], math.radians(v['speed_fast_threshold_angle'])
     omega, acc = max(1e-3, math.radians(v['speed_angular'])), max(1e-3, v['acceleration'])
     run = [0.0]
