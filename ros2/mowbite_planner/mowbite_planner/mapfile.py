@@ -245,7 +245,9 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
         if len(boundary) < 3:
             raise ValueError('the outline has fewer than 3 points')
         overrides = area_settings(area)
-        PlannerConfig().with_overrides(overrides).validate()
+        # (but lane_spacing_min and lane_spacing_max: they go by the blade's width, checked with the plan's settings)
+        PlannerConfig().with_overrides({n: v for n, v in overrides.items()
+                                        if n not in ('lane_spacing_min', 'lane_spacing_max')}).validate()
         own = area_settings(area, openmower=False)
     except ValueError as e:  # PlanningError too
         raise PlanningError(f'area {area.get("id")!r}: {e}') from None

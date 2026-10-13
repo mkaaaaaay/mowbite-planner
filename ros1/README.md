@@ -61,9 +61,10 @@ Set them in the MowBite app or over OpenMower's JSON-RPC (MQTT `rpc/request`), n
 `/home/openmower/ros/mowbite_planner_settings.json` and used from the next plan on. An interrupted area whose plan
 changes starts again.
 
-Lane spacing, loops, `perimeter_offset` and `lane_overlap_passes` come from OpenMower's parameters (`tool_width`,
-`outline_count`, ...) until you set them here. An area's own values in the map beat both. The blade width is
-`mower_width` (or `OM_BLADE_WIDTH`).
+Loops, `perimeter_offset` and `lane_overlap_passes` come from OpenMower's parameters (`outline_count`, ...) until you
+set them here. An area's own values in the map beat both. The lane spacing the planner picks itself from the blade
+width, `mower_width` (or `OM_BLADE_WIDTH`). With `lane_spacing_mode: fixed` it's OpenMower's `tool_width` until you
+set `overlap`.
 
 | Method | What it does |
 | --- | --- |
@@ -105,4 +106,5 @@ preview and the next mow find their plan at once. The full list of settings is i
 python3 -m pytest ros1/mowbite_planner_ros1/test   # rospy and the messages are stood in for, shapely is enough
 ```
 
-They run on Python 3.8 with shapely 1.7 (the ROS Noetic image) and on newer versions.
+They run on Python 3.8 with shapely 2.0.7 (what the planner's image has) and on newer versions. ROS Noetic's own
+shapely 1.7 isn't enough any more: it plans, but worse, and 8 of the tests fail.

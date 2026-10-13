@@ -54,7 +54,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         the latest), area_id (default: every active mowing area)} gives {file, areas: {id: {checked,
                         places: [[x, y, m]] where the body at a driven point got m into the margins (more than
                         DRIVE_OFF; not within DOCK_REACH of a docking station), worst}}}. After every finished
-                        mow (JOB_COMPLETE) the same for that job, in the log and as the answer without params
+                        mow (JOB_COMPLETE) the same for that job, in the log and as the answer without params,
+                        once the job ended and its track is all written (see TRACK_WAIT)
   planner.leftovers     what a mow really left (its track with the blade running against the area, the blade's way
                         between two driven points) and the passes over it: {job_id (all of its position_history files:
                         a restart begins a new one) or file (that one), default: the latest file's job, area_id
@@ -82,7 +83,8 @@ planner.plan plans it, so the app's preview and the next mow find their plan at 
 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
-angle_min..angle_max. mower_logic's own mow_angle_increment is best left at 0, both add up.
+angle_min..angle_max. The mows are counted for all areas at once: angle_increment_every is the one set for all, an
+area's own doesn't count. mower_logic's own mow_angle_increment is best left at 0, both add up.
 
 In a container of its own (OM_PLANNER=external in open_mower_ros) the node ends with exit code 1 when the ROS master
 restarts (a new /run_id): the new master doesn't know its service and RPC methods (nor the slic3r planner's), with
@@ -198,6 +200,10 @@ ACTION_TOPIC = '/xbot/action'
 STATE_TOPIC = '/mower_logic/current_state'
 STATUS_TOPIC = '/ll/mower_status'
 READY_POLL = 2.0
+# s a finished mow's track is waited for before it's read: xbot_monitoring writes it every 30 s and the rest when the
+# job ends (mower_logic's next STATE event of another job or none: idle), then TRACK_SETTLE s for that to be on disk
+TRACK_WAIT = 900.0
+TRACK_SETTLE = 2.0
 # of an area: with more left than this, planner.leftovers plans nothing for it (that track wasn't a mow of it)
 LEFT_MOST = 0.5
 TIMING_RANGE = (0.5, 2.0)
@@ -263,6 +269,13 @@ class MowbitePlannerRos1:
         # swapped as a whole, a plan never sees half of a change
         self.current = self.defaults
         stored = self.read_stored()
+        # (one a newer version stored: left out, the rest still counts)
+        unknown = sorted(set(stored) - set(PlannerConfig.names()) - set(NODE_SETTINGS) - set(limits.INTERNAL) -
+                         set(limits.RETIRED))
+        if unknown:
+            rospy.logwarn('MowBite Planner: stored settings not known, left out (%s): %s', self.file,
+                          ', '.join(unknown))
+            stored = {n: v for n, v in stored.items() if n not in unknown}
         if stored:
             try:
                 self.current = self.setup(self.launch_width, self.launch, stored)
@@ -276,11 +289,14 @@ class MowbitePlannerRos1:
         self.set_lock = threading.Lock()
         self.plans = collections.OrderedDict()
         self.plans_lock = threading.Lock()
+        self.planning = {}  # a lock for each plan being planned: asked for again meanwhile, it's waited for
         self.plans_dir = os.path.expanduser(rospy.get_param('~plans_dir', os.path.join(
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
         self.code = code_version()
         self.ahead = None
         self.ahead_lock = threading.Lock()
+        self.ahead_count = 0  # (the latest plan_ahead, one before it ends early)
+        self.ahead_run = threading.Lock()
         # the finished mows counted for angle_increment: steps so far, mows since the last one (next to settings_file)
         self.angle_file = os.path.join(os.path.dirname(self.file), 'mowbite_planner_angle.json') if self.file else ''
         self.angle_lock = threading.Lock()
@@ -299,12 +315,16 @@ class MowbitePlannerRos1:
         # planner.leftovers armed: {'until': when it ends, 'plans': {area id: its leftovers' plan or None}, 'served':
         # mower_logic got one of them}
         self.armed = None
+        # the job of mower_logic's last event ('' none), see track_written
+        self.job = ''
+        self.job_change = threading.Condition()
         if rospy.get_param('~use_map', True):
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
         self.action = rospy.Publisher(ACTION_TOPIC, String, queue_size=1)
         self.classic_name = rospy.get_param('~classic_service', CLASSIC_SERVICE)
         self.classic = None
+        self.classic_lock = threading.Lock()
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
         if rospy.get_param('~rpc', True):
@@ -336,7 +356,7 @@ class MowbitePlannerRos1:
         # OpenMower's FTC controller only drives forwards: lanes far enough apart that every turn is a forward U-turn
         # of turn_radius. ~settings can change that (and anything else)
         base = PlannerConfig(lane_order='skip').with_overrides(settings)
-        base.validate()
+        # (checked with the blade's width: lane_spacing_min and lane_spacing_max go by it)
         blade = base.with_overrides({'mower_width': stored.get('mower_width', width)})
         blade.validate()
         # with angle or angle_strategy in settings the lanes go that way, not mower_logic's angle, unless the area
@@ -374,6 +394,7 @@ class MowbitePlannerRos1:
 
     def rpc_settings(self, params=None):
         current, defaults = self.current, self.defaults
+        theirs = openmower_settings(rospy.get_param('/mower_logic', {}), current.mower_width)
         out = {}
         for name in PlannerConfig.names():
             default = PlannerConfig.__dataclass_fields__[name].default
@@ -388,8 +409,7 @@ class MowbitePlannerRos1:
                 entry['from'] = FIXED[name]
             elif name in MOWER_LOGIC and name not in current.own:  # mower_logic's (an area's own still beats it)
                 entry['from'] = MOWER_LOGIC[name]
-                entry['value'] = openmower_settings(rospy.get_param('/mower_logic', {}), current.mower_width).get(
-                    name, entry['value'])
+                entry['value'] = theirs.get(name, entry['value'])
             if default is None:
                 entry['nullable'] = True
             if name in CHOICES:
@@ -431,7 +451,7 @@ class MowbitePlannerRos1:
             with open(self.angle_file) as f:
                 data = json.load(f)
             return {'steps': max(0, int(data['steps'])), 'mows': max(0, int(data['mows']))}
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
             return {'steps': 0, 'mows': 0}
 
     def write_angle(self):
@@ -453,7 +473,19 @@ class MowbitePlannerRos1:
             event = json.loads(msg.payload)
         except ValueError:
             return
-        if not isinstance(event, dict) or event.get('type') != 'JOB_COMPLETE':
+        if not isinstance(event, dict):
+            return
+        if event.get('type') == 'STATE':
+            with self.job_change:
+                self.job = event.get('job_id') or ''
+                self.job_change.notify_all()
+            return
+        if event.get('type') == 'JOB_RESET':
+            armed = self.armed
+            if armed is not None and armed['served']:  # (the leftovers' job thrown away: the next mow is a whole one)
+                self.armed = None
+            return
+        if event.get('type') != 'JOB_COMPLETE':
             return
         armed, self.armed = self.armed, None
         if armed is not None and armed['served']:
@@ -461,6 +493,8 @@ class MowbitePlannerRos1:
             rospy.loginfo('MowBite Planner: the leftovers are mowed')
             self.served.clear()
             return
+        with self.job_change:
+            self.job = event.get('job_id') or ''
         self.drive_thread = threading.Thread(target=self.after_mow, args=(event.get('job_id'),), daemon=True)
         self.drive_thread.start()
         base = self.current.base
@@ -606,7 +640,8 @@ class MowbitePlannerRos1:
 
     def rpc_leftovers(self, params):
         """planner.leftovers, see the top."""
-        if self.current.planner == 'slic3r':
+        current = self.current
+        if current.planner == 'slic3r':
             raise PlanningError('planner slic3r: no leftovers planned')
         files = self.track_files(params.get('job_id'), params.get('file'))
         if not params.get('job_id'):
@@ -624,7 +659,13 @@ class MowbitePlannerRos1:
         out, plans = {}, {}
         for i in ids:
             keep = []
-            self.rpc_plan({'area_id': i}, keep)
+            try:
+                i = self.rpc_plan({'area_id': i}, keep)['area_id']  # (asked for by name or index too: its id)
+            except PlanningError as e:
+                if params.get('area_id') is not None:
+                    raise
+                rospy.loginfo('MowBite Planner: area %s, no leftovers: %s', i, e)  # (the other areas still)
+                continue
             cfg = keep[-1].config
             mowed = track_mowed(runs, cfg.mower_width, cfg.blade_ahead, cfg.blade_offset)
             left = sum(p.area for p in polygons(keep[-1].free_space.difference(mowed)) if p.area >= LEFT_PIECE)
@@ -644,7 +685,12 @@ class MowbitePlannerRos1:
             result['left_m2'] = round(left, 3)
             out[i], plans[i] = result, got[-1] if got else None
         if params.get('arm'):
-            self.armed = {'until': time.time() + LEFTOVERS_ARMED, 'plans': plans, 'served': False}
+            with self.set_lock, self.lock:
+                same = self.current is current and self.map == data
+                if same:
+                    self.armed = {'until': time.time() + LEFTOVERS_ARMED, 'plans': plans, 'served': False}
+            if not same:  # (they'd be the old map's or settings')
+                raise PlanningError('the map or the settings changed meanwhile: not armed')
             rospy.loginfo('MowBite Planner: leftovers armed for %.0f s: %s', LEFTOVERS_ARMED, ', '.join(
                 '%s %s' % (i, 'nothing' if p is None else '%.2f m2 in %d passes' % (
                     p.stats['leftovers']['area'], p.stats['leftovers']['passes'])) for i, p in plans.items()))
@@ -659,6 +705,7 @@ class MowbitePlannerRos1:
 
     def after_mow(self, job_id):
         """What follows a finished mow: its planner.drive and timing, then with leftovers_auto what it left."""
+        self.track_written(job_id)
         self.drive_after(job_id)
         if not self.current.leftovers_auto:
             return
@@ -668,6 +715,17 @@ class MowbitePlannerRos1:
             rospy.loginfo('MowBite Planner: no leftovers mowed by itself: %s', e)
         except Exception as e:  # noqa: BLE001 - the leftovers must not take the planner down
             rospy.logerr('MowBite Planner: the leftovers failed: %s: %s', type(e).__name__, e)
+
+    def track_written(self, job_id):
+        """Waits for the finished job's track to be all in its file (see TRACK_WAIT), as it is after that long."""
+        if not job_id or TRACK_WAIT <= 0.0:
+            return
+        with self.job_change:
+            ended = self.job_change.wait_for(lambda: self.job != job_id, TRACK_WAIT)
+        if ended:
+            time.sleep(TRACK_SETTLE)
+        else:
+            rospy.logwarn('MowBite Planner: job %s not ended after %.0f s, its track as it is', job_id, TRACK_WAIT)
 
     def leftovers_after(self, job_id):
         """leftovers_auto: planner.leftovers of the finished mow, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2 at
@@ -747,7 +805,12 @@ class MowbitePlannerRos1:
         out = {}
         for i in ids:
             keep = []
-            self.rpc_plan({'area_id': i}, keep)
+            try:
+                self.rpc_plan({'area_id': i}, keep)
+            except PlanningError:
+                if area_id is not None:
+                    raise
+                continue  # (an area with no plan: the others still)
             fp = plan_footprint(keep[-1]) if keep else None
             if fp is None:
                 continue
@@ -771,9 +834,10 @@ class MowbitePlannerRos1:
         """The slic3r planner's answer, PlanningError when there's none."""
         try:
             rospy.wait_for_service(self.classic_name, timeout=CLASSIC_WAIT)
-            if self.classic is None:
-                self.classic = rospy.ServiceProxy(self.classic_name, PlanPath)
-            return self.classic(req)
+            with self.classic_lock:  # (a proxy takes one call at a time)
+                if self.classic is None:
+                    self.classic = rospy.ServiceProxy(self.classic_name, PlanPath)
+                return self.classic(req)
         except (rospy.ROSException, rospy.ServiceException) as e:
             raise PlanningError('no answer from the slic3r planner (%s): %s' % (self.classic_name, e))
 
@@ -829,8 +893,9 @@ class MowbitePlannerRos1:
             return
         with self.lock:
             changed, self.map = data != self.map, data
+            if changed:
+                self.armed = None  # (the leftovers were another map's)
         if changed:
-            self.armed = None  # (the leftovers were another map's)
             self.plan_ahead_later()
 
     def plan_ahead_later(self):
@@ -838,29 +903,34 @@ class MowbitePlannerRos1:
         with self.ahead_lock:
             if self.ahead is not None:
                 self.ahead.cancel()
-            self.ahead = threading.Timer(PLAN_AHEAD_DELAY, self.plan_ahead)
+            self.ahead_count += 1
+            self.ahead = threading.Timer(PLAN_AHEAD_DELAY, self.plan_ahead, (self.ahead_count,))
             self.ahead.daemon = True
             self.ahead.start()
 
-    def plan_ahead(self):
+    def plan_ahead(self, count=None):
         """Every active mowing area of the map planned like planner.plan would (the app's preview), kept for it. Not
-        with planner slic3r (it plans at once, nothing kept)."""
-        if self.current.planner == 'slic3r':
-            return
-        with self.lock:
-            data = self.map
-        areas = []
-        for area in (data or {}).get('areas', []):
-            props = area.get('properties') or {}
-            if props.get('type') == 'mow' and props.get('active') is not False and props.get('mowable') is not False \
-                    and area.get('id'):
-                areas.append(area)
-        t0, done = time.perf_counter(), 0
-        for area in areas:
-            if self.ahead_plan(area['id']):
-                done += 1
-        if areas:
-            rospy.loginfo('MowBite Planner: %d areas planned ahead in %.1f s', done, time.perf_counter() - t0)
+        with planner slic3r (it plans at once, nothing kept). One at a time: after another change (count isn't the
+        latest any more) it ends with the area it's at, the next one plans them as they are then."""
+        with self.ahead_run:
+            if self.current.planner == 'slic3r':
+                return
+            with self.lock:
+                data = self.map
+            areas = []
+            for area in (data or {}).get('areas', []):
+                props = area.get('properties') or {}
+                if props.get('type') == 'mow' and props.get('active') is not False and \
+                        props.get('mowable') is not False and area.get('id'):
+                    areas.append(area)
+            t0, done = time.perf_counter(), 0
+            for area in areas:
+                if count is not None and count != self.ahead_count:
+                    return
+                if self.ahead_plan(area['id']):
+                    done += 1
+            if areas:
+                rospy.loginfo('MowBite Planner: %d areas planned ahead in %.1f s', done, time.perf_counter() - t0)
 
     def ahead_plan(self, area_id):
         try:
@@ -928,15 +998,25 @@ class MowbitePlannerRos1:
                 self.plans.move_to_end(key)
                 self.local.kept = True
                 return plan, True
-        plan = self.read_plan(key)
-        kept = self.local.kept = plan is not None
-        if plan is None:
-            plan = plan_coverage(*args)
-            self.write_plan(key, plan)
-        with self.plans_lock:
-            self.plans[key] = plan
-            while len(self.plans) > CACHED_PLANS:
-                self.plans.popitem(last=False)
+            busy = self.planning.setdefault(key, threading.Lock())
+        with busy:  # (the same asked for meanwhile, planning ahead and a mow: it waits for this one's)
+            try:
+                with self.plans_lock:
+                    plan = self.plans.get(key)
+                if plan is None:
+                    plan = self.read_plan(key)
+                kept = self.local.kept = plan is not None
+                if plan is None:
+                    plan = plan_coverage(*args)
+                    self.write_plan(key, plan)
+                with self.plans_lock:
+                    self.plans[key] = plan
+                    self.plans.move_to_end(key)
+                    while len(self.plans) > CACHED_PLANS:
+                        self.plans.popitem(last=False)
+            finally:
+                with self.plans_lock:
+                    self.planning.pop(key, None)
         return plan, kept
 
     def read_plan(self, key):
@@ -1009,8 +1089,9 @@ class MowbitePlannerRos1:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
             # the map's obstacles (areas to keep out of) with a margin of their own, by their outline
             margins = margins_for(data, obstacles + keep_out)
-            plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock, drivable=drivable,
-                                        keep_out=keep_out, margins=margins)
+            # (the end as planner.plan gives it, the heading doesn't count there: planned ahead it's this plan)
+            plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
+                                        drivable=drivable, keep_out=keep_out, margins=margins)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res
@@ -1074,7 +1155,7 @@ def read_track(path):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            for xy in rec.get('points') or []:
+            for xy in (rec.get('points') or []) if isinstance(rec, dict) else []:
                 if isinstance(xy, (list, tuple)) and len(xy) >= 2 and (
                         not pts or math.hypot(xy[0] - pts[-1][0], xy[1] - pts[-1][1]) >= DRIVE_STEP):
                     pts.append((float(xy[0]), float(xy[1])))

@@ -214,6 +214,8 @@ def planner():
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
     node_module.PLAN_AHEAD_DELAY = 1e6
+    # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
+    node_module.TRACK_WAIT = 0.0
     return node_module.MowbitePlannerRos1()
 
 
@@ -586,6 +588,9 @@ def test_preview_plans_like_the_node(planner, props, params, settings, areas, by
     assert lane_angle() == pytest.approx(math.degrees(preview['angle']), abs=0.05)
     assert len(mowed) == len(preview['poses'])
     assert max(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(mowed, preview['poses'])) < 1e-3
+    # and planner.plan's (planning ahead) is that very plan, kept: mower_logic's request doesn't plan it again
+    rospy.params['/mower_logic'] = params
+    assert node.rpc_plan({'area_id': 'lawn'})['kept'] is True
 
 
 # OpenMower RPCs (planner.settings, planner.settings.set, planner.plan)
@@ -781,6 +786,33 @@ def test_stored_settings_that_dont_fit_are_left_out(planner):
         check(node.handle(request()))
 
 
+def test_stored_setting_of_a_newer_version_is_left_out(planner):
+    """A stored setting this version doesn't know (a newer one stored it, then back to this one): the others still
+    count, the body's size among them."""
+    with open(stored_file(), 'w') as f:
+        json.dump({'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'of_a_newer_version': True}, f)
+    rospy.log.clear()
+    node = node_module.MowbitePlannerRos1()
+    assert node.base.robot_width == 0.4 and node.base.body
+    assert sorted(node.current.stored) == ['robot_front', 'robot_rear', 'robot_width']
+    assert any(level == 'warn' and 'of_a_newer_version' in line for level, line in rospy.log)
+
+
+def test_lane_spacing_range_goes_by_the_blade(planner):
+    """lane_spacing_min and lane_spacing_max are checked against the blade's width (mower_width as launched or
+    set), for all areas and in an area's own planner property."""
+    rospy.params = {'~mower_width': 0.3}
+    node = node_module.MowbitePlannerRos1()
+    result, error = rpc('planner.settings.set', {'lane_spacing_max': 0.25})
+    assert error is None and result['settings']['lane_spacing_max']['value'] == 0.25
+    assert 'lane_spacing_max must be <= 0.3' in rpc('planner.settings.set', {'lane_spacing_max': 0.35})[1][1]
+    rpc('planner.settings.set', {'lane_spacing_max': None})
+    send_map(the_map({'lane_spacing_max': 0.25}))
+    check(node.handle(request()))
+    send_map(the_map({'lane_spacing_max': 0.35}))
+    assert node.handle(request()).paths == []
+
+
 def test_no_settings_file(planner):
     rospy.params = {'~settings_file': ''}
     node = node_module.MowbitePlannerRos1()
@@ -867,6 +899,36 @@ def test_plan_ahead(planner, monkeypatch):
     again.plans.clear()
     again.rpc_plan({'area_id': 'a'})
     assert calls == [1, 1, 1]
+
+
+def test_plan_ahead_one_at_a_time(planner, monkeypatch):
+    """A plan asked for while it's being planned (planning ahead, then the app or mower_logic) is waited for, not
+    planned twice. Planning ahead after another change ends early: the latest plans the areas as they are then."""
+    calls, real, started = [], node_module.plan_coverage, threading.Event()
+
+    def slow(*args, **kw):
+        calls.append(1)
+        started.set()
+        time.sleep(0.3)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    send_map(the_map())
+    ahead = threading.Thread(target=planner.plan_ahead)
+    ahead.start()
+    assert started.wait(30.0)
+    assert planner.rpc_plan({'area_id': 'a'})['kept'] is True
+    ahead.join(60.0)
+    assert calls == [1] and planner.planning == {}
+    # not the latest any more: nothing planned
+    rospy.log.clear()
+    planner.plans.clear()
+    shutil.rmtree(planner.plans_dir)
+    planner.ahead_count = 2
+    planner.plan_ahead(1)
+    assert calls == [1] and not any('planned ahead' in line for _, line in rospy.log)
+    planner.plan_ahead(2)
+    assert calls == [1, 1] and any('1 areas planned ahead' in line for _, line in rospy.log)
 
 
 def test_code_version_of_the_code_itself(monkeypatch, tmp_path):
@@ -1123,6 +1185,31 @@ def test_leftovers(planner):
     result, _ = rpc('planner.leftovers', {'job_id': 'short', 'arm': True})
     assert result['areas']['a']['paths'] == [] and 'most of the area is left' in result['areas']['a']['message']
     assert len(poses(planner.handle(request()))) == whole
+    # asked for by the area's name: armed for its id. The leftovers' job thrown away (JOB_RESET): the plan as ever
+    result, _ = rpc('planner.leftovers', {'job_id': 'mown', 'arm': True, 'area_id': 'Garden'})
+    assert list(result['areas']) == ['a'] and len(poses(planner.handle(request()))) == len(first)
+    event('JOB_RESET')
+    assert len(poses(planner.handle(request()))) == whole
+    # an area that can't be planned: the others' leftovers still
+    send_map(the_map(areas=[area('tiny', [(30, 0), (30.2, 0), (30.2, 0.2), (30, 0.2)], type='mow')]))
+    result, error = rpc('planner.leftovers', {'job_id': 'mown'})
+    assert error is None and list(result['areas']) == ['a'] and result['areas']['a']['paths']
+    assert rpc('planner.leftovers', {'job_id': 'mown', 'area_id': 'tiny'})[0] is None
+    assert list(rpc('planner.drive', {'job_id': 'mown'})[0]['areas']) == ['a']
+    send_map(the_map())
+    # the map changed while they were planned: not armed (they'd be the old map's)
+    real = planner.rpc_plan
+
+    def plan_then_new_map(*args, **kw):
+        got = real(*args, **kw)
+        send_map(the_map(areas=[area('more', [(30, 0), (40, 0), (40, 8), (30, 8)], type='mow', active=False)]))
+        return got
+
+    planner.rpc_plan = plan_then_new_map
+    result, error = rpc('planner.leftovers', {'job_id': 'mown', 'arm': True, 'area_id': 'a'})
+    assert result is None and 'changed meanwhile' in error[1] and planner.armed is None
+    del planner.rpc_plan
+    send_map(the_map())
     rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
     rpc('planner.settings.set', {'turn_radius': 0.3})  # (new settings: the leftovers were the old ones')
     assert len(poses(planner.handle(request()))) > 100
@@ -1202,6 +1289,38 @@ def test_leftovers_auto(planner, monkeypatch):
     rospy.messages[state] = idle
     rpc('planner.settings.set', {'planner': 'slic3r'})
     assert finished('mown') == [] and any('no leftovers mowed by itself' in line for _, line in rospy.log)
+
+
+def test_track_read_when_the_job_ended(planner, monkeypatch):
+    """mower_logic's JOB_COMPLETE comes before xbot_monitoring has written all of the job's track (every 30 s, the rest
+    when the job ends): what follows a mow waits for mower_logic's next STATE event of another job or none."""
+    monkeypatch.setattr(node_module, 'TRACK_WAIT', 60.0)
+    monkeypatch.setattr(node_module, 'TRACK_SETTLE', 0.0)
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
+    send_map(the_map())
+
+    def send(kind, **more):
+        rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
+            topic='events/json', payload=json.dumps(dict(more, type=kind))))
+
+    inside = [(x / 10.0, 5.0) for x in range(10, 61)]
+    out = [(19.0, 2.0), (19.5, 2.0), (20.05, 2.0), (20.1, 2.0), (19.5, 2.4), (18.0, 2.4)]
+    track_file('job1', [(False, [(1.0, 5.0)]), (True, inside)])  # (as far as it's written yet)
+    send('STATE', state='MOWING', job_id='job1')
+    send('JOB_COMPLETE', job_id='job1')
+    send('STATE', state='DOCKING', job_id='job1')
+    time.sleep(0.3)
+    assert planner.drive_thread.is_alive() and planner.drive is None
+    track_file('job1', [(False, [(1.0, 5.0)]), (True, inside), (True, out)])
+    send('STATE', state='IDLE')
+    planner.drive_thread.join(60.0)
+    assert not planner.drive_thread.is_alive() and len(planner.drive['areas']['a']['places']) == 1
+    # a job that doesn't end in time: its track as it is
+    monkeypatch.setattr(node_module, 'TRACK_WAIT', 0.2)
+    send('JOB_COMPLETE', job_id='job1')
+    planner.drive_thread.join(60.0)
+    assert not planner.drive_thread.is_alive()
+    assert any(level == 'warn' and 'job job1 not ended' in line for level, line in rospy.log)
 
 
 def test_planner_drive(planner):
