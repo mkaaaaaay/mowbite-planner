@@ -14,10 +14,16 @@ from .config import (EARLIER_LEFT, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRI
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
-from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, extend,
-                        join, omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
+from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, join,
+                        omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
+
+try:  # shapely 2 tests many points at once
+    import numpy
+    from shapely import covers, distance, points
+except ImportError:  # shapely 1.7 (ROS Noetic)
+    covers = None
 
 
 # rounding a loop's corner may cut it by this share of the mower width at most, 90 degree corners keep the
@@ -313,7 +319,10 @@ class _Route:
             return self.area.is_free
         # the way turning on the spot takes: straight on level with the lane that ends further out, across there
         on = (a[0] - x) * ux + (a[1] - y) * uy
-        spot = [self.pos, (x + on * ux, y + on * uy) if on >= 0.0 else (a[0] - on * ux, a[1] - on * uy), a]
+        spot = [(x, y)]
+        for p in ((x + on * ux, y + on * uy) if on >= 0.0 else (a[0] - on * ux, a[1] - on * uy), (a[0], a[1])):
+            if p != spot[-1]:  # (a point twice: GEOS 3.11 warns measuring the distance to such a line)
+                spot.append(p)
 
         def fits(pts: Sequence[XY]) -> bool:
             return self.area.is_free(pts) and (near or self.clear(pts)) and (not reach or self.in_reach(pts, spot))
@@ -323,9 +332,15 @@ class _Route:
     def in_reach(self, pts: Sequence[XY], spot: Sequence[XY]) -> bool:
         """lane_overlap_limit: whether pts (of a turn between two lanes) keep where the lanes lie or on the way turning
         on the spot takes (spot), give or take TURN_REACH. Always without."""
-        if self._reach is None or self._reach.covers(LineString(pts) if len(pts) > 1 else Point(pts[0])):
+        if self._reach is None:
             return True
         way = LineString(spot) if len(spot) > 1 else Point(spot[0])
+        if covers is not None:  # (prep() prepared reach)
+            at = points(numpy.asarray(pts, float))
+            out = at[~covers(self.reach, at)]
+            return not len(out) or bool((distance(way, out) <= TURN_REACH).all())
+        if self._reach.covers(LineString(pts) if len(pts) > 1 else Point(pts[0])):
+            return True
         return all(self._reach.covers(Point(p)) or way.distance(Point(p)) <= TURN_REACH for p in pts)
 
     def clear(self, pts: Sequence[XY]) -> bool:

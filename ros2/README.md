@@ -126,8 +126,9 @@ python3 tools/plot_coverage.py --map map.json --area "Front lawn"   # an area of
 python3 -m pytest test/
 ```
 
-Tests run against shapely 1.7 (Python 3.8, ROS Noetic), 1.8 and 2.x. A 300 m² garden plans in well under a second on
-a PC, a Raspberry Pi CM4 takes four to six times as long.
+Tests run against shapely 1.8 and 2.x, from Python 3.8 on (with shapely 1.7, ROS Noetic's own, it plans, but worse,
+and 8 tests fail). A 300 m² garden plans in well under a second on a PC, with the body checked in about three, a
+Raspberry Pi CM4 takes four to six times as long.
 
 ## MQTT service
 
