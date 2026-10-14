@@ -911,6 +911,19 @@ def test_rpc_log(planner):
     assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (node_module.LOG_LINES + 4)
 
 
+def test_warnings_logged_once_a_plan(planner):
+    """A plan's warnings go to the log once, asked for again (a preview, the mow) only how many. Another plan, its own
+    warnings again."""
+    planner.handle(request())  # (no body size set: the plan warns of it)
+    planner.handle(request())
+    planner.handle(request(angle=0.5))
+    first, again, other = [line for _, line in rospy.log if 'lanes at' in line][-3:]
+    assert 'no body check' in first and 'kept from before' not in first
+    assert 'kept from before' in again and 'no body check' not in again
+    assert re.search(r', \d+ warnings as before$', again)
+    assert 'no body check' in other
+
+
 def test_plan_ahead(planner, monkeypatch):
     """After a new map (or settings) every active mowing area is planned ahead: planner.plan finds it, so does the next
     start of the node (kept on disk, for this planner code only), whichever way the same inputs come."""

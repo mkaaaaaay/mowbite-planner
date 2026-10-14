@@ -106,6 +106,7 @@ import os
 import pickle
 import threading
 import time
+import weakref
 
 import rospy
 from shapely.geometry import Point as Spot
@@ -336,6 +337,8 @@ class MowbitePlannerRos1:
         self.angle_lock = threading.Lock()
         self.angle = self.read_angle()
         self.local = threading.local()  # whether the last plan of this thread was kept from before
+        # the plans whose warnings are in the log already (by id): asked for again, a preview or the mow, only how many
+        self.warned = weakref.WeakValueDictionary()
         self.history = os.path.expanduser(rospy.get_param('~history_dir', os.path.join(
             os.environ.get('ROS_HOME', '~/.ros'), HISTORY_DIR)))
         self.drive = None  # the last finished mow's planner.drive
@@ -1153,11 +1156,17 @@ class MowbitePlannerRos1:
             res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
                                          path=self.to_path(plan.poses[first:last + 1], stamp)))
         st = plan.stats
+        if not plan.warnings:
+            warnings = ''
+        elif self.warned.get(id(plan)) is plan:
+            warnings = ', %d warnings as before' % len(plan.warnings)
+        else:
+            warnings = '. ' + '; '.join(plan.warnings)
+            self.warned[id(plan)] = plan
         rospy.loginfo('MowBite Planner: %s%d paths, %d poses, %.0f m, lanes at %.1f deg, %s%s',
                       'area %s, ' % job.area_id if job else '', len(res.paths), len(plan.poses),
                       st['path_length'], math.degrees(plan.angle),
-                      'kept from before' if kept else '%.0f ms' % (1000 * st['planning_time']),
-                      '. ' + '; '.join(plan.warnings) if plan.warnings else '')
+                      'kept from before' if kept else '%.0f ms' % (1000 * st['planning_time']), warnings)
         return res
 
     def to_path(self, poses, stamp):
