@@ -37,17 +37,19 @@ this is checked, the path goes right up to the lines, and every plan says so in 
 OpenMower's official `edge` image stays as it is, the planner runs in its own container next to it. Full steps in
 [`ros1/README.md`](ros1/README.md#setup), the short version:
 
-1. OpenMower's `.env`: `VERSION="edge"` and `OM_PLANNER=external` (needs open_mower_ros #363 and #364, both in `edge`
-   since 8 October 2026, not in a release yet).
+1. OpenMower's `.env`: `VERSION="edge"` (needs open_mower_ros #363 and #364, both in `edge` since 8 October 2026, not
+   in a release yet).
 2. Start the planner stack from [`ros1/compose.yaml`](ros1/compose.yaml) (`docker compose up -d`, about 11 MB on top
-   of OpenMower's image).
-3. Tell it the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) in the MowBite
+   of OpenMower's image) and wait until its log says `MowBite Planner answers`.
+3. Only then `OM_PLANNER=external` in OpenMower's `.env` and OpenMower restarted. The other way round `mower_logic`
+   finds no planner and keeps restarting.
+4. Tell it the body size (`robot_width`, `robot_front`, `robot_rear` from the middle of the rear axle) in the MowBite
    app or with `planner.settings.set`.
-4. Record the map with the mower's centre along the edges.
-5. Look at the plan in the app before the first mow, emergency stop at hand.
+5. Record the map with the mower's centre along the edges.
+6. Look at the plan in the app before the first mow, emergency stop at hand.
 
-Back to slic3r: switch `planner` to `slic3r` in the app. Or take `OM_PLANNER` out of OpenMower's `.env` and stop the
-planner stack (both, else two planners answer the same service).
+Back to slic3r: switch `planner` to `slic3r` in the app. Or take `OM_PLANNER` out of OpenMower's `.env`, restart
+OpenMower and then stop the planner stack (both, else two planners answer the same service).
 
 ## Main settings
 
