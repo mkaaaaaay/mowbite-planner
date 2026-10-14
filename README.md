@@ -29,6 +29,9 @@ Where the body doesn't fit, only that spot changes: another way round, a loop a 
 turning back before it. What that leaves stays unmowed. In our garden that's about 1 % of the lawn, mostly thin strips
 in corners.
 
+It needs your mower's size (`robot_width`, `robot_front`, `robot_rear`, or `robot_outline`). Without it nothing of
+this is checked, the path goes right up to the lines, and every plan says so in its warnings.
+
 ## Setup
 
 OpenMower's official `edge` image stays as it is, the planner runs in its own container next to it. Full steps in

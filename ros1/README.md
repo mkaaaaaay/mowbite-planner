@@ -51,6 +51,8 @@ planner container ends and comes back on its own (`restart: unless-stopped`).
 - [ ] `docker logs -f mowbite_planner 2>&1 | grep MowBite` says `MowBite Planner answers
   /slic3r_coverage_planner/plan_path`. If OpenMower's log still starts `slic3r_coverage_planner`,
   `OM_PLANNER=external` didn't arrive.
+- [ ] Your mower's size set (the app's planner menu, or `robot_width`, `robot_front`, `robot_rear`), the blade too
+  (`mower_width`, `blade_ahead`). Until then the log says `no body check` with every plan.
 - [ ] Check the plan in the app (map, the area, "show mowing plan"): loops along the edge and around obstacles,
   then lanes. If the log says `MowBite Planner: <reason>` instead, the area isn't planned and the reason says why.
 - [ ] Mow it, emergency stop at hand. If the mower struggles in the turns, give the area a larger `turn_radius`.
@@ -94,7 +96,8 @@ A few worth knowing:
   passes over that mow 0.3 m² or more, it sends the mower out again once it's idle in the dock. Not in an emergency
   and, with OpenMower's `rain_mode` on, not in the rain. Once per mow.
 - Body: `robot_width`, `robot_front`, `robot_rear` (m from the middle of the drive wheels) or `robot_outline`
-  (`[[x, y], ...]`, x ahead, y left). Blade: `blade_ahead`, `blade_offset`.
+  (`[[x, y], ...]`, x ahead, y left). Without them (or with only a part) the body isn't checked: every plan warns of
+  it, in its `warnings` and the log. Blade: `blade_ahead`, `blade_offset`.
 
 Plans are kept (the last 64) and every active area is planned ahead 5 s after the map or settings change, so the
 preview and the next mow find their plan at once. The full list of settings is in

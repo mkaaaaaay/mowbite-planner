@@ -321,6 +321,19 @@ class PlannerConfig:
         return self.robot_outline is not None or None not in (self.robot_width, self.robot_front, self.robot_rear)
 
     @property
+    def no_body(self) -> Optional[str]:
+        """What a plan warns of where the body isn't checked (no size set, or only a part of it), None where it
+        is."""
+        if self.body:
+            return None
+        sizes = ('robot_width', 'robot_front', 'robot_rear')
+        got = [n for n in sizes if getattr(self, n) is not None]
+        if got:
+            return (f'no body check: {", ".join(got)} set but not {", ".join(n for n in sizes if n not in got)} (it '
+                    'takes all three, or robot_outline)')
+        return 'no body check: no mower size set (robot_width, robot_front and robot_rear, or robot_outline)'
+
+    @property
     def body_outline(self) -> Tuple[XY, ...]:
         """The body's corners counter-clockwise: robot_outline (a point given twice in a row once), or the rectangle
         of robot_width, robot_front and robot_rear."""

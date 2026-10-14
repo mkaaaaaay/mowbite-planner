@@ -178,7 +178,8 @@ def test_to_openmower_json():
     out = to_openmower_json(plan, 'front')
     assert json.loads(json.dumps(out, allow_nan=False)) == out
     assert out['area_id'] == 'front' and out['fingerprint'] == fingerprint(plan)
-    assert out['angle'] == plan.angle and out['angles'] == plan.angles and out['warnings'] == []
+    assert out['angle'] == plan.angle and out['angles'] == plan.angles
+    assert out['warnings'] == plan.warnings == [PlannerConfig().no_body]
     pieces = plan_pieces(plan)
     assert len(out['paths']) == len(pieces)
     for path, (is_outline, start, end) in zip(out['paths'], pieces):

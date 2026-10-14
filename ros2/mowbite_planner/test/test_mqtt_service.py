@@ -251,7 +251,7 @@ def test_plan_with_the_area_properties_in_the_request(planned):
                          'docking_stations': [{'id': 'd', 'position': {'x': 1.0, 'y': 1.0}, 'heading': 0.0}]}))
     s.on_params(json.dumps({'/mower_logic/tool_width': 0.15, '/mower_logic/outline_offset': 0.09}))
     plain = result(s, 'ext.mowbite_planner.plan', {'area_id': 'lawn', 'poses': True})
-    assert planned[-1][5] == [] and 'no way between them' in plain['warnings'][0]
+    assert planned[-1][5] == [] and any('no way between them' in w for w in plain['warnings'])
     for same in ({'angle': 0.0}, {'outline_count': 2}):
         res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'lawn', 'poses': True, **same})
         assert planned[-1][5] == [] and res['poses'] == plain['poses'], same

@@ -462,6 +462,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     transit = area_space if transit_space is drive_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
+    if not cfg.body:
+        route.warnings.append(cfg.no_body)
     route.loop_counts = (count, islands) if islands != count else None
     if cfg.lane_overlap_limit and passes and not lane_region.is_empty:
         # as far out as the lanes reach (_Route.in_reach)

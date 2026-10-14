@@ -49,6 +49,8 @@ def rect(x0, y0, x1, y1):
 
 
 GARDEN = [(0, 0), (22, 0), (24, 9), (13, 9), (13, 16), (0, 16)]
+# what every plan without the mower's size warns of
+NO_BODY = ['no body check: no mower size set (robot_width, robot_front and robot_rear, or robot_outline)']
 TREE = circle(5, 6, 0.9, 16)
 BED = rect(15, 2.5, 19, 5)
 
@@ -253,7 +255,7 @@ def test_rectangle():
     assert coverage(plan, cfg) > 0.997
     assert plan.stats['perimeter_loops'] == 2
     assert plan.stats['turns_pivot'] == 0 and plan.stats['turns_fallback'] == 0
-    assert not plan.warnings
+    assert plan.warnings == NO_BODY
     # the first loop runs half a mower width inside the outline
     first = plan.perimeter_loops[0]
     assert min(min(p[0], p[1], 10 - p[0], 6 - p[1]) for p in first) == pytest.approx(0.11, abs=1e-6)
@@ -282,7 +284,7 @@ def test_garden_with_obstacles():
     assert plan.stats['cells'] > 3
     assert plan.stats['transit_length'] > 0
     assert plan.stats['turns_fallback'] == 0
-    assert not plan.warnings
+    assert plan.warnings == NO_BODY
     # 2 loops along the outline, 2 around each obstacle
     assert plan.stats['perimeter_loops'] == 6
     # the lanes come after all loops
@@ -474,7 +476,7 @@ def test_obstacle_wall_splits_the_area(corridor):
     # both halves are mowed
     assert coverage(plan, cfg) > 0.99
     if corridor:
-        assert not plan.warnings
+        assert plan.warnings == NO_BODY
         assert plan.section_starts == [0]
         assert max(p.y for p in plan.poses) > 7.0  # around the wall
     else:
@@ -619,7 +621,7 @@ def test_crosshatch(boundary, obstacles):
     assert len(plan.angles) == 2 and plan.angles[0] == plan.angle
     assert abs(plan.angles[1] - plan.angles[0]) == pytest.approx(math.pi / 2)
     assert coverage(plan, cfg) > 0.99
-    assert not plan.warnings
+    assert plan.warnings == NO_BODY
     # lanes both ways, the second set after the first
     sets = [min(range(2), key=lambda k: angle_diff(2 * plan.poses[s.start].yaw, 2 * plan.angles[k]))
             for s in straight_lanes(plan)]
@@ -635,7 +637,7 @@ def test_concentric(boundary, obstacles):
     assert not straight_lanes(plan) and not plan.lanes and plan.stats['lanes'] == 0
     assert any(s.maneuver == 'ring' for s in plan.segments)
     assert coverage(plan, cfg) > 0.99
-    assert not plan.warnings
+    assert plan.warnings == NO_BODY
 
 
 @pytest.mark.parametrize('boundary, obstacles', [(rect(0, 0, 10, 6), []), (GARDEN, [TREE, BED])])
@@ -649,7 +651,7 @@ def test_concentric_with_narrow_loops_in_one_go(boundary, obstacles):
     drives = [sum(1 for s in p.segments if s.kind == TRANSIT) for p in (plan, apart)]
     assert drives[0] <= 1 + 2 * len(obstacles) and drives[0] < drives[1]
     assert plan.stats['path_length'] < apart.stats['path_length']
-    assert coverage(plan, cfg) > 0.99 and not plan.warnings
+    assert coverage(plan, cfg) > 0.99 and plan.warnings == NO_BODY
 
 
 # perimeter order and direction -----------------------------------------------------------------------------
@@ -3016,7 +3018,7 @@ def test_narrow_strips_are_mowed_in_the_middle(width):
     for boundary in (rect(0, 0, 10, width), [(0, 0), (10, 0), (10, width), (3, width), (3, 6), (0, 6)]):
         plan = plan_coverage(boundary, [], cfg)
         check_invariants(plan, cfg)
-        assert not plan.warnings
+        assert plan.warnings == NO_BODY
         assert uncut(plan, cfg)[1] == []
 
 
@@ -3182,7 +3184,7 @@ def test_slivers_smaller_than_the_blade_are_no_parts():
     cfg = PlannerConfig(perimeter_offset=0.0)
     plan = plan_coverage(rect(0, 0, 6, 4), beds, cfg)
     check_invariants(plan, cfg, beds)
-    assert plan.section_starts == [0] and not plan.warnings
+    assert plan.section_starts == [0] and plan.warnings == NO_BODY
     assert len(getattr(plan.free_space, 'geoms', [plan.free_space])) == 1
 
 
@@ -3304,6 +3306,18 @@ def test_loop_strips_geos_cant_take_away_at_once():
     plan = plan_coverage(boundary, obstacles, cfg)
     check_invariants(plan, cfg, obstacles)
     assert coverage(plan, cfg) > 0.99
+
+
+def test_no_body_check_is_a_warning():
+    """Without the mower's size, or with only a part of it, the body isn't checked: every plan says so first."""
+    lawn = rect(0, 0, 6, 4)
+    assert plan_coverage(lawn, [], PlannerConfig()).warnings == NO_BODY
+    assert plan_coverage(lawn, [], PlannerConfig(robot_front=0.43, robot_rear=0.14)).warnings == [
+        'no body check: robot_front, robot_rear set but not robot_width (it takes all three, or robot_outline)']
+    for body in (NX60I, {'robot_outline': BODY}):
+        cfg = PlannerConfig(**body)
+        assert cfg.no_body is None
+        assert not any('no body check' in w for w in plan_coverage(lawn, [], cfg).warnings)
 
 
 def test_settings_at_their_limits():

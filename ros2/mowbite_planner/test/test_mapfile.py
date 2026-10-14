@@ -207,7 +207,7 @@ def test_plan_an_area_of_the_map():
     job = area_job(MAP, 'front')
     cfg = settings_for(PlannerConfig(), None, job)
     plan = plan_coverage(job.boundary, job.obstacles, cfg, job.dock, job.dock[:2], job.drivable)
-    assert not plan.warnings
+    assert plan.warnings == [PlannerConfig().no_body]
     assert plan.angle == pytest.approx(0.5)
     for x0, y0, x1, y1 in ((4, 2, 5, 3), (7, 4, 8, 5)):  # the bed and the pond
         assert not [p for p in plan.poses if x0 < p.x < x1 and y0 < p.y < y1]
