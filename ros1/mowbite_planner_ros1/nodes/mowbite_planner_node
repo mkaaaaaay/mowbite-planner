@@ -50,6 +50,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         like planner.settings
   planner.angle.reset   back to no steps of angle_increment turned (answers like planner.settings, which says
                         angle_steps, angle_mows: the finished mows towards the next step, angle_turned in rad)
+  planner.log           the node's last LOG_LINES log lines since it started: {since (unix s, only the lines after it),
+                        limit (only the newest that many)} gives {lines: [{t (unix s), level (INFO, WARNING or ERROR),
+                        msg (a traceback with it where there's one)}, ...]}, the oldest first
   planner.drive         how close the body came to the edges driving: {job_id or file (of position_history, default:
                         the latest), area_id (default: every active mowing area)} gives {file, areas: {id: {checked,
                         places: [[x, y, m]] where the body at a driven point got m into the margins (more than
@@ -97,6 +100,7 @@ import dataclasses
 import glob
 import hashlib
 import json
+import logging
 import math
 import os
 import pickle
@@ -208,6 +212,34 @@ TRACK_SETTLE = 2.0
 LEFT_MOST = 0.5
 TIMING_RANGE = (0.5, 2.0)
 FTC_PARAMS = '/move_base_flex/FTCPlanner'
+# planner.log: the node's last log lines kept in memory
+LOG_LINES = 2000
+
+
+class LogLines(logging.Handler):
+    """The node's last LOG_LINES log lines for planner.log, on the logger rospy.loginfo... write to (rosout). The
+    unexpected errors come with their traceback, rospy's own in callbacks too."""
+
+    def __init__(self):
+        logging.Handler.__init__(self, logging.INFO)
+        self.lines = collections.deque(maxlen=LOG_LINES)
+
+    def emit(self, record):
+        try:
+            # (logfatal's CRITICAL as an ERROR)
+            self.lines.append({'t': record.created, 'level': logging.getLevelName(min(record.levelno, logging.ERROR)),
+                               'msg': self.format(record)})
+        except Exception:  # noqa: BLE001 - a log line must not take the planner down
+            self.handleError(record)
+
+    def after(self, since, limit):
+        """The lines after since (unix s), only the newest limit of them, the oldest first."""
+        with self.lock:
+            lines = [line for line in self.lines if line['t'] > since]
+        return lines[-limit:]
+
+
+LOG = LogLines()
 
 
 class XbotRpc:
@@ -249,7 +281,7 @@ class XbotRpc:
             rospy.loginfo('MowBite Planner: %s: %s', req.method, e)
             return self.fail(req, RpcError.ERROR_INVALID_PARAMS, str(e))
         except Exception as e:  # noqa: BLE001 - an RPC must not take the planner down
-            rospy.logerr('MowBite Planner: %s failed: %s: %s', req.method, type(e).__name__, e)
+            rospy.logerr('MowBite Planner: %s failed: %s: %s', req.method, type(e).__name__, e, exc_info=True)
             return self.fail(req, RpcError.ERROR_INTERNAL, 'internal error: %s' % e)
         if req.id:
             self.response.publish(RpcResponse(result=result, id=req.id))
@@ -261,6 +293,8 @@ class XbotRpc:
 
 class MowbitePlannerRos1:
     def __init__(self):
+        # (after rospy.init_node: it sets up rosout's handlers anew)
+        logging.getLogger('rosout').addHandler(LOG)
         self.launch_width = float(rospy.get_param('~mower_width', 0.18))
         self.launch = dict(rospy.get_param('~settings', {}) or {})
         self.defaults = self.setup(self.launch_width, self.launch, {})
@@ -333,7 +367,8 @@ class MowbitePlannerRos1:
                                                    'planner.plan': self.rpc_plan,
                                                    'planner.drive': self.rpc_drive,
                                                    'planner.leftovers': self.rpc_leftovers,
-                                                   'planner.angle.reset': self.rpc_angle_reset})
+                                                   'planner.angle.reset': self.rpc_angle_reset,
+                                                   'planner.log': self.rpc_log})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
 
     @property
@@ -445,6 +480,16 @@ class MowbitePlannerRos1:
         rospy.loginfo('MowBite Planner: angle steps reset')
         self.plan_ahead_later()
         return self.rpc_settings()
+
+    def rpc_log(self, params):
+        """planner.log, see the top."""
+        since = params.get('since')
+        limit = params.get('limit')
+        if since is not None and (isinstance(since, bool) or not isinstance(since, (int, float))):
+            raise PlanningError('since must be a time in unix s')
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise PlanningError('limit must be a whole number of 1 or more')
+        return {'lines': LOG.after(-math.inf if since is None else since, LOG_LINES if limit is None else limit)}
 
     def read_angle(self):
         try:
@@ -714,7 +759,7 @@ class MowbitePlannerRos1:
         except PlanningError as e:
             rospy.loginfo('MowBite Planner: no leftovers mowed by itself: %s', e)
         except Exception as e:  # noqa: BLE001 - the leftovers must not take the planner down
-            rospy.logerr('MowBite Planner: the leftovers failed: %s: %s', type(e).__name__, e)
+            rospy.logerr('MowBite Planner: the leftovers failed: %s: %s', type(e).__name__, e, exc_info=True)
 
     def track_written(self, job_id):
         """Waits for the finished job's track to be all in its file (see TRACK_WAIT), as it is after that long."""
@@ -766,14 +811,14 @@ class MowbitePlannerRos1:
         try:
             self.time_after(job_id)
         except Exception as e:  # noqa: BLE001 - timing must not take the planner down
-            rospy.logerr('MowBite Planner: timing the mow failed: %s: %s', type(e).__name__, e)
+            rospy.logerr('MowBite Planner: timing the mow failed: %s: %s', type(e).__name__, e, exc_info=True)
         try:
             self.drive = got = self.drive_check(job_id)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: drive not checked: %s', e)
             return
         except Exception as e:  # noqa: BLE001 - a check must not take the planner down
-            rospy.logerr('MowBite Planner: checking the drive failed: %s: %s', type(e).__name__, e)
+            rospy.logerr('MowBite Planner: checking the drive failed: %s: %s', type(e).__name__, e, exc_info=True)
             return
         for area_id, a in got['areas'].items():
             if a['places']:
@@ -941,7 +986,8 @@ class MowbitePlannerRos1:
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: area %s not planned ahead: %s', area_id, e)
         except Exception as e:  # noqa: BLE001 - planning ahead must not take the planner down
-            rospy.logerr('MowBite Planner: planning area %s ahead failed: %s: %s', area_id, type(e).__name__, e)
+            rospy.logerr('MowBite Planner: planning area %s ahead failed: %s: %s', area_id, type(e).__name__, e,
+                         exc_info=True)
         return False
 
     def settings(self, req, job):
@@ -1096,12 +1142,12 @@ class MowbitePlannerRos1:
             rospy.logwarn('MowBite Planner: %s', e)
             return res
         except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
-            rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e)
+            rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e, exc_info=True)
             return res
         try:
             self.served.append((time.time(), job.area_id if job else None, self.estimate(plan)))
         except Exception as e:  # noqa: BLE001 - the estimate must not keep the plan from mower_logic
-            rospy.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e)
+            rospy.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e, exc_info=True)
         stamp = rospy.Time.now()
         for is_outline, first, last in plan_pieces(plan, self.max_poses):
             res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,

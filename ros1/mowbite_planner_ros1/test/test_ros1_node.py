@@ -6,6 +6,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import logging
 import math
 import os
 import re
@@ -100,19 +101,24 @@ def install():
             self.services[name] = handler
             return types.SimpleNamespace(resolved_name=name)
 
-        def loginfo(self, *a):
+        # (and to the logger rosout like rospy's, at INFO as rospy sets it up)
+        def loginfo(self, *a, **kwargs):
             self.log.append(('info', a[0] % a[1:] if len(a) > 1 else a[0]))
+            logging.getLogger('rosout').info(*a, **kwargs)
 
-        def logwarn(self, *a):
+        def logwarn(self, *a, **kwargs):
             self.log.append(('warn', a[0] % a[1:] if len(a) > 1 else a[0]))
+            logging.getLogger('rosout').warning(*a, **kwargs)
 
-        def logerr(self, *a):
+        def logerr(self, *a, **kwargs):
             self.log.append(('error', a[0] % a[1:] if len(a) > 1 else a[0]))
+            logging.getLogger('rosout').error(*a, **kwargs)
 
         def logwarn_throttle(self, period, *a):
             self.logwarn(*a)
 
     rospy = Rospy('rospy')
+    logging.getLogger('rosout').setLevel(logging.INFO)
     modules = {
         'rospy': rospy,
         'std_msgs': types.ModuleType('std_msgs'),
@@ -619,8 +625,8 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.plan', 'planner.settings',
-               'planner.settings.set']
+    methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
+               'planner.settings', 'planner.settings.set']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -851,6 +857,9 @@ def test_rpc_plan(planner):
     ('planner.plan', '[1, 2]', -32602, 'params must be an object'),
     ('planner.plan', 'not json', -32602, 'params must be an object'),
     ('planner.settings.set', {'turn_radius': 'x'}, -32602, 'turn_radius'),
+    ('planner.log', {'limit': 0}, -32602, 'limit'),
+    ('planner.log', {'limit': 2.5}, -32602, 'limit'),
+    ('planner.log', {'since': 'yesterday'}, -32602, 'since'),
 ])
 def test_rpc_errors(planner, method, params, code, message):
     send_map(the_map())
@@ -868,10 +877,38 @@ def test_rpc_internal_error_and_others(planner, monkeypatch):
     result, error = rpc('planner.settings')
     assert error[0] == -32603 and 'division by zero' in error[1]
     assert any(level == 'error' for level, _ in rospy.log)
+    # with its traceback
+    line = rpc('planner.log', {'limit': 1})[0]['lines'][0]
+    assert line['level'] == 'ERROR' and 'Traceback' in line['msg'] and 'ZeroDivisionError' in line['msg']
     # another node's method, a notification (no id): no answer
     assert rpc('mowing.plan', {}) == (None, None)
     assert rpc('planner.settings.set', {'turn_radius': 0.5}, rid='') == (None, None)
     assert planner.base.turn_radius == 0.5
+
+
+def test_rpc_log(planner):
+    """planner.log: what the node logs (rospy.loginfo... write to rosout), since: only the newer lines, the oldest
+    first, the last LOG_LINES."""
+    before = rpc('planner.log')[0]['lines']
+    assert before[-1]['level'] == 'INFO' and before[-1]['msg'].startswith('MowBite Planner answers')
+    rpc('planner.settings.set', {'turn_radius': 0.4})
+    try:
+        1 / 0
+    except ZeroDivisionError:  # (rospy's own errors in callbacks come with their traceback)
+        logging.getLogger('rosout').error('bad callback', exc_info=True)
+    logging.getLogger('rosout').critical('fatal')  # rospy.logfatal
+    lines = rpc('planner.log', {'since': before[-1]['t']})[0]['lines']
+    assert [(line['level'], line['msg'].split('\n')[0][:26]) for line in lines] == [
+        ('INFO', 'MowBite Planner: settings '), ('ERROR', 'bad callback'), ('ERROR', 'fatal')]
+    assert 'Traceback' in lines[1]['msg'] and 'ZeroDivisionError' in lines[1]['msg']
+    assert [line['t'] for line in lines] == sorted(line['t'] for line in lines)
+    assert rpc('planner.log', {'limit': 1})[0]['lines'] == lines[-1:]
+    assert rpc('planner.log', {'since': lines[-1]['t']})[0]['lines'] == []
+    for i in range(node_module.LOG_LINES + 5):
+        rospy.loginfo('MowBite Planner: line %d', i)
+    lines = rpc('planner.log', {'since': None, 'limit': None})[0]['lines']
+    assert len(lines) == node_module.LOG_LINES
+    assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (node_module.LOG_LINES + 4)
 
 
 def test_plan_ahead(planner, monkeypatch):

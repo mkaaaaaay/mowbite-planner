@@ -76,6 +76,7 @@ set `overlap`.
 | `planner.drive` | how close the body really got to the edges on a mow (from OpenMower's position history), also logged after every mow |
 | `planner.leftovers` | what a mow really left (from its track) and the passes over it; with `arm: true` the next start of the mower only mows those |
 | `planner.angle.reset` | puts the stripe rotation (`angle_increment`) back to the start |
+| `planner.log` | the planner's last 2000 log lines since it started (`since`: only newer ones, `limit`), e.g. for an app to download |
 
 ```bash
 mosquitto_pub -h <mower> -t rpc/request \
