@@ -911,6 +911,17 @@ def test_rpc_log(planner):
     assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (node_module.LOG_LINES + 4)
 
 
+def test_plans_of_another_code_dropped(planner):
+    """At the start the kept plans of another planner code go (none of them is asked for again), its own stay."""
+    os.makedirs(planner.plans_dir, exist_ok=True)
+    own = planner.plan_file('a' * 40)
+    for name in ('0123456789ab-' + 'a' * 40 + '.pkl', 'b' * 40 + '.pkl', os.path.basename(own) + '.tmp'):
+        open(os.path.join(planner.plans_dir, name), 'w').close()
+    open(own, 'w').close()
+    node_module.MowbitePlannerRos1()
+    assert os.listdir(planner.plans_dir) == [os.path.basename(own)]
+
+
 def test_warnings_logged_once_a_plan(planner):
     """A plan's warnings go to the log once, asked for again (a preview, the mow) only how many. Another plan, its own
     warnings again."""

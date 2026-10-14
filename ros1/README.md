@@ -41,8 +41,11 @@ and no planner, `mower_logic` gives up after 60 s and starts again every 70 s, a
 3. Only then `OM_PLANNER=external` in OpenMower's `.env`, and OpenMower's stack restarted (`docker compose up -d`).
    OpenMower then doesn't start slic3r, the planner container starts again with it and answers.
 
-Updating: `docker compose up -d --build`. Going back, the other way round: `OM_PLANNER` out of OpenMower's `.env`,
-OpenMower restarted (`VERSION` as before if you like), then the planner stack stopped.
+Updating: `docker compose up -d --build`. After an OpenMower update too, then `docker image prune -f`: the planner
+image is built on OpenMower's, the old one would keep the old OpenMower image (GBs) on the disk.
+
+Going back, the other way round: `OM_PLANNER` out of OpenMower's `.env`, OpenMower restarted (`VERSION` as before if
+you like), then the planner stack stopped.
 
 Settings and plans live where OpenMower keeps its ROS data (`/home/openmower/ros`). When OpenMower restarts, the
 planner container ends and comes back on its own (`restart: unless-stopped`).
@@ -102,9 +105,9 @@ A few worth knowing:
   (`[[x, y], ...]`, x ahead, y left). Without them (or with only a part) the body isn't checked: every plan warns of
   it, in its `warnings` and the log. Blade: `blade_ahead`, `blade_offset`.
 
-Plans are kept (the last 64) and every active area is planned ahead 5 s after the map or settings change, so the
-preview and the next mow find their plan at once. The full list of settings is in
-[`../ros2/README.md`](../ros2/README.md#parameters).
+Plans are kept (the last 16, the ones of an older planner version go when it starts) and every active area is planned
+ahead 5 s after the map or settings change, so the preview and the next mow find their plan at once. The full list of
+settings is in [`../ros2/README.md`](../ros2/README.md#parameters).
 
 ## Tests
 

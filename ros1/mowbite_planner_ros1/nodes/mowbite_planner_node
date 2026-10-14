@@ -29,15 +29,14 @@ answer back as it is (where it doesn't answer the MowBite Planner plans). planne
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
 lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
-until the next start only), plans_dir (where the plans are kept, default $ROS_HOME/mowbite_plans, empty: in memory
-only), max_path_poses (at least 4), frame_id, service, classic_service, map_topic, use_map, rpc. The request
-always gives the lane spacing (with mower_width the overlap), perimeter_offset, perimeter_passes,
-lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an area's own
-outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless settings has
-angle or
-angle_strategy and the area has no angle of its own. Whether it has one comes from the saved map: a preview in
-the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just added or
-removed follows the saved area until the edit is saved.
+until the next start only), plans_dir (where the plans are kept, the last DISK_PLANS of this planner code, default
+$ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
+map_topic, use_map, rpc. The request always gives the lane spacing (with mower_width the overlap), perimeter_offset,
+perimeter_passes, lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an
+area's own outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless
+settings has angle or angle_strategy and the area has no angle of its own. Whether it has one comes from the saved
+map: a preview in the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just
+added or removed follows the saved area until the edit is saved.
 
 OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
@@ -167,10 +166,11 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
           'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET)}
-# plans kept, in memory and on disk (in plans_dir): the same request again (a preview, then the mow; mowing.plan, then
-# planner.plan) gets the plan at once
+# plans kept, in memory and on disk (in plans_dir, <code>-<key>.pkl: the ones of another planner code go at the start,
+# none of them is asked for again): the same request again (a preview, then the mow; mowing.plan, then planner.plan)
+# gets the plan at once
 CACHED_PLANS = 16
-DISK_PLANS = 64
+DISK_PLANS = 16
 # s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
 # mow and the app's preview find it
 PLAN_AHEAD_DELAY = 5.0
@@ -328,6 +328,7 @@ class MowbitePlannerRos1:
         self.plans_dir = os.path.expanduser(rospy.get_param('~plans_dir', os.path.join(
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
         self.code = code_version()
+        self.drop_old_plans()
         self.ahead = None
         self.ahead_lock = threading.Lock()
         self.ahead_count = 0  # (the latest plan_ahead, one before it ends early)
@@ -1068,11 +1069,26 @@ class MowbitePlannerRos1:
                     self.planning.pop(key, None)
         return plan, kept
 
+    def plan_file(self, key):
+        return os.path.join(self.plans_dir, '%s-%s.pkl' % (self.code[:12], key))
+
+    def drop_old_plans(self):
+        """The kept plans of another planner code go (and what a write cut off left)."""
+        if not self.plans_dir:
+            return
+        own = self.code[:12] + '-'
+        for path in glob.glob(os.path.join(self.plans_dir, '*.pkl')) + glob.glob(os.path.join(self.plans_dir, '*.tmp')):
+            if not (path.endswith('.pkl') and os.path.basename(path).startswith(own)):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
     def read_plan(self, key):
         if not self.plans_dir:
             return None
         try:
-            with open(os.path.join(self.plans_dir, key + '.pkl'), 'rb') as f:
+            with open(self.plan_file(key), 'rb') as f:
                 return pickle.load(f)
         except FileNotFoundError:
             return None
@@ -1085,7 +1101,7 @@ class MowbitePlannerRos1:
             return
         try:
             os.makedirs(self.plans_dir, exist_ok=True)
-            path = os.path.join(self.plans_dir, key + '.pkl')
+            path = self.plan_file(key)
             with open(path + '.tmp', 'wb') as f:
                 pickle.dump(plan, f, protocol=4)
             os.replace(path + '.tmp', path)
