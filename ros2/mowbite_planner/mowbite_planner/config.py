@@ -78,6 +78,12 @@ LOOP_IN = (0.02, 0.1)
 LOOP_EASE = (0.5, 1.0, 2.0)
 LOOP_JOIN = 3
 LOOP_TRIES = 300
+# the further ways of bodyfit's _fit_body (and the way in to the plan's start, see route's START_CLEAR) get off the path
+# and back on it easing off and onto its line: t m along it FIT_EASE_OFF m * (e^(t / l) - 1) off it at most, l
+# FIT_EASE times how far the body reaches behind the centre getting off, ahead of it getting back on (the rear, the
+# front swinging out FIT_EASE_OFF m at most)
+FIT_EASE = 1.5
+FIT_EASE_OFF = 0.01
 # m, lane_overlap_limit: how much further out than the lanes reach a turn between them may get (a sampled arc)
 TURN_REACH = 0.02
 # swept_area: points per piece of the way at least

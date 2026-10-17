@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
-from .config import (EARLIER_LEFT, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRIES, ORDER_BUDGET, PERIMETER, ROUND_STEP,
-                     SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, Lane, PathSegment,
-                     PlannerConfig)
+from .config import (EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRIES,
+                     ORDER_BUDGET, PERIMETER, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN,
+                     TURN_REACH, XY, Lane, PathSegment, PlannerConfig)
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
@@ -38,6 +38,14 @@ HEADLAND_SLACK = 2.0
 CROSSINGS = 3
 # poses of a segment _Route.mowed() looks at together: it skips those whose box is far from where it looks
 MOWED_CHUNK = 32
+# m, mower_logic drives to the plan's first pose itself and turns on the spot there unchecked: with the body set the
+# plan's first loop starts where a place the body turns whatever way it faces is START_ROOM away at most and its poses
+# fit before as far as easing onto its line from there takes (FIT_EASE, where bodyfit's way in gets on) and
+# START_CLEAR[0] more, START_CLEAR[1] after (more than bodyfit's FIT_START: a tight place that close it would leave out,
+# starting later), at the closest such point to where it would start (the loop all there, the tight place further round,
+# driven another way like any other)
+START_CLEAR = (0.5, 1.5)
+START_ROOM = 1.0
 
 
 def best_order(start: List[List[float]], link, end: List[List[float]],
@@ -501,11 +509,59 @@ class _Route:
     def _end_distance(self, ring: List[XY]) -> float:
         return closest_on_polyline(ring + [ring[0]], self.end)[2]
 
+    def _start_at(self, poses: List[Pose2D], target: Optional[XY]) -> Optional[XY]:
+        """Where the plan's first loop (its poses round from where it would start) starts instead (see START_CLEAR):
+        the closest pose to target where a place the body turns whatever way it faces is START_ROOM away at most and
+        they fit before and after as far as that says. None: where it would (that's one, or there's none)."""
+        fp = self.footprint
+        room = fp.turning.anywhere.intersection(self.transit.space)
+        n = len(poses)
+        if room.is_empty or n < 3:
+            return None
+        bad = [not f for f in fp.fit(poses)]
+        # (m of the way round at each pose, three times round: the poses before and after one of the middle round are
+        # there. The last pose is the first again)
+        at = [0.0]
+        for a, b in zip(poses, poses[1:]):
+            at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
+        whole = at[-1]
+        if whole <= 2.0 * sum(START_CLEAR):
+            return None
+        rounds = at[:-1] + [whole + s for s in at[:-1]] + [2.0 * whole + s for s in at[:-1]]
+        ahead = [0]  # bad poses up to each of rounds
+        for k in range(len(rounds)):
+            ahead.append(ahead[-1] + bad[k % (n - 1)])
+        if covers is not None:
+            off = [float(d) for d in distance(room, points([(p.x, p.y) for p in poses]))]
+        else:
+            off = [room.distance(Point(p.x, p.y)) for p in poses]
+
+        def good(j: int) -> bool:
+            if off[j] > START_ROOM:
+                return False
+            s = at[j] + whole
+            back = FIT_EASE * fp.front * math.log1p(off[j] / FIT_EASE_OFF) + START_CLEAR[0]
+            a = bisect.bisect_left(rounds, s - back)
+            b = bisect.bisect_right(rounds, s + START_CLEAR[1])
+            return ahead[b] - ahead[a] == 0
+
+        if good(0):
+            return None
+        fine = [j for j in range(n - 1) if good(j)]
+        if not fine:
+            return None
+        if target is None:
+            j = fine[0]
+        else:
+            j = min(fine, key=lambda j: (math.hypot(poses[j].x - target[0], poses[j].y - target[1]), j))
+        return poses[j].x, poses[j].y
+
     def drive_ring(self, ring: List[XY], hole: bool, kind: str = PERIMETER, maneuver: str = '',
                    target: Optional[XY] = None, level: int = 0, spacing: Optional[float] = None,
                    radius: Optional[float] = None, parent: Optional[str] = None) -> None:
         """One loop. ring comes as rings() gives it (outline ccw, hole cw: the mowable side on the left).
-        It starts closest to target (default: a little ahead of the mower). Its corners are rounded with
+        It starts closest to target (default: a little ahead of the mower; the plan's first with the body set where
+        the mower gets onto it, see START_CLEAR). Its corners are rounded with
         perimeter_corner_radius (or radius), less the further in it is (`level` loops `spacing` apart), so
         no tuft stays between the loops (but for a few cm2 at a corner of the outline made of short edges,
         see inner_radius)."""
@@ -541,17 +597,31 @@ class _Route:
             flip = (direction == 'cw') != hole
         if flip:
             loop = loop[::-1]
+
+        def driven(loop: List[XY]) -> List[Pose2D]:
+            # with the mowable side on the left only left turns go round a corner of it and get rounded
+            # (right turns too: the arc cuts their corner on the side mowed already or keeps off the edge where it
+            # doesn't fit)
+            return drive_polyline(loop, self.step, radius, self.area.is_free, 0, CORNER_CUT * self.cfg.mower_width,
+                                  level, spacing, self.cfg.mower_width, self.body)
+
+        poses = driven(loop)
+        if not self.segments and self.footprint is not None:
+            # the plan's first loop: where mower_logic gets to it on its own (see START_CLEAR), the same way round
+            better = self._start_at(poses, target)
+            if better is not None:
+                i, entry, _ = closest_on_polyline(closed, better)
+                entry = _clear_of_corners(closed, i, entry, 2.0 * radius)
+                loop = [entry] + closed[i + 1:] + closed[1:i + 1] + [entry]
+                if flip:
+                    loop = loop[::-1]
+                poses = driven(loop)
         first = _first_direction(loop)
         name = f'loop-{len(self.loops)}'
         self.source = name
         self.origins[name] = {'parent': parent or f'level-{level}', 'kind': 'obstacle' if hole else 'outline',
                               'level': level}
         self.go_to(entry, math.atan2(first[1], first[0]) if first else None)
-        # with the mowable side on the left only left turns go round a corner of it and get rounded
-        # (right turns too: the arc cuts their corner on the side mowed already or keeps off the edge where it
-        # doesn't fit)
-        poses = drive_polyline(loop, self.step, radius, self.area.is_free, 0,
-                               CORNER_CUT * self.cfg.mower_width, level, spacing, self.cfg.mower_width, self.body)
         self.add(kind, poses, maneuver=maneuver)
         self.loops.append([(p.x, p.y) for p in poses])
         self.loop_side[name] = -1.0 if flip else 1.0
