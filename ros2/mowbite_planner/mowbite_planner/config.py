@@ -37,6 +37,8 @@ LANE_SPACING_MODES = ('fixed', 'auto')
 SPACING_CANDIDATES = 5
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw', 'random')
 TURN_TYPES = ('u_turn', 'bulb', 'detour', 'pivot')
+# m, with turn_radius 0 and the body checked every curve but the turns at the lanes' ends (the default turn_radius)
+ZERO_TURN = 0.25
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
 EDGES = ('recorded', 'hard')
 # headland_turns: the drives along the headland 'rounded' where an arc fits at their corners, or 'sharp' (on the spot)
@@ -151,7 +153,9 @@ class PlannerConfig:
     # where that fits, see _round_corners), a turn between lanes is rounded as wide as fits (at a slant where the lanes
     # end at one, the lanes ending a little earlier for it where that's what it takes, else a loop into the next lane,
     # see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
-    # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane)
+    # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane). 0 with the body
+    # checked: on the spot at the lanes' ends, lane after lane (turn_on_spot, lane_order snake), every other curve
+    # ZERO_TURN wide (all on the spot, a long front by the edges wouldn't fit: whole loops left out)
     turn_radius: float = 0.25
     # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'detour', 'pivot'). Larger
     # radii come first, the order counts between turns of the same radius
@@ -233,11 +237,11 @@ class PlannerConfig:
     robot_front: Optional[float] = None
     robot_rear: Optional[float] = None
     robot_outline: Optional[Tuple[XY, ...]] = None
-    # 'recorded': the outline, obstacles and areas to keep out of are where the centre drove. 'hard': they're walls,
-    # the centre keeps robot_width / 2 off them (the first loop moves further in where perimeter_offset would come
-    # closer). With the body checked they're always where the centre drove: the body may be where it was while they
-    # were recorded (half its width each side, the front ahead and the rear behind, turning on the spot at every
-    # point), their real edges
+    # 'recorded': the outline, obstacles and areas to keep out of are where the centre drove, with the body checked the
+    # body may be where it was while they were recorded (half its width each side, the front ahead and the rear
+    # behind, turning on the spot at every point), their real edges. 'hard': they're walls (lines drawn on the real
+    # edge, a bed's border), the centre keeps half the body's width off them (the first loop moves further in where
+    # perimeter_offset would come closer), with the body checked the body keeps the margins off the lines themselves
     edges: str = 'recorded'
     # m, with the body checked a turn, a loop out or a drive may take the centre this much further out than the first
     # loop (a recorded edge is a few cm off where the mower was), the body still keeping the margins
@@ -245,7 +249,8 @@ class PlannerConfig:
     # m, with the body checked: how far it keeps off the outline's real edge everywhere, obstacle_margin off an
     # obstacle's and an area's to keep out of (one's own margin beats it, see plan_coverage). The loops keep the centre
     # that far off the lines: the first one further in where perimeter_offset would come closer, the ones round an
-    # obstacle further out (round both of two too close for the body to get through between, _gaps)
+    # obstacle further out (round both of two too close for the body to get through between, or round one too close to
+    # the edge, _gaps)
     edge_margin: float = 0.05
     obstacle_margin: float = 0.10
     # m, with the body checked: turning on the spot (the heading jumping by more than footprint.SPIN from one pose to
@@ -311,10 +316,10 @@ class PlannerConfig:
     def blade_loop_offset(self) -> float:
         """m, how far inside the outline (and off the obstacles) the blade's centre runs on the first loop:
         first_loop_offset, further in where the centre keeps edge_margin off the line (the body checked, and
-        simplify_tolerance: the simplified line may lie that much further out) or the body (robot_width, hard edges)
-        wouldn't fit there."""
+        simplify_tolerance: the simplified line may lie that much further out; hard edges: half the body's width more)
+        or the body (robot_width, hard edges) wouldn't fit there."""
         if self.body:
-            keep = self.edge_margin + self.simplify_tolerance
+            keep = self.edge_margin + self.simplify_tolerance + self.wall_half
         elif self.robot_width is not None and self.edges == 'hard':
             keep = 0.5 * self.robot_width
         else:
@@ -330,6 +335,14 @@ class PlannerConfig:
     def body(self) -> bool:
         """Whether the body is checked: robot_width, robot_front and robot_rear set, or robot_outline."""
         return self.robot_outline is not None or None not in (self.robot_width, self.robot_front, self.robot_rear)
+
+    @property
+    def wall_half(self) -> float:
+        """m, with the body checked and hard edges half the body's width (the lines are walls: the loops keep the
+        centre that much further off them than the margins), else 0."""
+        if not self.body or self.edges != 'hard':
+            return 0.0
+        return max(abs(y) for _, y in self.body_outline)
 
     @property
     def no_body(self) -> Optional[str]:

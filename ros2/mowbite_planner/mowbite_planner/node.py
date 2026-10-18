@@ -94,8 +94,8 @@ PARAMETERS = {
                          '12 cm deep at most), or sharp: turning on the spot there', lambda v: v in HEADLAND_CORNERS,
                          'must be rounded or sharp'),
     'edges': ('recorded', 'recorded: the outline and obstacles are where the centre drove, the body may be where '
-              'it was then. hard: walls, the centre keeps robot_width / 2 off them. With the body set (robot_width, '
-              'robot_front, robot_rear) always recorded',
+              'it was then. hard: walls (lines drawn on the real edge), the centre keeps half the body\'s width off '
+              'them, with the body set (robot_width, robot_front, robot_rear) the body keeps the margins off the lines',
               lambda v: v in EDGES, 'must be recorded or hard'),
     'body_fit': (True, 'where the body would still stick out, the path goes another way there that fits, leaving a '
                  'little of a loop or lane out where it has to. False: the path as planned', None, ''),

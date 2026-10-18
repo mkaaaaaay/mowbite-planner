@@ -81,9 +81,9 @@ def planned(monkeypatch):
     call."""
     calls, real = [], mqtt_service.plan_coverage
 
-    def spy(*args):
+    def spy(*args, **more):
         calls.append(args)
-        return real(*args)
+        return real(*args, **more)
 
     monkeypatch.setattr(mqtt_service, 'plan_coverage', spy)
     return calls

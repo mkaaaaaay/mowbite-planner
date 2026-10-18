@@ -56,7 +56,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.drive         how close the body came to the edges driving: {job_id or file (of position_history, default:
                         the latest), area_id (default: every active mowing area)} gives {file, areas: {id: {checked,
                         places: [[x, y, m]] where the body at a driven point got m into the margins (more than
-                        DRIVE_OFF; not within DOCK_REACH of a docking station), worst}}}. After every finished
+                        DRIVE_OFF; not within DOCK_REACH of a docking station; with the blade off, OpenMower's own
+                        drives, the lawns and navigation areas count as well), worst}}}. After every finished
                         mow (JOB_COMPLETE) the same for that job, in the log and as the answer without params,
                         once the job ended and its track is all written (see TRACK_WAIT)
   planner.leftovers     what a mow really left (its track with the blade running against the area, the blade's way
@@ -129,8 +130,9 @@ from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D,
 from mowbite_planner import config as limits
 from mowbite_planner.planner import plan_footprint
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
+from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
-from mowbite_planner.mapfile import area_job, margins_for, match_area, openmower_settings
+from mowbite_planner.mapfile import _points, area_job, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 from mowbite_planner.report import drive_time, track_mowed
 
@@ -861,7 +863,17 @@ class MowbitePlannerRos1:
         docks = [((d.get('position') or {}).get('x'), (d.get('position') or {}).get('y'))
                  for d in (data or {}).get('docking_stations') or []]
         docks = [(x, y) for x, y in docks if isinstance(x, (int, float)) and isinstance(y, (int, float))]
-        track = [p for p in track if all(math.hypot(p.x - x, p.y - y) > DOCK_REACH for x, y in docks)]
+        track = [(p, on) for p, on in track if all(math.hypot(p.x - x, p.y - y) > DOCK_REACH for x, y in docks)]
+        # OpenMower's own drives (the blade off: to an area, between them, home) go over the lawns and the navigation
+        # areas too, the plan's body_space has only the lawns it may drive through
+        ground = []
+        for a in (data or {}).get('areas', []):
+            if (a.get('properties') or {}).get('type') in ('mow', 'nav'):
+                try:
+                    ground.append(clean_polygon(_points(a.get('outline'))))
+                except ValueError:
+                    continue
+        ground = union(ground)
         out = {}
         for i in ids:
             keep = []
@@ -875,10 +887,18 @@ class MowbitePlannerRos1:
             if fp is None:
                 continue
             near = keep[-1].area.buffer(0.5)
-            poses = [p for p in track if near.contains(Spot(p.x, p.y))]
-            outs = fp.out_by([(None, p) for p in poses]) if poses else []
+            poses = [(p, on) for p, on in track if near.contains(Spot(p.x, p.y))]
+            outs = fp.out_by([(None, p) for p, _ in poses]) if poses else []
+            # (with the blade off out of it: against those too, their real edges robot_width / 2 out from the lines)
+            off = [k for k, ((m, _), (_, on)) in enumerate(zip(outs, poses)) if m > DRIVE_OFF and not on]
+            if off and not ground.is_empty:
+                cfg = keep[-1].config
+                wide = Footprint(fp.space.union(ground.buffer(fp.half - cfg.edge_margin)), cfg.body_outline,
+                                 cfg.spin_margin)
+                for k, got in zip(off, wide.out_by([(None, poses[k][0]) for k in off])):
+                    outs[k] = got
             places, run = [], None
-            for p, (m, _) in zip(poses, outs):
+            for (p, _), (m, _) in zip(poses, outs):
                 if m > DRIVE_OFF:  # (a place: points one after the other out there, where it's the furthest)
                     if run is None or m > run[2]:
                         run = [round(p.x, 2), round(p.y, 2), m]
@@ -901,10 +921,10 @@ class MowbitePlannerRos1:
         except (rospy.ROSException, rospy.ServiceException) as e:
             raise PlanningError('no answer from the slic3r planner (%s): %s' % (self.classic_name, e))
 
-    def classic_plan(self, boundary, obstacles, cfg, *rest):
+    def classic_plan(self, boundary, obstacles, cfg, *rest, **more):
         """planner.plan with planner slic3r: the slic3r planner asked like mower_logic would, its paths as a plan.
         Every path is a section of its own (OpenMower drives to the start of each itself), loops perimeter, the rest
-        lanes."""
+        lanes. (The navigation areas, reach_over, mean nothing to it.)"""
         t0 = time.perf_counter()
         concentric = cfg.fill_pattern == 'concentric'
         req = PlanPathRequest(
@@ -1039,12 +1059,14 @@ class MowbitePlannerRos1:
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
         return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished']})
 
-    def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
+    def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
+                      reach_over=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
         given and the planner's code, the same again (to the last bit) is the same plan."""
-        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins)[0]
+        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over)[0]
 
-    def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
+    def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
+                  reach_over=()):
         """(plan, whether it was kept from before), see plan_coverage."""
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
@@ -1054,7 +1076,8 @@ class MowbitePlannerRos1:
         obstacles = [o for o, _ in pairs]
         margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
         args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
-        key = hashlib.sha1((self.code + repr(args)).encode()).hexdigest()
+        reach_over = canon(reach_over)
+        key = hashlib.sha1((self.code + repr(args) + (repr(reach_over) if reach_over else '')).encode()).hexdigest()
         with self.plans_lock:
             plan = self.plans.get(key)
             if plan is not None:
@@ -1070,7 +1093,7 @@ class MowbitePlannerRos1:
                     plan = self.read_plan(key)
                 kept = self.local.kept = plan is not None
                 if plan is None:
-                    plan = plan_coverage(*args)
+                    plan = plan_coverage(*args, reach_over=reach_over)
                     self.write_plan(key, plan)
                 with self.plans_lock:
                     self.plans[key] = plan
@@ -1138,13 +1161,13 @@ class MowbitePlannerRos1:
         with self.lock:
             data = self.map
         index = match_area(data, boundary) if data else None
-        job, drivable, keep_out, dock = None, [], [], None
+        job, drivable, keep_out, dock, reach_over = None, [], [], None, []
         try:
             if index is not None:
                 job = area_job(data, index)
                 # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
                 obstacles += job.mow_around
-                drivable, keep_out, dock = job.drivable, job.keep_out, job.dock
+                drivable, keep_out, dock, reach_over = job.drivable, job.keep_out, job.dock, job.navigation
             armed = self.armed
             if armed is not None and time.time() > armed['until']:
                 armed = self.armed = None
@@ -1169,7 +1192,7 @@ class MowbitePlannerRos1:
             margins = margins_for(data, obstacles + keep_out)
             # (the end as planner.plan gives it, the heading doesn't count there: planned ahead it's this plan)
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
-                                        drivable=drivable, keep_out=keep_out, margins=margins)
+                                        drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res
@@ -1231,20 +1254,25 @@ def code_version():
 
 def read_track(path):
     """The driven points of a position_history file (OpenMower's: new_segment and append_points lines of [x, y]),
-    each facing the next one (DRIVE_STEP apart at least, the last one as the one before)."""
-    pts = []
+    each facing the next one (DRIVE_STEP apart at least, the last one as the one before), with whether the blade ran
+    there (its new_segment's blades): [(Pose2D, blade), ...]."""
+    pts, blade = [], False
     with open(path) as f:
         for line in f:
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            for xy in (rec.get('points') or []) if isinstance(rec, dict) else []:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('type') == 'new_segment':
+                blade = bool((rec.get('attributes') or {}).get('blades'))
+            for xy in rec.get('points') or []:
                 if isinstance(xy, (list, tuple)) and len(xy) >= 2 and (
                         not pts or math.hypot(xy[0] - pts[-1][0], xy[1] - pts[-1][1]) >= DRIVE_STEP):
-                    pts.append((float(xy[0]), float(xy[1])))
-    out = [Pose2D(x, y, math.atan2(b[1] - y, b[0] - x)) for (x, y), b in zip(pts, pts[1:])]
-    return out + [Pose2D(pts[-1][0], pts[-1][1], out[-1].yaw)] if out else []
+                    pts.append((float(xy[0]), float(xy[1]), blade))
+    out = [(Pose2D(x, y, math.atan2(b[1] - y, b[0] - x)), on) for (x, y, on), b in zip(pts, pts[1:])]
+    return out + [(Pose2D(pts[-1][0], pts[-1][1], out[-1][0].yaw), pts[-1][2])] if out else []
 
 
 def read_runs(path):

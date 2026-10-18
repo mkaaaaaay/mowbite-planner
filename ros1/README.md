@@ -23,6 +23,9 @@ just use it. It runs in its own container next to OpenMower's.
 - **Clean stripes** (`headland_turns`) and **turning on the spot** (`turn_on_spot`), for all areas or per area.
 - **Sensible drives.** The shortest way between parts of an area, also through other lawns, never over navigation
   areas or areas set to not mowable (the blade stays on). Parts with no way between them get their own paths.
+- **Navigation areas next to a lawn.** The body may reach over the edge into one (the path stays on the lawn), so a
+  bed close to that edge is mowed round. Where only a real edge is beyond, a slot too narrow for the body is closed
+  if going round the bed leaves less unmowed.
 - **Docking station.** Plans start on the loop next to it and end close to it.
 - **Same map, same plan.** The plan never depends on where the mower is, so an interrupted mow resumes.
 

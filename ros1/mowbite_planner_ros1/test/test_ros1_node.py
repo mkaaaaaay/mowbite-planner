@@ -1403,7 +1403,7 @@ def test_track_read_when_the_job_ended(planner, monkeypatch):
             topic='events/json', payload=json.dumps(dict(more, type=kind))))
 
     inside = [(x / 10.0, 5.0) for x in range(10, 61)]
-    out = [(19.0, 2.0), (19.5, 2.0), (20.05, 2.0), (20.1, 2.0), (19.5, 2.4), (18.0, 2.4)]
+    out = [(19.0, 6.0), (19.5, 6.0), (20.05, 6.0), (20.1, 6.0), (19.5, 6.4), (18.0, 6.4)]
     track_file('job1', [(False, [(1.0, 5.0)]), (True, inside)])  # (as far as it's written yet)
     send('STATE', state='MOWING', job_id='job1')
     send('JOB_COMPLETE', job_id='job1')
@@ -1431,12 +1431,13 @@ def test_planner_drive(planner):
     result, error = rpc('planner.drive', {'job_id': 'nope'})
     assert result is None and 'no track' in error[1]
     inside = [(x / 10.0, 5.0) for x in range(10, 61)]
-    out = [(19.0, 2.0), (19.5, 2.0), (20.05, 2.0), (20.1, 2.0), (19.5, 2.4), (18.0, 2.4)]
+    # (over the edge where no navigation area lies beyond it)
+    out = [(19.0, 6.0), (19.5, 6.0), (20.05, 6.0), (20.1, 6.0), (19.5, 6.4), (18.0, 6.4)]
     track_file('job1', [(False, [(1.0, 5.0)]), (True, inside), (True, out)])
     result, error = rpc('planner.drive', {'job_id': 'job1'})
     assert error is None and result['file'] == '1791377699_job1.jsonl'
     a = result['areas']['a']
-    assert a['checked'] > 50 and len(a['places']) == 1 and a['places'][0][:2] == [20.05, 2.0] and a['worst'] > 0.2
+    assert a['checked'] > 50 and len(a['places']) == 1 and a['places'][0][:2] == [20.05, 6.0] and a['worst'] > 0.2
     assert node_module.DRIVE_OFF == 0.01
     # after a finished mow by itself
     rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
@@ -1444,3 +1445,33 @@ def test_planner_drive(planner):
     planner.drive_thread.join(60.0)
     assert any(level == 'warn' and 'got into the margins at 1 places' in line for level, line in rospy.log)
     assert rpc('planner.drive')[0] == result
+
+
+def test_planner_drive_openmowers_drives(planner):
+    """planner.drive: OpenMower's own drives (the blade off) over the navigation area next to the lawn aren't places,
+    out of the lawns and navigation areas they are; the plan's own (the blade on) out of its body_space ever, the
+    navigation area in it (reach_over)."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
+    send_map(the_map())
+    over_nav = [(19.0, 2.0), (19.5, 2.0), (20.05, 2.0), (20.1, 2.0), (20.3, 2.0)]
+    away = [(10.0, -0.4), (11.0, -0.4)]
+    track_file('job2', [(False, over_nav), (True, [(x / 10.0, 5.0) for x in range(10, 31)]), (False, away)])
+    result, error = rpc('planner.drive', {'job_id': 'job2'})
+    places = result['areas']['a']['places']
+    assert error is None and len(places) == 1 and places[0][1] == -0.4 and places[0][2] > 0.3
+    track_file('job3', [(True, over_nav), (True, [(19.0, 6.0), (19.5, 6.0), (20.05, 6.0), (20.3, 6.0)])])
+    assert [p[:2] for p in rpc('planner.drive', {'job_id': 'job3'})[0]['areas']['a']['places']] == [[20.3, 6.0]]
+
+
+def test_body_reaches_over_into_navigation_areas(planner):
+    """The map's active navigation areas go with every plan (reach_over): the body may reach over the edge into the one
+    next to the lawn, beyond the half of its width it may anyway, not into the inactive one."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
+    shed = area('shed', [(-4, 6), (0, 6), (0, 9), (-4, 9)], type='nav', active=False)
+    send_map(the_map(areas=[shed]))
+    keep = []
+    planner.rpc_plan({'area_id': 'a'}, keep)
+    space = keep[-1].body_space
+    from shapely.geometry import Point as Spot
+    assert space.contains(Spot(20.5, 1.5)) and not space.contains(Spot(20.5, 5.0))
+    assert not space.contains(Spot(-0.5, 7.5))

@@ -101,7 +101,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `headland_corners` | `rounded` | corners of headland drives `rounded` or `sharp` (on the spot) |
 | `robot_width`, `robot_front`, `robot_rear` | -1.0 | body size (m from the middle of the drive wheels), negative: no body check (the plan warns of it) |
 | `robot_outline` | not set | the body's outline `[x0, y0, x1, y1, ...]` instead of the rectangle |
-| `edges` | `recorded` | `recorded`: lines are where the centre drove; `hard`: walls |
+| `edges` | `recorded` | `recorded`: lines are where the centre drove; `hard`: walls (drawn on the real edge), the body stays inside them |
 | `edge_margin` | 0.05 | gap between body and the real edge (m) |
 | `obstacle_margin` | 0.10 | gap to obstacles (m) |
 | `spin_margin` | 0.05 | extra gap turning on the spot and in the turns between lanes (m) |

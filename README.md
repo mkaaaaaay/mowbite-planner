@@ -23,7 +23,8 @@ and settings that still change.
 You record the map by driving the mower's **centre** along the edges. So the line is where the centre was, and the
 real edge is where the body was. The planner rebuilds that from the lines, checks the whole body (a rectangle or the
 measured outline) at every pose and turn, and keeps a margin. Turning on the spot and the turns between lanes get a
-few cm extra, because OpenMower's FTC starts turning early and wobbles a bit there.
+few cm extra, because OpenMower's FTC starts turning early and wobbles a bit there. Lines drawn or moved onto the real
+edge instead (a wall, a bed's border) are walls: set `edges` to `hard`, the body then stays inside them.
 
 Where the body doesn't fit, only that spot changes: another way round, a loop a few cm further in round a bend, or
 turning back before it. What that leaves stays unmowed. In our garden that's about 1 % of the lawn, mostly thin strips

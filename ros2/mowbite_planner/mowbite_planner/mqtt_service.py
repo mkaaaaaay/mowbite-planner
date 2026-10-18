@@ -208,7 +208,7 @@ class PlannerService:
         # an obstacle's or area's own margin, from the map by its outline (an obstacle the request changed has none)
         margins = margins_for(data, obstacles + job.keep_out)
         plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
-                                               margins)
+                                               margins, reach_over=job.navigation)
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))
