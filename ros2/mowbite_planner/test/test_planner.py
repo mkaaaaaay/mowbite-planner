@@ -697,6 +697,23 @@ def test_perimeter_direction(direction, pattern):
         assert sign * signed_area(plan.poses[start:end + 1]) > 0
 
 
+def test_perimeter_direction_random():
+    """random: the plan of ccw or cw (round the obstacles too), the same for the same count of finished_mows, another
+    at random for another; over a few mows both. The count is a whole number."""
+    ways = {d: plan_coverage(GARDEN, [TREE, BED], PlannerConfig(perimeter_direction=d)).poses for d in ('ccw', 'cw')}
+    got = []
+    for mows in range(4):
+        cfg = PlannerConfig(perimeter_direction='random', finished_mows=mows)
+        poses = plan_coverage(GARDEN, [TREE, BED], cfg).poses
+        got.append(next(d for d, them in ways.items() if them == poses))
+        if not mows:
+            assert plan_coverage(GARDEN, [TREE, BED], cfg).poses == poses
+    assert set(got) == {'ccw', 'cw'}
+    for kw in (dict(finished_mows=-1), dict(finished_mows=0.5)):
+        with pytest.raises(PlanningError, match='whole number'):
+            PlannerConfig(**kw).validate()
+
+
 # body and blade --------------------------------------------------------------------------------------------
 
 FORWARD = dict(lane_order='skip', mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0)

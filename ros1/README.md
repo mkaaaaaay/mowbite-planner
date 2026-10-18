@@ -93,6 +93,8 @@ A few worth knowing:
 - `planner`: `mowbite` or `slic3r`. With `slic3r` OpenMower's own planner plans every area (no body check).
 - `angle_increment` (rad): turns the stripes a bit every `angle_increment_every` finished mows, within an area's
   `angle_min`..`angle_max`. Leave OpenMower's `mow_angle_increment` at 0, else both add up.
+- `perimeter_direction: random`: the loops go round one way or the other at random, drawn again after every finished
+  mow, the same for all areas of a mow. Resuming it and the preview go the same way.
 - `lane_spacing_mode: auto`: the planner picks the lane spacing, `perimeter_passes: -1` the number of loops.
 - `lane_overlap_limit`: on the lanes and the turns between them the mower gets no further out than the lanes reach
   (`lane_overlap_passes`, OpenMower's `outline_overlap_count`), so it keeps further off the edge there. Without it

@@ -48,7 +48,8 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
   planner.angle.reset   back to no steps of angle_increment turned (answers like planner.settings, which says
-                        angle_steps, angle_mows: the finished mows towards the next step, angle_turned in rad)
+                        angle_steps, angle_mows: the finished mows towards the next step, angle_turned in rad, and
+                        finished_mows: all of them, see perimeter_direction random)
   planner.log           the node's last LOG_LINES log lines since it started: {since (unix s, only the lines after it),
                         limit (only the newest that many)} gives {lines: [{t (unix s), level (INFO, WARNING or ERROR),
                         msg (a traceback with it where there's one)}, ...]}, the oldest first
@@ -87,6 +88,10 @@ angle_increment: every angle_increment_every finished mows (mower_logic's JOB_CO
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
 angle_min..angle_max. The mows are counted for all areas at once: angle_increment_every is the one set for all, an
 area's own doesn't count. mower_logic's own mow_angle_increment is best left at 0, both add up.
+
+perimeter_direction random: the loops go round ccw or cw at random, drawn again after every finished mow (JOB_COMPLETE,
+not the leftovers' job) from the count of all of them (finished_mows, kept there too, planner.angle.reset leaves it),
+the same for every area: a plan asked for again before the next one finishes (resuming, a preview) goes the same way.
 
 In a container of its own (OM_PLANNER=external in open_mower_ros) the node ends with exit code 1 when the ROS master
 restarts (a new /run_id): the new master doesn't know its service and RPC methods (nor the slic3r planner's), with
@@ -131,7 +136,7 @@ from mowbite_planner.report import drive_time, track_mowed
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
 FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
-         'angle_steps': 'finished mows (planner.angle.reset)'}
+         'angle_steps': 'finished mows (planner.angle.reset)', 'finished_mows': 'finished mows'}
 # come with every request of mower_logic (from its parameters, or the area's), unless set here (settings, stored)
 MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
                'perimeter_passes': '/mower_logic/outline_count',
@@ -333,7 +338,8 @@ class MowbitePlannerRos1:
         self.ahead_lock = threading.Lock()
         self.ahead_count = 0  # (the latest plan_ahead, one before it ends early)
         self.ahead_run = threading.Lock()
-        # the finished mows counted for angle_increment: steps so far, mows since the last one (next to settings_file)
+        # the finished mows counted for angle_increment: steps so far, mows since the last one, and all of them
+        # (perimeter_direction random), next to settings_file
         self.angle_file = os.path.join(os.path.dirname(self.file), 'mowbite_planner_angle.json') if self.file else ''
         self.angle_lock = threading.Lock()
         self.angle = self.read_angle()
@@ -470,16 +476,16 @@ class MowbitePlannerRos1:
                           'type': 'string', 'settable': True, 'choices': list(PLANNERS)}
         out['leftovers_auto'] = {'value': current.leftovers_auto, 'default': defaults.leftovers_auto,
                                  'stored': 'leftovers_auto' in current.stored, 'type': 'boolean', 'settable': True}
-        # angle_increment: the steps turned so far and the finished mows towards the next one
+        # angle_increment: the steps turned so far and the finished mows towards the next one (and all of them)
         steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
                 'angle_steps': steps, 'angle_mows': mows,
-                'angle_turned': steps * current.base.angle_increment}
+                'angle_turned': steps * current.base.angle_increment, 'finished_mows': self.angle['finished']}
 
     def rpc_angle_reset(self, params=None):
         """Back to no steps turned (angle_increment)."""
         with self.angle_lock:
-            self.angle = {'steps': 0, 'mows': 0}
+            self.angle = dict(self.angle, steps=0, mows=0)
             self.write_angle()
         rospy.loginfo('MowBite Planner: angle steps reset')
         self.plan_ahead_later()
@@ -499,9 +505,11 @@ class MowbitePlannerRos1:
         try:
             with open(self.angle_file) as f:
                 data = json.load(f)
-            return {'steps': max(0, int(data['steps'])), 'mows': max(0, int(data['mows']))}
+            # (finished: not in it before perimeter_direction random)
+            return {'steps': max(0, int(data['steps'])), 'mows': max(0, int(data['mows'])),
+                    'finished': max(0, int(data.get('finished', 0)))}
         except (OSError, ValueError, KeyError, TypeError, OverflowError):
-            return {'steps': 0, 'mows': 0}
+            return {'steps': 0, 'mows': 0, 'finished': 0}
 
     def write_angle(self):
         if not self.angle_file:
@@ -549,21 +557,23 @@ class MowbitePlannerRos1:
         base = self.current.base
         with self.lock:
             data = self.map
-        turning = base.angle_increment != 0 or any(
-            ((a.get('properties') or {}).get('planner') or {}).get('angle_increment')
-            for a in (data or {}).get('areas', []))
-        if not turning:
-            return
-        if rospy.get_param('/mower_logic/mow_angle_increment', 0):
+        own = [((a.get('properties') or {}).get('planner') or {}) for a in (data or {}).get('areas', [])]
+        turning = base.angle_increment != 0 or any(p.get('angle_increment') for p in own)
+        # (perimeter_direction random: from now on another way round, the plans ahead too)
+        rolling = base.perimeter_direction == 'random' or any(p.get('perimeter_direction') == 'random' for p in own)
+        if turning and rospy.get_param('/mower_logic/mow_angle_increment', 0):
             rospy.logwarn('MowBite Planner: mower_logic turns the lanes too (mow_angle_increment), both add up')
         with self.angle_lock:
-            self.angle['mows'] += 1
-            if self.angle['mows'] >= base.angle_increment_every:
-                self.angle = {'steps': self.angle['steps'] + 1, 'mows': 0}
+            self.angle['finished'] += 1
+            if turning:
+                self.angle['mows'] += 1
+                if self.angle['mows'] >= base.angle_increment_every:
+                    self.angle.update(steps=self.angle['steps'] + 1, mows=0)
             self.write_angle()
-            steps = self.angle['steps']
-        rospy.loginfo('MowBite Planner: mow finished, angle steps %d', steps)
-        self.plan_ahead_later()
+            steps, finished = self.angle['steps'], self.angle['finished']
+        if turning or rolling:
+            rospy.loginfo('MowBite Planner: mow finished, angle steps %d, %d finished mows', steps, finished)
+            self.plan_ahead_later()
 
     def rpc_settings_set(self, params):
         fixed = sorted(set(params) & set(FIXED))
@@ -601,7 +611,8 @@ class MowbitePlannerRos1:
             service.planner = self.classic_plan
         else:
             service = PlannerService(current.base.with_overrides({'mower_width': current.mower_width,
-                                                                  'angle_steps': self.angle['steps']}),
+                                                                  'angle_steps': self.angle['steps'],
+                                                                  'finished_mows': self.angle['finished']}),
                                      current.own_angle)
             service.planner = self.plan_coverage if keep is None else (
                 lambda *args, **kw: keep.append(self.plan_coverage(*args, **kw)) or keep[-1])
@@ -1026,7 +1037,7 @@ class MowbitePlannerRos1:
             cfg = cfg.with_overrides(job.planner)
         if cfg.lane_spacing_mode == 'auto':  # the blade, the spacing is the planner's
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
-        return cfg.with_overrides({'angle_steps': self.angle['steps']})
+        return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished']})
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
@@ -1035,6 +1046,8 @@ class MowbitePlannerRos1:
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=()):
         """(plan, whether it was kept from before), see plan_coverage."""
+        if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
+            cfg = cfg.with_overrides({'finished_mows': 0})
         # the obstacles in one order, every way there (the request, the map) gives the same, each with its margin
         margins = list(margins) + [None] * (len(obstacles) + len(keep_out) - len(margins))
         pairs = sorted(zip(canon(obstacles), canon(margins)), key=lambda pair: pair[0])

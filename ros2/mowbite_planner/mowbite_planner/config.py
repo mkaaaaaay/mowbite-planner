@@ -35,7 +35,7 @@ NARROW_PARTS = ('lanes', 'loops')
 LANE_SPACING_MODES = ('fixed', 'auto')
 # lane spacings lane_spacing_mode 'auto' tries, from lane_spacing_max down to lane_spacing_min
 SPACING_CANDIDATES = 5
-PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw')
+PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw', 'random')
 TURN_TYPES = ('u_turn', 'bulb', 'detour', 'pivot')
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall
 EDGES = ('recorded', 'hard')
@@ -121,7 +121,9 @@ class PlannerConfig:
     fill_pattern: str = 'lanes'  # 'lanes', 'crosshatch' or 'concentric'
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
-    perimeter_direction: str = 'auto'  # 'ccw', 'cw' around every loop, 'auto': the way the mower faces
+    # 'ccw', 'cw' around every loop, 'auto': the way the mower faces, 'random': ccw or cw at random for each count of
+    # finished_mows (another way round every mow, all of a plan asked for again before the next one finishes the same)
+    perimeter_direction: str = 'auto'
     angle: Optional[float] = None  # rad, lane direction. None: worked out by angle_strategy
     # 'longest_edge', 'min_width' (narrowest width) or 'optimal' (tries angle_step apart, fewest lanes and
     # groups of lanes)
@@ -137,6 +139,7 @@ class PlannerConfig:
     angle_increment: float = 0.0
     angle_increment_every: int = 1
     angle_steps: int = 0
+    finished_mows: int = 0  # all of them so far, the ROS 1 node counts them (see perimeter_direction)
     # m, the first perimeter loop runs this far inside the outline. None: mower_width / 2, the blade's edge
     # on the outline. OpenMower records outlines driving the mower's centre along the edge and uses 0,
     # negative goes outside the outline (OpenMower's outline_offset allows that too)
@@ -422,7 +425,7 @@ class PlannerConfig:
         finite('transit_edge_cost', 0.0)
         finite('angle_offset')
         finite('angle_increment')
-        for name, lo in (('angle_increment_every', 1), ('angle_steps', 0)):
+        for name, lo in (('angle_increment_every', 1), ('angle_steps', 0), ('finished_mows', 0)):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, int) or v < lo:
                 raise PlanningError(f'{name} must be a whole number >= {lo}, got {v!r}')

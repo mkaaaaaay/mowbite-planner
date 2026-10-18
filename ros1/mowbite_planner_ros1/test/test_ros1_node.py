@@ -1031,10 +1031,48 @@ def test_angle_increment(planner):
     assert rpc('planner.plan', {'area_id': 'a'})[0]['angle'] == pytest.approx(turned - math.radians(10))
     planner.handle(request(angle=0.3))
     assert lane_angle() == pytest.approx(math.degrees(0.3), abs=0.05)
-    # kept over a restart
+    # kept over a restart (and all finished mows, perimeter_direction random's, the one before turning too)
     event('JOB_COMPLETE')
     event('JOB_COMPLETE')
-    assert node_module.MowbitePlannerRos1().angle == {'steps': 1, 'mows': 0}
+    assert node_module.MowbitePlannerRos1().angle == {'steps': 1, 'mows': 0, 'finished': 6}
+
+
+def test_perimeter_direction_random(planner):
+    """perimeter_direction random: every finished mow counts (JOB_COMPLETE, with nothing turning too, not JOB_RESET),
+    mower_logic's plans and planner.plan's go round the way the count gives (0 ccw, 1 cw, 2 ccw): asked for again
+    before the next mow finishes, the same plan. The count is kept over a restart, planner.angle.reset leaves it; with
+    another way round it doesn't count, the plan kept stays the one."""
+    def way(pts):  # 1: ccw, -1: cw (all of the loops go the same way round)
+        return 1 if sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(pts, pts[1:] + pts[:1])) > 0 else -1
+
+    def mower_logic():
+        res = planner.handle(request())
+        assert res.paths[0].is_outline
+        return (way([(ps.pose.position.x, ps.pose.position.y) for ps in res.paths[0].path.poses]),
+                [(p.position.x, p.position.y, p.orientation.z) for p in poses(res)])
+
+    def preview():
+        result, error = rpc('planner.plan', {'area_id': 'a'})
+        assert error is None and result['paths'][0]['is_outline']
+        return way(result['paths'][0]['points'])
+
+    send_map(the_map())
+    rpc('planner.settings.set', {'perimeter_direction': 'random'})
+    assert rpc('planner.settings')[0]['finished_mows'] == 0
+    first, plan = mower_logic()
+    assert first == 1 == preview() and mower_logic() == (first, plan)
+    event('JOB_COMPLETE')
+    assert mower_logic()[0] == -1 == preview()
+    event('JOB_RESET')
+    assert mower_logic()[0] == -1 and rpc('planner.angle.reset', {})[0]['finished_mows'] == 1
+    event('JOB_COMPLETE')
+    assert mower_logic()[0] == 1 == preview()
+    rpc('planner.settings.set', {'perimeter_direction': 'cw'})
+    assert preview() == -1
+    event('JOB_COMPLETE')
+    result, _ = rpc('planner.plan', {'area_id': 'a'})
+    assert way(result['paths'][0]['points']) == -1 and result['kept'] is True
+    assert node_module.MowbitePlannerRos1().angle['finished'] == 3  # (kept over a restart)
 
 
 def test_master_restarted(monkeypatch):

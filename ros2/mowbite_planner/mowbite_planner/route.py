@@ -3,6 +3,7 @@ them, then the turns on the spot rounded off where that fits (_smooth_spins)."""
 
 import bisect
 import math
+import random
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -578,6 +579,8 @@ class _Route:
         entry = _clear_of_corners(closed, i, entry, 2.0 * radius)
         loop = [entry] + closed[i + 1:] + closed[1:i + 1] + [entry]
         direction = self.cfg.perimeter_direction
+        if direction == 'random':  # (the same for each count of finished mows, on Python 3.8 as on 3.13)
+            direction = 'cw' if random.Random(self.cfg.finished_mows).random() < 0.5 else 'ccw'
         if self.cfg.blade_offset != 0:
             # rings come with the mowable side on the left: the blade goes on the other side, but for the rings
             # driven with the blade on the inner one

@@ -118,8 +118,10 @@ PARAMETERS = {
                     math.isfinite, 'must be a number'),
     'perimeter_order': ('first', 'perimeter loops first or last (last mows over the marks the turns leave)',
                         lambda v: v in PERIMETER_ORDERS, 'must be first or last'),
-    'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces',
-                            lambda v: v in PERIMETER_DIRECTIONS, 'must be auto, ccw or cw'),
+    'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces, random: ccw or cw at '
+                            'random for each count of finished mows (the ROS 1 node counts them, here none: the '
+                            'same way every plan)', lambda v: v in PERIMETER_DIRECTIONS,
+                            'must be auto, ccw, cw or random'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),
     'lane_overlap_limit': (False, 'the mower gets no further out on the lanes than they reach: the turns between '
