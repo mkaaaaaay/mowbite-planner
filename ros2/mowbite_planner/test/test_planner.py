@@ -1682,18 +1682,25 @@ def test_body_fit_turns_round_further_to_the_side():
     assert outside_room(plan, recorded_room(cfg, [PATH_END], [], []), spin=cfg.spin_margin) == []
 
 
-def test_body_fit_drives_on():
+def test_body_fit_drives_on(monkeypatch):
     """A strip between a table and the outline, closed at its end by a sunshade: where the body doesn't get round
     there and no other way fits nor turning round, the path drives on (through the transit space) to where it fits
-    again instead of jumping there, nothing sticking out (also against the real edges worked out here on their own)."""
+    again instead of jumping there, nothing sticking out (also against the real edges worked out here on their own),
+    getting back on at the first pose it gets to of every FIT_STEP[-1] m (FIT_ON). Trying twice as far each time from
+    the place on (FIT_ON 0) it gets back on further round the loop, more of it left out, more unmowed."""
     lawn, obstacles = rect(0, 0, 5.3, 4.9), [rect(0.28, 2.7, 1.82, 3.86), circle(0.42, 2.25, 0.33, 16)]
     cfg = PlannerConfig(**dict(SHADE_MOWER, edge_margin=0.05, obstacle_margin=0.05, angle=math.radians(30)))
     plan = plan_coverage(lawn, obstacles, cfg, start=(5.0, 0.3, 1.6), end=(5.0, 0.3))
     check_invariants(plan, cfg, obstacles)
-    fit = plan.stats['body_fit']
+    fit, report = plan.stats['body_fit'], check_plan(plan)
     assert fit['jumps'] == [] and len(plan.section_starts) == 1 and fit['fixed'] > 0
-    assert check_plan(plan)['body_out'] == []
+    assert report['body_out'] == []
     assert outside_room(plan, recorded_room(cfg, [lawn], obstacles, [0.05, 0.05])) == []
+    monkeypatch.setattr(bodyfit, 'FIT_ON', 0.0)
+    doubled = plan_coverage(lawn, obstacles, cfg, start=(5.0, 0.3, 1.6), end=(5.0, 0.3))
+    fitted, checked = doubled.stats['body_fit'], check_plan(doubled)
+    assert fitted['jumps'] == [] and checked['body_out'] == []
+    assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
 
 
 @pytest.mark.parametrize('lead', [True, 'other', False])

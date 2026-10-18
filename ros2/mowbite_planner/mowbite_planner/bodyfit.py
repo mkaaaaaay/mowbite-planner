@@ -94,6 +94,10 @@ FIT_IN = (0.03, 0.06, 0.1, 0.2, 0.3, 0.45)
 FIT_TURNS = 6
 FIT_ROUND = 600
 ROOM_SIMPLIFY = 0.005
+# m of path: driving on through the transit space gets back on the path at the first pose it gets to of every
+# FIT_STEP[-1] m that far, then twice as far each time (a loop along the edge it can't get onto right after the place
+# isn't left out to its end)
+FIT_ON = 32.0
 # headland_turns: a way of _fit_body that turns in the lanes' field counts as this many m of loops and lanes left out
 FIT_FIELD = 2.0
 # m, _fit_body finds where the body sticks out the most at a place looking along its edge this far apart first
@@ -330,9 +334,9 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         return None
 
     def picked(rs: range, at: List[Pose2D], fits_at: Optional[List[bool]], most: int,
-               far: float = math.inf) -> List[int]:
-        # of the poses at[r] in the transit space (that fit) the first, then FIT_STEP[-1] m of path on, twice as far
-        # each time (most of them, up to far m of path)
+               far: float = math.inf, steady: float = 0.0) -> List[int]:
+        # of the poses at[r] in the transit space (that fit) the first, then FIT_STEP[-1] m of path on, every
+        # FIT_STEP[-1] up to steady m, twice as far each time past that (most of them, up to far m of path)
         got, d, nxt, last = [], 0.0, 0.0, 0
         for r in rs:
             d += math.hypot(at[r].x - at[last].x, at[r].y - at[last].y) if got else 0.0
@@ -341,18 +345,18 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
                 break
             if (fits_at is None or fits_at[r]) and d >= nxt and route.transit.is_free([(at[r].x, at[r].y)]):
                 got.append(r)
-                nxt = max(FIT_STEP[-1], 2.0 * d)
+                nxt = d + FIT_STEP[-1] if d < steady else max(FIT_STEP[-1], 2.0 * d)
                 if len(got) == most:
                     break
         return got
 
     def drive_on(i: int) -> Optional[Tuple[float, int, int, List[Pose2D]]]:
         # a drive (_Route.drive_to) through the transit space from one of the latest poses in it (FIT_TURNS of them,
-        # picked()) to one of the next ones in it that fit (up to the section's end)
+        # picked()) to the first of the next ones in it that fit it gets to (FIT_ON, up to the section's end)
         end = next((j for j in range(i + 1, n) if j in starts), n)
         seen[0] = max(seen[0], end - 1)
         backs = picked(range(len(out) - 1, first - 1, -1), out, None, FIT_TURNS)
-        for j in picked(range(i + 1, end), poses, fit, n):
+        for j in picked(range(i + 1, end), poses, fit, n, steady=FIT_ON):
             for k in backs:
                 way = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
                                      ((out[k].x, out[k].y), out[k].yaw))
@@ -434,7 +438,7 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
     # where a plan before with the same body, spaces and settings got to, as far as it read the same poses
     hashed = hashlib.sha1(repr((step, fp.corners, fp.spin_margin, fp.turning.back, FIT_REACH, FIT_STEP,
                                 FIT_PLACE, FIT_VIA, FIT_EASE, FIT_EASE_OFF, FIT_DRIVE, budget, FIT_START, FIT_LATER,
-                                FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY,
+                                FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY, FIT_ON,
                                 route.cfg.turn_radius, route.cfg.min_turn_radius, route.cfg.turn_on_spot,
                                 route.cfg.allowed_turns, route.cfg.headland_corners)).encode())
     for geom in (fp.space, route.transit.space, route.field):
