@@ -462,6 +462,9 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     transit = area_space if transit_space is drive_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
+    if cfg.robot_outline is not None:  # (the way the outline's points go)
+        ring = list(boundary)
+        route.recorded = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(ring, ring[1:] + ring[:1])) > 0
     if not cfg.body:
         route.warnings.append(cfg.no_body)
     route.loop_counts = (count, islands) if islands != count else None

@@ -156,6 +156,8 @@ class _Route:
         self.section = 0
         # rings (by id) the centre drives with the blade on their inner side, see centre_rings
         self.blade_in: set = set()
+        # with robot_outline: whether the outline was recorded ccw, its outermost loop goes that way (see drive_ring)
+        self.recorded: Optional[bool] = None
         # what the segments added now mow or lead to, and where every loop and lane comes from
         self.source = ''
         self.origins: Dict[str, Dict[str, Any]] = {}
@@ -585,6 +587,11 @@ class _Route:
             # rings come with the mowable side on the left: the blade goes on the other side, but for the rings
             # driven with the blade on the inner one
             flip = (self.cfg.blade_offset > 0) != (id(ring) in self.blade_in)
+        elif self.recorded is not None and self.cfg.perimeter_direction in ('auto', 'random') and kind == PERIMETER \
+                and not hole and level == 0:
+            # the outermost loop the way the outline was recorded: the body where it was then (its real edges), the
+            # front nowhere else (rings come ccw)
+            flip = not self.recorded
         elif direction == 'auto':
             flip = False
             # the start pose's heading counts too: no half turn on the spot before the first loop

@@ -95,6 +95,9 @@ A few worth knowing:
   `angle_min`..`angle_max`. Leave OpenMower's `mow_angle_increment` at 0, else both add up.
 - `perimeter_direction: random`: the loops go round one way or the other at random, drawn again after every finished
   mow, the same for all areas of a mow. Resuming it and the preview go the same way.
+- With the body's outline (`robot_outline`, a model's contour in the app) the outermost loop goes the way the edge
+  was recorded (with `auto` and `random`): the body stays where it was while recording, a long front gets round the
+  bends of the edge. The other loops go as set.
 - `lane_spacing_mode: auto`: the planner picks the lane spacing, `perimeter_passes: -1` the number of loops.
 - `lane_overlap_limit`: on the lanes and the turns between them the mower gets no further out than the lanes reach
   (`lane_overlap_passes`, OpenMower's `outline_overlap_count`), so it keeps further off the edge there. Without it

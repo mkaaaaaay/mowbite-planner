@@ -120,7 +120,8 @@ PARAMETERS = {
                         lambda v: v in PERIMETER_ORDERS, 'must be first or last'),
     'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces, random: ccw or cw at '
                             'random for each count of finished mows (the ROS 1 node counts them, here none: the '
-                            'same way every plan)', lambda v: v in PERIMETER_DIRECTIONS,
+                            'same way every plan). With robot_outline the outermost loop of auto and random goes the '
+                            'way the outline was recorded', lambda v: v in PERIMETER_DIRECTIONS,
                             'must be auto, ccw, cw or random'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),

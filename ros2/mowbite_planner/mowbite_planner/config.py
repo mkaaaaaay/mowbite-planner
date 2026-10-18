@@ -122,7 +122,9 @@ class PlannerConfig:
     crosshatch_angle: float = math.pi / 2  # rad, direction of crosshatch's second lanes to the first
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
     # 'ccw', 'cw' around every loop, 'auto': the way the mower faces, 'random': ccw or cw at random for each count of
-    # finished_mows (another way round every mow, all of a plan asked for again before the next one finishes the same)
+    # finished_mows (another way round every mow, all of a plan asked for again before the next one finishes the same).
+    # With robot_outline (auto, random) the outermost loop along the outline goes the way it was recorded (the way its
+    # points go): the body only where it was then, see edges
     perimeter_direction: str = 'auto'
     angle: Optional[float] = None  # rad, lane direction. None: worked out by angle_strategy
     # 'longest_edge', 'min_width' (narrowest width) or 'optimal' (tries angle_step apart, fewest lanes and

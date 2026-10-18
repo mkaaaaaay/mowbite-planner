@@ -714,6 +714,36 @@ def test_perimeter_direction_random():
             PlannerConfig(**kw).validate()
 
 
+@pytest.mark.parametrize('recorded', [1, -1], ids=['ccw', 'cw'])
+def test_outermost_loop_the_way_recorded(recorded):
+    """With the body's outline (perimeter_direction auto or random) the outermost loop along the outline goes the way
+    the outline was recorded (the way its points go: the body only where it was then), the loops further in as ever
+    (random: at random). ccw and cw: every loop that way; without the outline (robot_width...) every loop as ever: the
+    mower facing east by the southern edge, ccw."""
+    def ways(plan):  # the way round of the loops along the outline (1 ccw, -1 cw), the outermost first
+        got = []
+        loops = [(o['level'], name) for name, o in plan.origins.items() if o['kind'] == 'outline']
+        for _, name in sorted(loops):
+            pts = [p for s in plan.segments if s.source == name and s.kind == PERIMETER
+                   for p in plan.poses[s.start:s.end + 1]]
+            if pts:
+                got.append(1 if signed_area(pts) > 0 else -1)
+        return got
+
+    lawn, ends = rect(0, 0, 10, 6)[::recorded], dict(start=(1, 1, 0.0), end=(1, 1))
+    cfg = PlannerConfig(**dict(MOWER, robot_outline=NX60, angle=0.0))
+    plan = plan_coverage(lawn, [], cfg, **ends)
+    check_invariants(plan, cfg)
+    assert ways(plan)[0] == recorded and len(ways(plan)) == 4
+    for mows, way in ((0, 1), (1, -1)):  # (random: 0 ccw, 1 cw)
+        got = ways(plan_coverage(lawn, [], dataclasses.replace(cfg, perimeter_direction='random', finished_mows=mows),
+                                 **ends))
+        assert got[0] == recorded and set(got[1:]) == {way}
+    assert set(ways(plan_coverage(lawn, [], dataclasses.replace(cfg, perimeter_direction='cw'), **ends))) == {-1}
+    rectangle = dataclasses.replace(cfg, robot_outline=None, **NX60I)
+    assert set(ways(plan_coverage(lawn, [], rectangle, **ends))) == {1}
+
+
 # body and blade --------------------------------------------------------------------------------------------
 
 FORWARD = dict(lane_order='skip', mower_width=0.18, overlap=1 - 0.13 / 0.18, perimeter_offset=0.0)

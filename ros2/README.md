@@ -80,7 +80,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `obstacle_passes` | -1 | loops round the obstacles lying in the lawn like islands, -1: as many as along the edge, 0: none (the lanes go up to them) |
 | `perimeter_offset` | -1.0 | first loop's distance from the outline (m), negative: half the blade |
 | `perimeter_order` | `first` | loops `first` or `last` |
-| `perimeter_direction` | `auto` | `ccw`, `cw`, `auto` (the way the mower faces) or `random` (`ccw` or `cw`, drawn again after every finished mow) |
+| `perimeter_direction` | `auto` | `ccw`, `cw`, `auto` (the way the mower faces) or `random` (`ccw` or `cw`, drawn again after every finished mow); with `robot_outline` the outermost loop of `auto` and `random` goes the way the outline was recorded |
 | `lane_overlap_passes` | 0 | lanes reach this many loops further out (OpenMower's `outline_overlap_count`) |
 | `lane_overlap_limit` | false | on the lanes and their turns the mower gets no further out than the lanes reach |
 | `fill_pattern` | `lanes` | `lanes`, `crosshatch` or `concentric` |
