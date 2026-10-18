@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, bodyfit, config, footprint,  # noqa: E402
                              normalize_angle, plan_coverage, planner, quaternion_to_yaw, swept_area, transit,
                              yaw_to_quaternion)
-from mowbite_planner.maneuvers import (CORNER_ANGLE, MAX_ARC_STEP, bulb_turn, drive_polyline, dubins,  # noqa: E402
-                                       join, omega, path_length, plan_turn, same_position, sample_arc,
+from mowbite_planner.maneuvers import (CORNER_ANGLE, MAX_ARC_STEP, bulb_turn, connect, drive_polyline,  # noqa: E402
+                                       dubins, join, omega, path_length, plan_turn, same_position, sample_arc,
                                        sample_straight, u_turn)
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH, FIT_ROUND, FIT_SPOTS,  # noqa: E402
@@ -31,7 +31,7 @@ from mowbite_planner.config import (LANE, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, T
                                     Lane, PathSegment)
 from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
-from mowbite_planner.route import _Route, _rows, _spins, best_order  # noqa: E402
+from mowbite_planner.route import _Route, _arcs, _rows, _spins, best_order  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.geometry import polygons  # noqa: E402
 from mowbite_planner.report import check_plan, drive_time, track_mowed  # noqa: E402
@@ -1719,6 +1719,25 @@ def test_turn_radius_zero():
     assert plan_coverage(lawn, [bed], PlannerConfig(**bare), start=(1, 1, 0.0)).config.turn_radius == 0.0
 
 
+def test_loop_round_tight_tip(monkeypatch):
+    """With the body checked the loop round a tip too tight for a long front (it sticks out there by more than loop_in
+    takes a loop in) takes the tip on Dubins' arc (loop_round) and goes on along the edges on both sides of it, where
+    else the path left the loop out down the edge after the tip: far less unmowed, the body in all the same."""
+    nose = [(0.6, 0.06), (0.55, 0.16), (0.35, 0.23), (0.0, 0.26), (-0.12, 0.23), (-0.21, 0.1), (-0.21, -0.1),
+            (-0.12, -0.23), (0.0, -0.26), (0.35, -0.23), (0.55, -0.16), (0.6, -0.06)]
+    # a neck going up from the lawn, its east edge meeting the curve over its top at a sharp tip
+    neck = [(0, 0), (6.5, 0), (6.5, 2.0), (5.32, 2.0), (2.1, 5.45), (1.8, 5.35), (1.45, 5.15), (1.15, 5.0),
+            (1.0, 4.6), (1.0, 2.0), (0, 2.0)]
+    cfg = PlannerConfig(edges='recorded', turn_radius=0.0, mower_width=0.3, blade_ahead=0.225, perimeter_passes=3,
+                        robot_outline=nose, lane_order='skip', perimeter_offset=0.0)
+    plan = plan_coverage(neck, [], cfg, start=(0.5, 0.5, 0.0))
+    monkeypatch.setattr('mowbite_planner.route.LOOP_ROUND', ())
+    without = plan_coverage(neck, [], cfg, start=(0.5, 0.5, 0.0))
+    report, before = check_plan(plan), check_plan(without)
+    assert report['body_out'] == [] and before['body_out'] == []
+    assert report['left_m2'] < before['left_m2'] - 0.5
+
+
 def test_spin_margin_kept():
     """Turning on the spot the body keeps spin_margin further off the real edges than the margins (worked out here on
     their own), anywhere on the last SPIN_BACK of the way in, where OpenMower's FTC turns: round the sunshade and the
@@ -2587,6 +2606,21 @@ def test_arriving_the_other_way_turns_into_it():
     poses = route.drive_to((2.0, 3.0), 0.0)
     assert (poses[-1].x, poses[-1].y) == pytest.approx((2.0, 3.0)) and _spins(poses, math.pi, 0.0) == 0
     assert all(space.is_free([(p.x, p.y)]) for p in poses)
+
+
+def test_turning_on_the_spot_no_pirouettes():
+    """With turn_on_spot a drive whose arcs would turn it round a whole turn without crossing its own way (to just
+    behind it, arriving facing the way it left: a pirouette) turns on the spot where it leaves and arrives instead."""
+    space = TransitPlanner(Polygon(rect(0, 0, 10, 6)), 0.05)
+    cfg = PlannerConfig(**dict(FORWARD, turn_on_spot=True))
+    arcs = connect((5.0, 3.0), 0.0, (3.0, 3.0), 0.0, cfg.turn_radius, cfg.waypoint_spacing, space.is_free,
+                   space.careful_path)
+    assert _arcs(arcs) > 1.5 * math.pi and LineString([(p.x, p.y) for p in arcs]).is_simple
+    route = _Route(cfg, space, space, (5.0, 3.0), 0.0, None)
+    route.started = True
+    poses = route.drive_to((3.0, 3.0), 0.0)
+    assert (poses[-1].x, poses[-1].y) == pytest.approx((3.0, 3.0)) and _arcs(poses) < 1e-6
+    assert _spins(poses, 0.0, 0.0) == 2
 
 
 def test_smooth_spins():

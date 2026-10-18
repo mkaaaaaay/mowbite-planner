@@ -9,9 +9,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
-from .config import (EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_TRIES,
-                     ORDER_BUDGET, PERIMETER, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN,
-                     TURN_REACH, XY, Lane, PathSegment, PlannerConfig)
+from .config import (EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_ROUND,
+                     LOOP_ROUND_GAP, LOOP_ROUND_REACH, LOOP_ROUND_TRIES, LOOP_TRIES, ORDER_BUDGET, PERIMETER,
+                     ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, Lane,
+                     PathSegment, PlannerConfig)
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
@@ -225,8 +226,8 @@ class _Route:
         where they fit. Where it would arrive the other way round (turning on the spot by more than SPIN_LIMIT there),
         via a U-turn into it from beside it, like between lanes, if that turns on the spot less. Where it still would
         and a lane starts there (straight to head), with min_turn_radius into_lane. With turn_on_spot neither, and on
-        the spot where it leaves and arrives where the arcs there would make it cross its own way. None if there's no
-        way."""
+        the spot where it leaves and arrives where the arcs there would make it cross its own way or turn it round
+        more than half a turn (a quarter turn more than on the spot: a pirouette). None if there's no way."""
         if space is None and self.field is not None:
             way = self.headland_way(target, heading, head)
             if way is not None:
@@ -243,10 +244,14 @@ class _Route:
 
         best = drive(target, heading)
         if best is not None and self.cfg.turn_on_spot:
-            # (on the spot where it leaves and arrives where the arcs there make it cross its own way)
-            if len(best) > 3 and not LineString([(p.x, p.y) for p in best]).is_simple:
-                best = connect(pos, None, target, None, r, self.step, space.is_free, space.careful_path, self.body,
-                               self.cfg.min_turn_radius) or best
+            # (on the spot where it leaves and arrives where the arcs there make it cross its own way, or turn it round
+            # more than half a turn all together where on the spot they turn it a quarter turn less: no pirouettes)
+            crosses = len(best) > 3 and not LineString([(p.x, p.y) for p in best]).is_simple
+            if crosses or _arcs(best) > math.pi:
+                spot = connect(pos, None, target, None, r, self.step, space.is_free, space.careful_path, self.body,
+                               self.cfg.min_turn_radius)
+                if spot is not None and (crosses or _arcs(spot) < _arcs(best) - 0.5 * math.pi):
+                    best = spot
             return best
         if best is None or heading is None or r <= 1e-3:
             return best
@@ -637,8 +642,9 @@ class _Route:
         self.loop_side[name] = -1.0 if flip else 1.0
 
     def loops_in(self, places: Sequence[Sequence[float]]) -> Dict[int, List[Pose2D]]:
-        """The loops further in round those places (loop_in): [x, y, m], where the body sticks out on the path and m of
-        it are left out for that. Their segments get the new poses, returns the poses they had (by segment)."""
+        """The loops further in round those places (loop_in), their corners too tight for that rounded (loop_round):
+        [x, y, m], where the body sticks out on the path and m of it are left out for that. Their segments get the new
+        poses, returns the poses they had (by segment)."""
         before: Dict[int, List[Pose2D]] = {}
         for k, seg in enumerate(self.segments):
             side = self.loop_side.get(seg.source) if seg.kind == PERIMETER else None
@@ -648,11 +654,12 @@ class _Route:
             for a, b in zip(seg.poses, seg.poses[1:]):
                 at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
             # (a place is given to the cm)
-            near = [(at[i], m) for x, y, m in places for i, p in enumerate(seg.poses)
+            near = [(at[i], m, (x, y)) for x, y, m in places for i, p in enumerate(seg.poses)
                     if abs(p.x - x) < 0.006 and abs(p.y - y) < 0.006]
             if not near:
                 continue
-            poses = self.loop_in(seg.poses, side, lambda i: any(abs(at[i] - d) <= m for d, m in near))
+            poses = self.loop_in(seg.poses, side, lambda i: any(abs(at[i] - d) <= m for d, m, _ in near))
+            poses = self.loop_round(poses, [(xy, m) for _, m, xy in near])
             if poses is not seg.poses:
                 before[k], seg.poses = seg.poses, poses
                 self.loops[int(seg.source.split('-')[1])] = [(p.x, p.y) for p in poses]
@@ -770,6 +777,64 @@ class _Route:
             out += poses[done:j0] + new
             done, k = j1 + 1, last + 1
             self._count('loops_in')
+        return out + poses[done:] if done else poses
+
+    def loop_round(self, poses: List[Pose2D], places: Sequence[Tuple[XY, float]]) -> List[Pose2D]:
+        """With the body checked: where a stretch of a loop still sticks out within m of a place ((x, y), m), a corner
+        too tight for the body (its front swings out further than loop_in takes it in), Dubins' way from the loop's
+        way before it onto its way after it in its place (see LOOP_ROUND): the corner rounded off, the loop on along
+        the edge on both sides. Not over the loop's ends or where it turns on the spot. poses itself where nothing
+        changes."""
+        fp, n = self.footprint, len(poses)
+        if fp is None or n < 3:
+            return poses
+        fit = fp.fit(poses)
+        at = [0.0]
+        for a, b in zip(poses, poses[1:]):
+            at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
+        runs: List[List[int]] = []
+        for i in range(1, n - 1):
+            if fit[i]:
+                continue
+            if runs and at[i] - at[runs[-1][1]] <= LOOP_ROUND_GAP:
+                runs[-1][1] = i
+            else:
+                runs.append([i, i])
+        runs = [run for run in runs if any(math.hypot(poses[i].x - x, poses[i].y - y) <= m
+                                           for i in range(run[0], run[1] + 1) for (x, y), m in places)]
+        if not runs:
+            return poses
+        spins = [i for i in range(1, n) if same_position(poses[i - 1], poses[i]) and
+                 angle_diff(poses[i].yaw, poses[i - 1].yaw) > SPIN]
+        out: List[Pose2D] = []
+        done = 0  # (the poses before it are in out)
+        for i0, i1 in runs:
+            if i0 <= done:
+                continue
+            # (from where to where: what it leaves of the loop, the least first)
+            ends = sorted((at[i0] - at[j0] + at[j1] - at[i1], j0, j1)
+                          for j0 in range(i0 - 1, max(done, 1) - 1, -1)
+                          if fit[j0] and at[i0] - at[j0] <= LOOP_ROUND_REACH
+                          for j1 in range(i1 + 1, n - 1) if fit[j1] and at[j1] - at[i1] <= LOOP_ROUND_REACH and
+                          not any(j0 < k <= j1 for k in spins))
+            got, tries = None, 0
+            for _, j0, j1 in ends:
+                turn = sum(angle_diff(poses[k].yaw, poses[k + 1].yaw) for k in range(j0, j1))
+                for r in LOOP_ROUND:
+                    tries += 1
+                    m = dubins(poses[j0], poses[j1], r, self.step, loops=False, turning=turn + 0.5 * math.pi)[:1]
+                    way = join(*(piece.poses for piece in m[0].pieces)) if m else None
+                    if way and all(fp.fit(way)) and self.area.is_free([(p.x, p.y) for p in way]):
+                        got = j0, j1, way
+                        break
+                if got is not None or tries >= LOOP_ROUND_TRIES:
+                    break
+            if got is None:
+                continue
+            j0, j1, way = got
+            out += poses[done:j0] + way
+            done = j1 + 1
+            self._count('loops_rounded')
         return out + poses[done:] if done else poses
 
     def perimeter(self, levels: List[object], base_holes: List[List[XY]], last: bool = False,
@@ -1492,6 +1557,11 @@ def _spins(poses: Sequence[Pose2D], heading_in: Optional[float], heading_out: Op
     yaws = ([heading_in] if heading_in is not None else []) + [p.yaw for p in poses] + \
         ([heading_out] if heading_out is not None else [])
     return sum(1 for a, b in zip(yaws, yaws[1:]) if angle_diff(a, b) > SPIN_LIMIT)
+
+
+def _arcs(poses: Sequence[Pose2D]) -> float:
+    """rad the way turns on its arcs all together (not on the spot)."""
+    return sum(angle_diff(a.yaw, b.yaw) for a, b in zip(poses, poses[1:]) if not same_position(a, b))
 
 
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:

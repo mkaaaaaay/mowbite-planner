@@ -72,14 +72,22 @@ EARLIER_LEFT = 1e-3
 # there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in
 # instead: a step of LOOP_IN[0] at a time, LOOP_IN[1] at most (the next loop mows what's further in), getting there and
 # back over LOOP_EASE m, the least and the shortest that fit. A stretch on its own, else with the next LOOP_JOIN ones
-# close after it, else with all of those; LOOP_TRIES tried at most for a loop (_Route.loop_in). Kept where the path
-# then leaves LOOP_GAIN m2 less unmowed
+# close after it, else with all of those; LOOP_TRIES tried at most for a loop (_Route.loop_in). Where a stretch there
+# still sticks out (a corner too tight for the body, its front swinging out further than LOOP_IN[1]), Dubins' way of
+# LOOP_ROUND m (the widest that fits) in its place from the loop's way LOOP_ROUND_REACH m before it at most onto its way
+# as far after it, the closest first: the corner rounded off, the loop on along the edge on both sides (stretches less
+# than LOOP_ROUND_GAP m apart one, LOOP_ROUND_TRIES tried at most for a stretch, _Route.loop_round). Kept where the
+# path then leaves LOOP_GAIN m2 less unmowed
 LOOP_LEFT = 1.5
 LOOP_GAIN = 0.05
 LOOP_IN = (0.02, 0.1)
 LOOP_EASE = (0.5, 1.0, 2.0)
 LOOP_JOIN = 3
 LOOP_TRIES = 300
+LOOP_ROUND = (1.0, 0.75, 0.5, 0.35, 0.25)
+LOOP_ROUND_REACH = 3.0
+LOOP_ROUND_GAP = 1.0
+LOOP_ROUND_TRIES = 1500
 # the further ways of bodyfit's _fit_body (and the way in to the plan's start, see route's START_CLEAR) get off the path
 # and back on it easing off and onto its line: t m along it FIT_EASE_OFF m * (e^(t / l) - 1) off it at most, l
 # FIT_EASE times how far the body reaches behind the centre getting off, ahead of it getting back on (the rear, the
@@ -173,8 +181,8 @@ class PlannerConfig:
     # turning on the spot where the path would drive a loop (for lawns that take it). Off: where the path would turn on
     # the spot by more than SPIN_LIMIT a loop out (an omega) in its place where it fits (_smooth_spins). On: no loop
     # out, no bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive
-    # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way.
-    # The body fits turning like everywhere
+    # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way or
+    # turn it round more than half a turn. The body fits turning like everywhere
     turn_on_spot: bool = False
     # the planner picks every turn's radius, turn_radius the least: a wider one where the lanes are further apart or
     # there's room (WIDER_TURNS of turn_radius, the widest that fits), the lanes ending earlier for a turn of it where
