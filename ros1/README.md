@@ -80,7 +80,7 @@ set `overlap`.
 | --- | --- |
 | `planner.settings` | every setting with value, default, type, unit, range, and where it comes from |
 | `planner.settings.set` | `{"turn_radius": 0.3, ...}`, checked as a whole, `null` resets one |
-| `planner.plan` | a plan like the app's preview, plus segments, stats, warnings and how long mowing it takes (`duration`, gets better with every finished mow); `report: true` adds a check (unmowed bits, where the body would stick out) |
+| `planner.plan` | a plan like the app's preview, plus segments, stats, warnings and how long mowing it takes (`duration`, gets better with every finished mow); `report: true` adds a check (unmowed bits, their outlines in `left` to draw them, where the body would stick out) |
 | `planner.drive` | how close the body really got to the edges on a mow (from OpenMower's position history), also logged after every mow |
 | `planner.leftovers` | what a mow really left (from its track) and the passes over it; with `arm: true` the next start of the mower only mows those |
 | `planner.angle.reset` | puts the stripe rotation (`angle_increment`) back to the start |

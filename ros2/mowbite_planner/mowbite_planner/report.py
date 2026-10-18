@@ -19,6 +19,10 @@ TUFT = 0.01
 LEFT_PIECE = 0.05
 LEFT_TOTAL = 0.1
 LEFT_SHARE = 5e-4
+# check_plan's 'left': the outlines of the LEFT_SHOWN biggest pieces left unmowed, simplified to LEFT_SIMPLIFY m (for
+# the app to draw where they are)
+LEFT_SHOWN = 50
+LEFT_SIMPLIFY = 0.01
 # m, poses may be this far off the space they belong in (rounding, simplifying)
 TOLERANCE = 2e-3
 # OpenMower's FTC controller (move_base_flex/FTCPlanner): m/s where the way ahead stays straight for speed_fast_threshold
@@ -94,8 +98,12 @@ def track_mowed(runs: Sequence[Sequence[Sequence[float]]], mower_width: float, b
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
-    """{'hard': [...], 'soft': [...], 'body_out': [...], 'mowed_m2', 'left_m2', 'left_pieces', 'double_mowed_pct',
-    ...}. body_out: the poses where the mower's body sticks out (see planner.body_out), empty when it isn't checked.
+    """{'hard': [...], 'soft': [...], 'body_out': [...], 'mowed_m2', 'left_m2', 'left_pieces', 'left',
+    'double_mowed_pct', ...}. body_out: the poses where the mower's body sticks out (see planner.body_out), empty
+    when it isn't checked.
+
+    left: where it leaves grass, the LEFT_SHOWN biggest pieces of the left_pieces (TUFT m2 at least), biggest first:
+    [{'m2', 'outline': [[x, y], ...]}], the outline simplified to LEFT_SIMPLIFY and rounded to mm.
 
     double_mowed_pct: how much more is mowed than the area, every further pass over a spot counted again
     (the sum of what each segment mows on its own, less what they mow together)."""
@@ -145,6 +153,9 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
         pieces = [p for p in polygons(left) if p.area >= TUFT]
         out.update(mowed_m2=round(mowed.area, 3), left_m2=round(left.area, 3), left_pieces=len(pieces),
                    area_m2=round(plan.free_space.area, 3))
+        out['left'] = [{'m2': round(p.area, 3),
+                        'outline': [[round(x, 3), round(y, 3)] for x, y in p.simplify(LEFT_SIMPLIFY).exterior.coords]}
+                       for p in sorted(pieces, key=lambda p: -p.area)[:LEFT_SHOWN]]
         if margin > 1e-9:
             edge = plan.free_space.area - target.area
             out['edge_left_m2'] = round(edge, 3)

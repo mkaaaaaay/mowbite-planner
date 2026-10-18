@@ -34,7 +34,7 @@ from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.route import _Route, _arcs, _rows, _spins, best_order  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.geometry import polygons  # noqa: E402
-from mowbite_planner.report import check_plan, drive_time, track_mowed  # noqa: E402
+from mowbite_planner.report import LEFT_SHOWN, check_plan, drive_time, track_mowed  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
 DEG = math.pi / 180.0
@@ -2606,6 +2606,21 @@ def test_arriving_the_other_way_turns_into_it():
     poses = route.drive_to((2.0, 3.0), 0.0)
     assert (poses[-1].x, poses[-1].y) == pytest.approx((2.0, 3.0)) and _spins(poses, math.pi, 0.0) == 0
     assert all(space.is_free([(p.x, p.y)]) for p in poses)
+
+
+def test_check_plan_left_outlines():
+    """check_plan's left: the outlines of the pieces left unmowed (for the app to draw), as many as left_pieces says (up
+    to LEFT_SHOWN), biggest first, each a closed ring about as big as given, together no more than left_m2."""
+    plan = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, angle=0.3)), start=(1, 1, 0.0))
+    report = check_plan(plan)
+    left = report['left']
+    assert left and len(left) == min(report['left_pieces'], LEFT_SHOWN)
+    assert [p['m2'] for p in left] == sorted((p['m2'] for p in left), reverse=True)
+    for piece in left:
+        ring = piece['outline']
+        assert ring[0] == ring[-1] and len(ring) >= 4
+        assert Polygon(ring).area == pytest.approx(piece['m2'], abs=0.01 + 0.1 * piece['m2'])
+    assert sum(p['m2'] for p in left) <= report['left_m2'] + 1e-6
 
 
 def test_turning_on_the_spot_no_pirouettes():
