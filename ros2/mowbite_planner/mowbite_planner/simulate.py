@@ -72,9 +72,11 @@ HISTORY_NOISE = 0.03
 HISTORY_HEADING = math.radians(8.0)
 HISTORY_BEAT = 10
 HISTORY_RDP = 0.01
-# evaluate: m driven or rad turned between two looks at the body, points of the blade's way buffered at once, m within
-# which places where the body got out count as one
+# evaluate: m driven or rad turned between two looks at the body, m the body has to get out by to count (like the node's
+# planner.drive: less is the noise of a few mm), points of the blade's way buffered at once, m within which places
+# where the body got out count as one
 BODY_STEP = 0.05
+BODY_OFF = 0.01
 BODY_TURN = math.radians(5.0)
 BLADE_PIECE = 400
 PLACE = 0.3
@@ -1000,8 +1002,8 @@ def mowed_area(plan: CoveragePlan, samples: Sequence[Tuple]):
 def body_places(plan: CoveragePlan, samples: Sequence[Tuple], modes: Sequence[str] = (PATH, RECOVERY)) \
         -> Tuple[List[List[float]], int]:
     """Where the body got out of plan.body_space (the edges less their margins) where the mower really was, looked at
-    every BODY_STEP m or BODY_TURN rad: ([[x, y, m], ...] the farthest out within PLACE of each other, farthest first;
-    how many looks found it out). Nothing without a body outline."""
+    every BODY_STEP m or BODY_TURN rad: ([[x, y, m], ...] the farthest out (by more than BODY_OFF) within PLACE of each
+    other, farthest first; how many looks found it out by more than that). Nothing without a body outline."""
     cfg = plan.config
     if cfg is None or not cfg.body or plan.body_space is None:
         return [], 0
@@ -1019,7 +1021,7 @@ def body_places(plan: CoveragePlan, samples: Sequence[Tuple], modes: Sequence[st
     found = []
     for i in range(0, len(bad), 200):
         part = bad[i:i + 200]
-        found += [(d, xy) for d, xy in fp.out_by([(None, p) for p in part]) if xy is not None and d > 0]
+        found += [(d, xy) for d, xy in fp.out_by([(None, p) for p in part]) if xy is not None and d > BODY_OFF]
     places: List[List[float]] = []
     for d, (x, y) in sorted(found, key=lambda f: -f[0]):
         if all(math.hypot(x - px, y - py) > PLACE for px, py, _ in places):
