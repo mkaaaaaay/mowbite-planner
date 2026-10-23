@@ -14,7 +14,7 @@ import collections
 import dataclasses
 import math
 import random
-from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point
 from shapely.prepared import prep
@@ -78,6 +78,12 @@ BODY_STEP = 0.05
 BODY_TURN = math.radians(5.0)
 BLADE_PIECE = 400
 PLACE = 0.3
+# evaluate: how far off the plan, looked at every that many samples (a controller cycle each)
+TRACK_EVERY = 4
+# simulate's progress: said every that many controller cycles, s of a path's poses a step from mower_logic's ways to
+# its first pose and its sleeps on top of drive_time's guess
+PROGRESS_TICKS = 200
+PIECE_SECONDS = 4.0
 # evaluate: rad/s turned at m/s at most for at least s, a turn on the spot
 SPIN_RATE = 0.5
 SPIN_SPEED = 0.03
@@ -623,6 +629,7 @@ class _World:
         self.blade_cmd = self.blade = False
         self.mode, self.index = APPROACH, -1
         self.ftc = _Ftc(m)
+        self.progress: Optional[Callable[[float], None]] = None
         self.history = _History()
         self.pose_buf: List[Tuple[float, float]] = []
         self.next_history = HISTORY_RATE
@@ -713,25 +720,26 @@ class _World:
         vg = 0.5 * (tl + tr) * (1.0 - m.slip)
         wg = (tr - tl) / m.wheel_distance * (1.0 - m.slip_turn)
         # (an arc)
+        yaw = self.yaw + wg * dt
+        c, s = math.cos(yaw), math.sin(yaw)
         if abs(wg) > 1e-9:
             r = vg / wg
-            self.x += r * (math.sin(self.yaw + wg * dt) - math.sin(self.yaw))
-            self.y -= r * (math.cos(self.yaw + wg * dt) - math.cos(self.yaw))
+            self.x += r * (s - math.sin(self.yaw))
+            self.y -= r * (c - math.cos(self.yaw))
         else:
-            self.x += vg * dt * math.cos(self.yaw)
-            self.y += vg * dt * math.sin(self.yaw)
-        self.yaw = _wrap(self.yaw + wg * dt)
+            self.x += vg * dt * c
+            self.y += vg * dt * s
+        self.yaw = _wrap(yaw)
         self.t = t
         if self.ekf is not None:
-            self._sense(vg, wg, 0.5 * (tl + tr))
+            self._sense(vg, wg, 0.5 * (tl + tr), c, s)
         else:
             self._pose_out()
 
-    def _sense(self, vg: float, wg: float, v_wheels: float) -> None:
-        """The sensors and xbot_positioning, one IMU message."""
+    def _sense(self, vg: float, wg: float, v_wheels: float, c: float, s: float) -> None:
+        """The sensors and xbot_positioning, one IMU message (c, s: of the mower's heading)."""
         m, ekf, t = self.m, self.ekf, self.t
         ox, oy = m.antenna_offset_x, m.antenna_offset_y
-        c, s = math.cos(self.yaw), math.sin(self.yaw)
         # the antenna, where and how fast (kept for the GNSS that's late)
         ax, ay = self.x + c * ox - s * oy, self.y + s * ox + c * oy
         avx, avy = vg * c - wg * (s * ox + c * oy), vg * s + wg * (c * ox - s * oy)
@@ -832,6 +840,8 @@ class _World:
                     return False, ftc.idx
             k += 1
             tick = start + k / m.controller_frequency
+            if self.progress is not None and k % PROGRESS_TICKS == 0:
+                self.progress(self.t)
 
     def move_base(self, goal: Pose2D) -> bool:
         """mower_logic's way to a path's first pose: GlobalPlanner's plan on the costmap (here straight: from where the
@@ -881,11 +891,13 @@ class _World:
 
 
 def simulate(plan: CoveragePlan, model: Optional[MowerModel] = None, start: Optional[Pose2D] = None,
-             t0: float = 0.0) -> SimResult:
+             t0: float = 0.0, progress: Optional[Callable[[float], None]] = None) -> SimResult:
     """The mower mowing plan like OpenMower does, from start (else the plan's first pose): mower_logic's paths
     (export.plan_pieces) one after the other, each driven to its first pose (move_base), the blade spun up when it's
     off, then followed (exe_path); where FTC gives up, a navigation error: the blade off, backing up, on again from
-    where its point got to. t0: s of the unix epoch at the start (for the events and the track)."""
+    where its point got to. t0: s of the unix epoch at the start (for the events and the track). progress: called with
+    how far it got (0..1, by the time simulated against drive_time's guess) every PROGRESS_TICKS controller cycles, an
+    exception it raises ends the simulation."""
     m = model or MowerModel()
     m.validate()
     pieces = plan_pieces(plan)
@@ -893,6 +905,9 @@ def simulate(plan: CoveragePlan, model: Optional[MowerModel] = None, start: Opti
         raise PlanningError('nothing to simulate: the plan has no path')
     first = plan.poses[pieces[0][1]]
     w = _World(plan, m, start or first, t0)
+    if progress is not None:
+        expected = drive_time(plan.poses)['s'] + PIECE_SECONDS * len(pieces) + m.spinup
+        w.progress = lambda t: progress(min(0.99, t / expected))
     if m.positioning:  # (standing a bit: the EKF settled where it is)
         w.run_until(2.0)
     w.emit('STATE', state='MOWING')
@@ -1026,17 +1041,21 @@ def tracking(plan: CoveragePlan, samples: Sequence[Tuple]) -> Dict[str, Dict[str
             lines.append(LineString([(a.x, a.y), (b.x, b.y)]))
             kind_of.append(kinds.get(i, TRANSIT))
     out: Dict[str, Dict[str, float]] = {}
-    follow = [s for s in samples if s[8] == PATH]
+    follow = [s for s in samples if s[8] == PATH][::TRACK_EVERY]
     if not lines or not follow:
         return out
     tree = STRtree(lines)
     by: Dict[str, List[float]] = collections.defaultdict(list)
-    est: List[float] = []
-    for s in follow:
-        q = Point(s[1], s[2])
-        j = int(tree.nearest(q))
-        by[kind_of[j]].append(lines[j].distance(q))
-        est.append(math.hypot(s[1] - s[4], s[2] - s[5]))
+    points = [Point(s[1], s[2]) for s in follow]
+    if hasattr(tree, 'query_nearest'):  # (shapely 2: all at once)
+        (i, j), d = tree.query_nearest(points, return_distance=True, all_matches=False)
+        for k, dist in zip(j.tolist(), d.tolist()):
+            by[kind_of[k]].append(dist)
+    else:
+        for q in points:
+            k = int(tree.nearest(q))
+            by[kind_of[k]].append(lines[k].distance(q))
+    est = [math.hypot(s[1] - s[4], s[2] - s[5]) for s in follow]
     by['estimate'] = est
     for kind, ds in by.items():
         ds = sorted(ds)
@@ -1065,11 +1084,17 @@ def spins(samples: Sequence[Tuple]) -> int:
     return count
 
 
-def evaluate(plan: CoveragePlan, res: SimResult) -> Dict[str, Any]:
+def evaluate(plan: CoveragePlan, res: SimResult, progress: Optional[Callable[[float], None]] = None) \
+        -> Dict[str, Any]:
     """What the simulated mow did: {'s' (how long), 'mow_s' (the blade on), 'model_s' (report.drive_time's guess),
     'driven_m', 'mowed_m2', 'left_m2', 'left_pieces', 'left' (like check_plan, where the blade really went),
     'planned_left_m2' (the plan driven exactly), 'body': {'places', 'looks', 'worst'} (body_places),
-    'nav_errors', 'aborted', 'tracking' (tracking), 'spins'}."""
+    'nav_errors', 'aborted', 'tracking' (tracking), 'spins'}. progress: called with how far it got (0..1) after each
+    part, an exception it raises ends it."""
+    def done(fraction: float) -> None:
+        if progress is not None:
+            progress(fraction)
+
     samples = res.samples
     driven = sum(math.hypot(b[1] - a[1], b[2] - a[2]) for a, b in zip(samples, samples[1:]))
     mow_s = sum(b[0] - a[0] for a, b in zip(samples, samples[1:]) if a[7] and b[7])
@@ -1079,14 +1104,18 @@ def evaluate(plan: CoveragePlan, res: SimResult) -> Dict[str, Any]:
     if cfg is not None and cfg.mower_width > 0:
         _, _, got = left_of(plan, mowed_area(plan, samples))
         out.update(got)
+        done(0.3)
         _, _, planned = left_of(plan, swept_area(plan, cfg.mower_width).intersection(plan.free_space))
         out['planned_left_m2'] = planned['left_m2']
+        done(0.45)
     places, looks = body_places(plan, samples)
     out['body'] = {'places': places[:50], 'looks': looks, 'worst': places[0][2] if places else 0.0}
+    done(0.7)
     out['nav_errors'] = len(res.nav_errors)
     out['aborted'] = res.aborted
     out['tracking'] = tracking(plan, samples)
     out['spins'] = spins(samples)
+    done(1.0)
     return out
 
 

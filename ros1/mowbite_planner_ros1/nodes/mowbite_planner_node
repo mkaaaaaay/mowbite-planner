@@ -85,7 +85,12 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         model_min}, driven_m, mowed_m2, left_m2, left_pieces, planned_left_m2, left (like check_plan's,
                         where the blade really went), body: {places [[x, y, m]] where the body got m into the margins,
                         looks, worst}, nav_errors: [[x, y]] where FTC gave up, aborted, tracking: {kind: {p50, p95,
-                        max}} m off the plan, spins}. Answered on a thread of its own (it takes a while)
+                        max}} m off the plan, spins}. Answered on a thread of its own (it takes a while), one at a
+                        time (another meanwhile: an error)
+  planner.simulate.status  how far the one running got: {running, area_id, phase (planning, simulating,
+                        evaluating), fraction (0..1 of all of it), elapsed_s}; running false: the last one's
+  planner.simulate.cancel  ends the one running ({cancelled: whether one was}), its planner.simulate answers with the
+                        error "cancelled"
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
@@ -241,6 +246,9 @@ SIM_PRESETS = {'ideal': MowerModel, 'omsim': MowerModel.omsim, 'realistic': Mowe
 SIM_SEEDS = 5
 # s between two points of planner.simulate's playback at least and at most
 SIM_PLAYBACK = (0.5, 60.0)
+# planner.simulate.status' fraction: what planning takes of all of it, what simulating takes of a run (the rest of it
+# evaluating it)
+SIM_SHARES = (0.05, 0.65)
 SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
               'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
               'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
@@ -274,6 +282,10 @@ class LogLines(logging.Handler):
 
 
 LOG = LogLines()
+
+
+class Cancelled(Exception):
+    """planner.simulate.cancel: the simulation that runs ends."""
 
 
 class XbotRpc:
@@ -403,6 +415,10 @@ class MowbitePlannerRos1:
         self.classic_name = rospy.get_param('~classic_service', CLASSIC_SERVICE)
         self.classic = None
         self.classic_lock = threading.Lock()
+        # planner.simulate: one at a time, how far it got, cancelled by planner.simulate.cancel
+        self.sim_lock = threading.Lock()
+        self.sim_cancel = threading.Event()
+        self.sim_status = {'running': False}
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
         if rospy.get_param('~rpc', True):
@@ -412,6 +428,8 @@ class MowbitePlannerRos1:
                                                    'planner.drive': self.rpc_drive,
                                                    'planner.leftovers': self.rpc_leftovers,
                                                    'planner.simulate': self.rpc_simulate,
+                                                   'planner.simulate.status': self.rpc_simulate_status,
+                                                   'planner.simulate.cancel': self.rpc_simulate_cancel,
                                                    'planner.angle.reset': self.rpc_angle_reset,
                                                    'planner.log': self.rpc_log})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
@@ -799,7 +817,40 @@ class MowbitePlannerRos1:
         return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
 
     def rpc_simulate(self, params):
-        """planner.simulate, see the top."""
+        """planner.simulate, see the top: one at a time, how far it got in sim_status meanwhile."""
+        if not self.sim_lock.acquire(False):
+            raise PlanningError('a simulation is running')
+        try:
+            self.sim_cancel.clear()
+            started, area = time.time(), [params.get('area_id')]
+
+            def status(phase, fraction):
+                if self.sim_cancel.is_set():
+                    raise Cancelled()
+                self.sim_status = {'running': True, 'area_id': area[0], 'phase': phase,
+                                   'fraction': round(min(1.0, max(0.0, fraction)), 3),
+                                   'elapsed_s': round(time.time() - started, 1)}
+
+            status('planning', 0.0)
+            return self.simulated(params, status, area)
+        except Cancelled:
+            raise PlanningError('cancelled') from None
+        finally:
+            self.sim_status = dict(self.sim_status, running=False)
+            self.sim_lock.release()
+
+    def rpc_simulate_status(self, params):
+        return dict(self.sim_status)
+
+    def rpc_simulate_cancel(self, params):
+        running = bool(self.sim_status.get('running'))
+        if running:
+            self.sim_cancel.set()
+        return {'cancelled': running}
+
+    def simulated(self, params, status, area):
+        """planner.simulate's answer, saying how far it got to status(phase, fraction of all of it) (area[0]: the area's
+        id once it's planned)."""
         params = dict(params)
         model = self.sim_model(params.pop('model', None))
         seeds = params.pop('seeds', 1)
@@ -816,11 +867,15 @@ class MowbitePlannerRos1:
         planned = self.rpc_plan(params, keep)
         if not keep:
             raise PlanningError('no plan to simulate')
-        plan = keep[-1]
+        plan, area[0] = keep[-1], planned.get('area_id')
         runs = []
+        share = (1.0 - SIM_SHARES[0]) / seeds
         for k in range(seeds):
-            got = simulate(plan, model.with_overrides({'seed': model.seed + k}))
-            runs.append((got, evaluate(plan, got)))
+            at = SIM_SHARES[0] + k * share
+            got = simulate(plan, model.with_overrides({'seed': model.seed + k}),
+                           progress=lambda f: status('simulating', at + SIM_SHARES[1] * share * f))
+            runs.append((got, evaluate(plan, got, progress=lambda f: status(
+                'evaluating', at + SIM_SHARES[1] * share + (1.0 - SIM_SHARES[1]) * share * f))))
         got, ev = runs[0]
         out = {'area_id': planned.get('area_id'), 'fingerprint': planned.get('fingerprint'),
                'kept': planned.get('kept'), 'model': self.sim_values(model),

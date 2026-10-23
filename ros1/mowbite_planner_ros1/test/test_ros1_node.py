@@ -626,7 +626,8 @@ def test_rpc_methods_registered(planner):
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
     methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
-               'planner.settings', 'planner.settings.set', 'planner.simulate']
+               'planner.settings', 'planner.settings.set', 'planner.simulate', 'planner.simulate.cancel',
+               'planner.simulate.status']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -934,6 +935,40 @@ def test_rpc_simulate(planner):
     assert {p[4] for p in real['playback']} == {0, 1}
     assert len(json.dumps(real)) < 200000
     assert any('simulated' in line for _, line in rospy.log)
+
+
+def test_rpc_simulate_status_and_cancel(planner):
+    """While a simulation runs, planner.simulate.status says how far it got (planning, simulating, evaluating, the
+    fraction growing), another planner.simulate is refused, planner.simulate.cancel ends it (its answer: the error
+    "cancelled"); afterwards the status says it doesn't run, a new one runs."""
+    send_map(the_map())
+    assert rpc('planner.simulate.status')[0] == {'running': False}
+    assert rpc('planner.simulate.cancel')[0] == {'cancelled': False}
+    rospy.published.clear()
+    request = node_module.RpcRequest(method='planner.simulate', params=json.dumps({'area_id': 'a'}), id='long')
+    rospy.subscribers['/xbot/rpc/request'](request)
+    seen = []
+    for _ in range(600):
+        status = planner.rpc_simulate_status({})
+        if status.get('running') and status['phase'] == 'simulating' and status['fraction'] > 0.05:
+            seen.append(status)
+            break
+        if status.get('running'):
+            seen.append(status)
+        time.sleep(0.05)
+    assert seen and seen[-1]['phase'] == 'simulating' and seen[-1]['area_id'] == 'a'
+    assert all(a['fraction'] <= b['fraction'] for a, b in zip(seen, seen[1:]))
+    with pytest.raises(node_module.PlanningError, match='running'):
+        planner.rpc_simulate({'area_id': 'a'})
+    assert planner.rpc_simulate_cancel({}) == {'cancelled': True}
+    for t in threading.enumerate():
+        if t.name == 'rpc planner.simulate':
+            t.join(300.0)
+    answers = [m for topic, m in rospy.published if m.id == 'long']
+    assert len(answers) == 1 and answers[0].code == -32602 and 'cancelled' in answers[0].message
+    assert planner.rpc_simulate_status({})['running'] is False
+    done, error = rpc_waited('planner.simulate', {'outline': [[0, 0], [4, 0], [4, 3], [0, 3]], 'model': 'ideal'})
+    assert error is None and done['duration']['min'] > 0
 
 
 @pytest.mark.parametrize('params, message', [
