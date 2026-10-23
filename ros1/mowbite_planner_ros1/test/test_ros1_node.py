@@ -626,7 +626,7 @@ def test_rpc_methods_registered(planner):
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
     methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
-               'planner.settings', 'planner.settings.set']
+               'planner.settings', 'planner.settings.set', 'planner.simulate']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -884,6 +884,67 @@ def test_rpc_internal_error_and_others(planner, monkeypatch):
     assert rpc('mowing.plan', {}) == (None, None)
     assert rpc('planner.settings.set', {'turn_radius': 0.5}, rid='') == (None, None)
     assert planner.base.turn_radius == 0.5
+
+
+def rpc_waited(method, params=None, rid='1'):
+    """rpc() for a method answered on a thread of its own (node_module.BACKGROUND): its answer once it's there."""
+    rospy.published.clear()
+    rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method=method, params=json.dumps(params), id=rid))
+    for t in threading.enumerate():
+        if t.name == 'rpc %s' % method:
+            t.join(300.0)
+    assert len(rospy.published) == 1
+    topic, m = rospy.published[0]
+    if topic == '/xbot/rpc/response':
+        return json.loads(m.result), None
+    return None, (m.code, m.message)
+
+
+def test_rpc_simulate(planner):
+    """planner.simulate: the plan planner.plan gives, driven by a simulated mower. An ideal one mows what the plan
+    mows and takes about as long as the model says; this mower's FTC values count (slower: longer); a realistic one
+    runs from its seeds, gives each run's numbers and its track and events on request."""
+    send_map(the_map())
+    rospy.params['/mower_logic'] = {'tool_width': 0.13, 'outline_count': 2, 'mow_angle_offset': 0.0}
+    plan, _ = rpc('planner.plan', {'area_id': 'a'})
+    ideal, error = rpc_waited('planner.simulate', {'area_id': 'a', 'model': 'ideal'})
+    assert error is None and ideal['area_id'] == 'a' and ideal['fingerprint'] == plan['fingerprint']
+    assert ideal['model'] == {'seed': 0} and ideal['nav_errors'] == [] and not ideal['aborted']
+    assert abs(ideal['left_m2'] - ideal['planned_left_m2']) < 0.05
+    assert ideal['tracking']['lane']['p95'] < 0.01
+    assert 0.85 * ideal['duration']['model_min'] < ideal['duration']['mow_min'] < 1.1 * ideal['duration']['model_min']
+    assert 'track' not in ideal and 'runs' not in ideal
+    rospy.params[node_module.FTC_PARAMS] = {'speed_fast': 0.3, 'forward_only': True, 'debug_pid': True}
+    slower, _ = rpc_waited('planner.simulate', {'area_id': 'a', 'model': 'ideal'})
+    assert slower['model'] == {'speed_fast': 0.3, 'seed': 0}
+    assert slower['duration']['mow_min'] > ideal['duration']['mow_min']
+    small = {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]}
+    real, error = rpc_waited('planner.simulate', dict(small, seeds=2, track=True,
+                                                      model={'preset': 'realistic', 'seed': 7}))
+    assert error is None and real['area_id'] is None and real['model']['seed'] == 7
+    assert real['model']['positioning'] is True and real['model']['speed_fast'] == 0.3
+    assert [r['seed'] for r in real['runs']] == [7, 8]
+    assert real['track'] and all(set(seg) == {'blades', 'points'} for seg in real['track'])
+    assert any(seg['blades'] for seg in real['track'])
+    assert real['events'][0]['type'] == 'STATE' and real['events'][0]['t'] >= 0
+    assert all('job_id' not in e for e in real['events'])
+    assert len(json.dumps(real)) < 200000
+    assert any('simulated' in line for _, line in rospy.log)
+
+
+@pytest.mark.parametrize('params, message', [
+    ({'area_id': 'a', 'seeds': 0}, 'seeds'),
+    ({'area_id': 'a', 'seeds': True}, 'seeds'),
+    ({'area_id': 'a', 'model': 'fast'}, 'preset'),
+    ({'area_id': 'a', 'model': ['ideal']}, 'model must be'),
+    ({'area_id': 'a', 'model': {'gps_sigma': 'a lot'}}, 'gps_sigma'),
+    ({'area_id': 'a', 'model': {'wheels': 3}}, 'wheels'),
+    ({'area_id': 'nope'}, 'nope'),
+])
+def test_rpc_simulate_errors(planner, params, message):
+    send_map(the_map())
+    result, error = rpc_waited('planner.simulate', params)
+    assert result is None and error[0] == -32602 and message in error[1], error
 
 
 def test_rpc_log(planner):

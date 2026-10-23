@@ -83,6 +83,7 @@ set `overlap`.
 | `planner.plan` | a plan like the app's preview, plus segments, stats, warnings and how long mowing it takes (`duration`, gets better with every finished mow); `report: true` adds a check (unmowed bits, their outlines in `left` to draw them, where the body would stick out) |
 | `planner.drive` | how close the body really got to the edges on a mow (from OpenMower's position history), also logged after every mow |
 | `planner.leftovers` | what a mow really left (from its track) and the passes over it; with `arm: true` the next start of the mower only mows those |
+| `planner.simulate` | a plan driven by a simulated mower (OpenMower's controller and mower_logic, the errors of a real one with RTK): what it would leave, where the body would get into the margins, how long it takes; `model` picks `realistic` (the default), `ideal` or `omsim`, `track: true` adds its track and events |
 | `planner.angle.reset` | puts the stripe rotation (`angle_increment`) back to the start |
 | `planner.log` | the planner's last 2000 log lines since it started (`since`: only newer ones, `limit`), e.g. for an app to download |
 

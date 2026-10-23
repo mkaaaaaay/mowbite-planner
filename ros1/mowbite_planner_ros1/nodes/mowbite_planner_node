@@ -72,6 +72,18 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         plans mower_logic asks for (within LEFTOVERS_ARMED s) are these, an area with nothing left
                         gets no paths (mower_logic skips it): start mowing as ever and the mower only mows what
                         was left. That job doesn't count as a mow (angle_increment, duration). armed: s it still is
+  planner.simulate      the plan of planner.plan (its params: area_id or outline, settings...) driven by a simulated
+                        mower (mowbite_planner.simulate: OpenMower's FTC controller and mower_logic, the drive,
+                        xbot_positioning, each a bit off like on a real mower): {model (a preset: realistic, the
+                        default, ideal, omsim, or {preset, name: value, ...}: MowerModel's values; this mower's FTC
+                        values, wheel distance and antenna offset over the preset's), seeds (1..SIM_SEEDS runs, the
+                        first one answered, runs: each one's key numbers), track (true: the track like
+                        position_history, [{blades, points}], and the events, t in s from the start)} gives {area_id,
+                        fingerprint, kept, model (its values that aren't an ideal mower's), duration: {min, mow_min,
+                        model_min}, driven_m, mowed_m2, left_m2, left_pieces, planned_left_m2, left (like check_plan's,
+                        where the blade really went), body: {places [[x, y, m]] where the body got m into the margins,
+                        looks, worst}, nav_errors: [[x, y]] where FTC gave up, aborted, tracking: {kind: {p50, p95,
+                        max}} m off the plan, spins}. Answered on a thread of its own (it takes a while)
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
@@ -135,6 +147,7 @@ from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
 from mowbite_planner.mapfile import _points, area_job, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 from mowbite_planner.report import drive_time, track_mowed
+from mowbite_planner.simulate import MowerModel, evaluate, simulate
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
 FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
@@ -220,6 +233,15 @@ TRACK_SETTLE = 2.0
 LEFT_MOST = 0.5
 TIMING_RANGE = (0.5, 2.0)
 FTC_PARAMS = '/move_base_flex/FTCPlanner'
+# planner.simulate: the mowers it drives (MowerModel's), at most this many runs of one (seeds), the mower's own values
+# from these parameters over a preset's (its FTC controller's from FTC_PARAMS too)
+SIM_PRESETS = {'ideal': MowerModel, 'omsim': MowerModel.omsim, 'realistic': MowerModel.realistic}
+SIM_SEEDS = 5
+SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
+              'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
+              'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
+# RPC methods answered on a thread of their own (they take a while, the others go on meanwhile)
+BACKGROUND = ('planner.simulate',)
 # planner.log: the node's last log lines kept in memory
 LOG_LINES = 2000
 
@@ -275,6 +297,12 @@ class XbotRpc:
     def on_request(self, req):
         if req.method not in self.methods:  # another node's
             return
+        if req.method in BACKGROUND:
+            threading.Thread(target=self.answer, args=(req,), name='rpc %s' % req.method, daemon=True).start()
+        else:
+            self.answer(req)
+
+    def answer(self, req):
         try:
             try:
                 params = json.loads(req.params) if req.params else None
@@ -379,6 +407,7 @@ class MowbitePlannerRos1:
                                                    'planner.plan': self.rpc_plan,
                                                    'planner.drive': self.rpc_drive,
                                                    'planner.leftovers': self.rpc_leftovers,
+                                                   'planner.simulate': self.rpc_simulate,
                                                    'planner.angle.reset': self.rpc_angle_reset,
                                                    'planner.log': self.rpc_log})
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
@@ -764,6 +793,81 @@ class MowbitePlannerRos1:
         if not params and self.drive is not None:
             return self.drive
         return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
+
+    def rpc_simulate(self, params):
+        """planner.simulate, see the top."""
+        params = dict(params)
+        model = self.sim_model(params.pop('model', None))
+        seeds = params.pop('seeds', 1)
+        if isinstance(seeds, bool) or not isinstance(seeds, int) or not 1 <= seeds <= SIM_SEEDS:
+            raise PlanningError('seeds must be a whole number 1..%d' % SIM_SEEDS)
+        track = params.pop('track', False)
+        for name in ('poses', 'report', 'trace'):
+            params.pop(name, None)
+        keep = []
+        planned = self.rpc_plan(params, keep)
+        if not keep:
+            raise PlanningError('no plan to simulate')
+        plan = keep[-1]
+        runs = []
+        for k in range(seeds):
+            got = simulate(plan, model.with_overrides({'seed': model.seed + k}))
+            runs.append((got, evaluate(plan, got)))
+        got, ev = runs[0]
+        out = {'area_id': planned.get('area_id'), 'fingerprint': planned.get('fingerprint'),
+               'kept': planned.get('kept'), 'model': self.sim_values(model),
+               'duration': {'min': round(ev['s'] / 60.0, 1), 'mow_min': round(ev['mow_s'] / 60.0, 1),
+                            'model_min': round(ev['model_s'] / 60.0, 1)},
+               'nav_errors': [[round(plan.poses[i].x, 3), round(plan.poses[i].y, 3)] for _, i in got.nav_errors]}
+        out.update({k: ev[k] for k in ('driven_m', 'mowed_m2', 'left_m2', 'left_pieces', 'planned_left_m2', 'left',
+                                       'body', 'aborted', 'tracking', 'spins') if k in ev})
+        if seeds > 1:
+            out['runs'] = [{'seed': model.seed + k, 'min': round(e['s'] / 60.0, 1), 'left_m2': e.get('left_m2'),
+                            'worst': e['body']['worst'], 'nav_errors': e['nav_errors'], 'aborted': e['aborted']}
+                           for k, (_, e) in enumerate(runs)]
+        if track:
+            out['track'] = [{'blades': seg['attributes']['blades'],
+                             'points': [[round(x, 3), round(y, 3)] for x, y in seg['points']]} for seg in got.history]
+            out['events'] = [dict({k: v for k, v in e.items() if k not in ('job_id', 'session_id')},
+                                  t=round(e['t'] - got.t0, 1)) for e in got.events]
+        rospy.loginfo('MowBite Planner: %s simulated (%s): %.0f min, %.2f m2 left (%.2f planned), body %.0f cm into '
+                      'the margins the most, %d navigation errors%s', 'area %s' % out['area_id'] if out['area_id']
+                      else 'an outline', 'seed %d' % model.seed if seeds == 1 else '%d seeds' % seeds,
+                      ev['s'] / 60.0, ev.get('left_m2', 0.0), ev.get('planned_left_m2', 0.0),
+                      100.0 * ev['body']['worst'], ev['nav_errors'], ', given up' if ev['aborted'] else '')
+        return out
+
+    @staticmethod
+    def sim_model(spec):
+        """planner.simulate's mower: a preset (SIM_PRESETS, realistic without one), over it this mower's own values
+        (FTC_PARAMS, SIM_PARAMS), over those spec's: a preset's name or {preset, name: value, ...}."""
+        values = {}
+        if spec is None or isinstance(spec, str):
+            name = spec or 'realistic'
+        elif isinstance(spec, dict):
+            values = dict(spec)
+            name = values.pop('preset', 'realistic')
+        else:
+            raise PlanningError('model must be a preset (%s) or an object of its values' % ', '.join(SIM_PRESETS))
+        if name not in SIM_PRESETS:
+            raise PlanningError('no model preset %r: %s' % (name, ', '.join(SIM_PRESETS)))
+        own = {}
+        ftc = rospy.get_param(FTC_PARAMS, {})
+        for k, v in (ftc.items() if isinstance(ftc, dict) else ()):
+            if k in MowerModel.names() and isinstance(v, (int, float)) and not isinstance(v, bool):
+                own[k] = v
+        for k, param in SIM_PARAMS.items():
+            v = rospy.get_param(param, None)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                own[k] = v
+        return SIM_PRESETS[name]().with_overrides(own).with_overrides(values)
+
+    @staticmethod
+    def sim_values(model):
+        """The model's values that aren't those of an ideal mower (how it differs from one), and its seed."""
+        ideal = MowerModel()
+        return dict({k: getattr(model, k) for k in MowerModel.names() if getattr(model, k) != getattr(ideal, k)},
+                    seed=model.seed)
 
     def after_mow(self, job_id):
         """What follows a finished mow: its planner.drive and timing, then with leftovers_auto what it left."""
