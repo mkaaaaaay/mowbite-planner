@@ -132,7 +132,8 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
     the path as planned where the body sticks out the most there, 'poses': [[x, y, yaw, m, spin]] of those poses (how
     far it sticks out of the space that applies there, see Footprint.out_by, spin 1 where that's turning on the spot),
     'skipped_m': those m added up, 'jumps': [[x, y]] of the places the path jumps over, 'unchecked': [[x, y]] where it
-    starts later or ends before with no such way, 'tries': ways tried}."""
+    starts later or ends before with no such way, 'tries': ways tried, 'spans': [(a, b)] of the places, the poses as
+    planned the path doesn't drive as planned there (from a, back on at b; for the planner, see _loop_ends)}."""
     fp, step = route.footprint, route.step
     n = len(poses)
     section, mows = [0] * n, [False] * n  # (mows: on the way to it the blade mows a loop or a lane)
@@ -569,11 +570,13 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
         return round(sum(hop(o) for o in gone if mows[o]), 2)
 
     worst: List[List[float]] = []
+    spans: List[Tuple[int, int]] = []
 
     def place_of(a: int, b: int, m: float) -> List[float]:
         # [x, y, m of loops and lanes left out] of a place over poses[a..b]: where of those the body sticks out the most
         # (Footprint.out_by: PLACE_STEP apart along its edges first, then closer round the farthest of those that may be
-        # it), [x, y, yaw, how far, 1 where it turns on the spot there else 0] of that pose to worst
+        # it), [x, y, yaw, how far, 1 where it turns on the spot there else 0] of that pose to worst, (a, b) to spans
+        spans.append((a, b))
         bad = [(poses[o - 1] if o not in starts else None, o) for o in range(a, b + 1)
                if not fits(poses[o - 1] if o not in starts else None, o)]
         best = None
@@ -730,7 +733,8 @@ def _fit_body(route: '_Route', poses: List[Pose2D],
             for info in new if info.end > k]
         out[:k] = way
     return out, new, {'fixed': fixed, 'left': len(jumps), 'skipped_m': round(sum(m for _, _, m in places), 2),
-                      'places': places, 'poses': worst, 'jumps': over, 'unchecked': unchecked, 'tries': tries[0]}
+                      'places': places, 'poses': worst, 'jumps': over, 'unchecked': unchecked, 'tries': tries[0],
+                      'spans': spans}
 
 
 def _lanes_field(passes: List[Tuple[float, List[List[Lane]]]], trim: float, half: float):
@@ -778,7 +782,20 @@ def _field_turns(route: '_Route', poses: List[Pose2D],
     return places, arcs, round(deepest, 3)
 
 
-
+def _loop_ends(poses: List[Pose2D], infos: List[SegmentInfo], spans: Sequence[Tuple[int, int]],
+               loops: Dict[str, float]) -> Dict[str, float]:
+    """m of each of those loops (by name) _fit_body's places (spans of poses, infos as planned) leave out at its start
+    and at its end, both added up (where a place leaves all of a loop out, none)."""
+    ends: Dict[str, float] = {}
+    for info in infos:
+        s, e = info.start, info.end
+        if info.kind != PERIMETER or info.source not in loops:
+            continue
+        for a, b in spans:
+            lo, hi = max(a - 1, s), min(b, e)  # (it leaves the path at a - 1 and gets back on at b)
+            if lo < hi and (lo == s) != (hi == e):
+                ends[info.source] = ends.get(info.source, 0.0) + path_length(poses[lo:hi + 1])
+    return ends
 
 
 def _assemble(segments: List[PathSegment]) -> Tuple[List[Pose2D], List[SegmentInfo]]:

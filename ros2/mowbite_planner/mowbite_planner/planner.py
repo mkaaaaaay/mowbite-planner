@@ -36,12 +36,12 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 from shapely.prepared import prep
 
-from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftovers, _mop_up, _round_corners,
-                      _turn_at, _unmowed)
+from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftovers, _loop_ends, _mop_up,
+                      _round_corners, _turn_at, _unmowed)
 from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, LOOP_GAIN,
-                     LOOP_LEFT, MAX_BLADE_OFFSET, MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES, SWEPT_PIECE,
-                     TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, PlannerConfig, PlanningError,
-                     SegmentInfo, _keep)
+                     LOOP_LEFT, LOOP_ON, MAX_BLADE_OFFSET, MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES,
+                     SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, PlannerConfig,
+                     PlanningError, SegmentInfo, _keep)
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells, zone_angles
@@ -645,18 +645,26 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     took('route')
     fitted, parts = None, len({s.section for s in segments})
     if footprint is not None and cfg.body_fit and poses:
-        poses, segments, fitted = _fit_body(route, poses, segments)
-        # where that leaves a loop out for long at a place, the loop further in there instead, if that leaves LOOP_GAIN
-        # m2 less unmowed (and no more places out)
-        before = route.loops_in([p for p in fitted['places'] if p[2] >= LOOP_LEFT])
-        if before:
-            again = _fit_body(route, *_round_corners(route, *_assemble(route.segments)))
+        planned = poses, segments
+        poses, segments, fitted = _fit_body(route, *planned)
+        # where that leaves a loop out for long at a place, the loop further in there instead; then where it leaves a
+        # loop's start or end out, the loop on past its start (LOOP_ON): each if that leaves LOOP_GAIN m2 less unmowed
+        # (and no more places out)
+        for change in (lambda: route.loops_in([p for p in fitted['places'] if p[2] >= LOOP_LEFT]),
+                       lambda: route.loops_on({name: m + LOOP_ON for name, m in _loop_ends(
+                           *planned, fitted['spans'], route.loop_side).items()})):
+            before = change()
+            if not before:
+                continue
+            again_planned = _round_corners(route, *_assemble(route.segments))
+            again = _fit_body(route, *again_planned)
             if again[2]['left'] <= fitted['left'] and len(again[2]['unchecked']) <= len(fitted['unchecked']) and \
                     _unmowed(route, again[0], again[1], free).area <= \
                     _unmowed(route, poses, segments, free).area - LOOP_GAIN:
-                poses, segments, fitted = again
+                planned, (poses, segments, fitted) = again_planned, again
             else:
                 route.loops_back(before)
+        del fitted['spans']
         poses, segments = _round_corners(route, poses, segments)
         if fitted['fixed']:
             route.warnings.append(f'{fitted["fixed"]} places driven another way where the body would stick out, '

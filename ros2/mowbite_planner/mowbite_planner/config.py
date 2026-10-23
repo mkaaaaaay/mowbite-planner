@@ -89,6 +89,12 @@ LOOP_ROUND = (1.0, 0.75, 0.5, 0.35, 0.25)
 LOOP_ROUND_REACH = 3.0
 LOOP_ROUND_GAP = 1.0
 LOOP_ROUND_TRIES = 6000
+# m, with the body checked: where the path goes another way where it gets onto a loop or off it (the body would stick
+# out turning on the spot there, by an obstacle) and leaves the loop's start or end out for that, the loop goes on past
+# its start by what's left out at both ends and LOOP_ON more: the blade mows at its end what's left out at its start,
+# and at its start what's left out at its end (_Route.loops_on). Kept where the path then leaves LOOP_GAIN m2 less
+# unmowed
+LOOP_ON = 0.5
 # the further ways of bodyfit's _fit_body (and the way in to the plan's start, see route's START_CLEAR) get off the path
 # and back on it easing off and onto its line: t m along it FIT_EASE_OFF m * (e^(t / l) - 1) off it at most, l
 # FIT_EASE times how far the body reaches behind the centre getting off, ahead of it getting back on (the rear, the

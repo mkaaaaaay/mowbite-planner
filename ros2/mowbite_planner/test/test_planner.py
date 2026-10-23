@@ -1783,6 +1783,37 @@ def test_loop_round_where_beds_meet_the_edge(monkeypatch):
     assert check_plan(plan)['left_m2'] < check_plan(fewer)['left_m2'] - 0.5
 
 
+def test_loop_on_past_its_start():
+    """_loop_ends: what a place of _fit_body leaves out of a loop's start and of its end (not of its middle, nothing of
+    a loop it leaves out all of). loops_on: the loop goes on past its start by as much as it's told, along itself
+    (what's left out where it gets onto it is mowed at its end), the drive from there to the next loop anew, arriving
+    the way that one starts; loops_back puts both back."""
+    space = TransitPlanner(Polygon(rect(0, 0, 10, 6)), 0.05)
+    cfg = PlannerConfig(**dict(FORWARD, turn_on_spot=True))
+    route = _Route(cfg, space, space, (1.0, 1.0), 0.0, None)
+    for ring in (rect(2, 2, 4, 4)[::-1], rect(6, 2, 8, 4)[::-1]):  # (round two beds, holes come cw)
+        route.drive_ring(ring, True)
+    assert [(s.kind, s.source) for s in route.segments] == [(PERIMETER, 'loop-0'), (TRANSIT, 'loop-1'),
+                                                             (PERIMETER, 'loop-1')]
+    poses, infos = bodyfit._assemble(route.segments)
+    (s, e), (s1, e1) = (infos[0].start, infos[0].end), (infos[2].start, infos[2].end)
+    ends = bodyfit._loop_ends(poses, infos, [(s, s + 10), (e - 5, e + 3), (s1 + 10, s1 + 20), (s1 - 2, e1 + 2)],
+                              route.loop_side)
+    assert ends == {'loop-0': pytest.approx(path_length(poses[s:s + 11]) + path_length(poses[e - 6:e + 1]))}
+    loop, drive, then = route.segments
+    were, way = list(loop.poses), list(drive.poses)
+    before = route.loops_on({'loop-0': 1.0})
+    assert sorted(before) == [0, 1]
+    more = loop.poses[len(were):]
+    assert more == were[1:len(more) + 1]
+    assert 1.0 <= path_length(were[:len(more) + 1]) < 1.0 + cfg.waypoint_spacing + 1e-9
+    assert drive.poses[0] == loop.poses[-1] and same_position(drive.poses[-1], way[-1])
+    assert angle_diff(drive.poses[-1].yaw, then.poses[0].yaw) < 1e-9
+    assert route.loops[0] == [(p.x, p.y) for p in loop.poses]
+    route.loops_back(before)
+    assert loop.poses == were and drive.poses == way and route.loops[0] == [(p.x, p.y) for p in were]
+
+
 def test_spin_margin_kept():
     """Turning on the spot the body keeps spin_margin further off the real edges than the margins (worked out here on
     their own), anywhere on the last SPIN_BACK of the way in, where OpenMower's FTC turns: round the sunshade and the
@@ -1861,7 +1892,9 @@ def test_body_fit_drives_on(monkeypatch):
     there and no other way fits nor turning round, the path drives on (through the transit space) to where it fits
     again instead of jumping there, nothing sticking out (also against the real edges worked out here on their own),
     getting back on at the first pose it gets to of every FIT_STEP[-1] m (FIT_ON). Trying twice as far each time from
-    the place on (FIT_ON 0) it gets back on further round the loop, more of it left out, more unmowed."""
+    the place on (FIT_ON 0) it gets back on further round the loop, more of it left out, more unmowed (the loops not
+    going on past their start for what's left out of them there, _Route.loops_on: FIT_ON's own)."""
+    monkeypatch.setattr(_Route, 'loops_on', lambda self, ends: {})
     lawn, obstacles = rect(0, 0, 5.3, 4.9), [rect(0.28, 2.7, 1.82, 3.86), circle(0.42, 2.25, 0.33, 16)]
     cfg = PlannerConfig(**dict(SHADE_MOWER, edge_margin=0.05, obstacle_margin=0.05, angle=math.radians(30)))
     plan = plan_coverage(lawn, obstacles, cfg, start=(5.0, 0.3, 1.6), end=(5.0, 0.3))

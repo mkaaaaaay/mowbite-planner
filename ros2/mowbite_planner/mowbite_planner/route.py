@@ -665,11 +665,57 @@ class _Route:
                 self.loops[int(seg.source.split('-')[1])] = [(p.x, p.y) for p in poses]
         return before
 
+    def loops_on(self, ends: Dict[str, float]) -> Dict[int, List[Pose2D]]:
+        """The loops (by name) on past their start by those m, along themselves (a loop ends where it starts): what's
+        left out where it gets onto one is mowed at its end, what's left out where it gets off it was at its start. The
+        drive from there to the next loop anew, arriving the way that one starts (none where something else comes next
+        in its section, or where with turn_on_spot off that drive turns on the spot by more than SPIN_LIMIT). Their
+        segments get the new poses, returns the poses they had (by segment)."""
+        before: Dict[int, List[Pose2D]] = {}
+        for k, seg in enumerate(self.segments):
+            by = ends.get(seg.source) if seg.kind == PERIMETER else None
+            if not by or len(seg.poses) < 3 or not same_position(seg.poses[0], seg.poses[-1]):
+                continue
+            at = [0.0]
+            for a, b in zip(seg.poses, seg.poses[1:]):
+                at.append(at[-1] + math.hypot(b.x - a.x, b.y - a.y))
+            # (the loop itself: after an omega in place of turning onto it, see _smooth_spins)
+            first = max(i for i in range(len(seg.poses) - 1)
+                        if same_position(seg.poses[i], seg.poses[0]) and at[i] < 0.5 * at[-1])
+            if by >= at[-1] - at[first]:
+                continue
+            more = [p for i, p in enumerate(seg.poses) if i > first and at[i - 1] - at[first] < by]
+            poses = seg.poses + more
+            nxt = self.segments[k + 1:k + 3]
+            if nxt and nxt[0].section == seg.section:
+                if len(nxt) < 2 or nxt[0].kind != TRANSIT or nxt[1].kind != PERIMETER or \
+                        nxt[1].source not in self.loop_side:
+                    continue
+                drive, after = nxt
+                way = self.drive_from(poses[-1], (drive.poses[-1].x, drive.poses[-1].y), after.poses[0].yaw)
+                if way is None or not self.cfg.turn_on_spot and _spins(way, poses[-1].yaw, after.poses[0].yaw):
+                    continue
+                before[k + 1], drive.poses = drive.poses, way
+            before[k], seg.poses = seg.poses, poses
+            self.loops[int(seg.source.split('-')[1])] = [(p.x, p.y) for p in poses]
+        return before
+
+    def drive_from(self, start: Pose2D, target: XY, heading: Optional[float]) -> Optional[List[Pose2D]]:
+        """drive_to from start (facing its way) instead of from where the mower is."""
+        here = self.pos, self.heading
+        self.pos, self.heading = (start.x, start.y), start.yaw
+        try:
+            return self.drive_to(target, heading)
+        finally:
+            self.pos, self.heading = here
+
     def loops_back(self, before: Dict[int, List[Pose2D]]) -> None:
-        """The loops as they were before loops_in."""
+        """The loops (and the drives after them) as they were before loops_in or loops_on."""
         for k, poses in before.items():
-            self.segments[k].poses = poses
-            self.loops[int(self.segments[k].source.split('-')[1])] = [(p.x, p.y) for p in poses]
+            seg = self.segments[k]
+            seg.poses = poses
+            if seg.kind == PERIMETER:
+                self.loops[int(seg.source.split('-')[1])] = [(p.x, p.y) for p in poses]
 
     def loop_in(self, poses: List[Pose2D], side: float, here=None) -> List[Pose2D]:
         """With the body checked: where it would stick out on a loop (round a bend of the edge the front swings out),
