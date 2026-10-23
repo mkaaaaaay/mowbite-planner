@@ -1911,6 +1911,18 @@ def test_body_fit_drives_on(monkeypatch):
     assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
 
 
+@pytest.mark.parametrize('off', [0.08, -0.08])
+def test_island_by_the_edge_blade_to_the_side(off):
+    """More loops round the islands than along the outline (none here): an island 0.25 m from the edge gets its ring
+    round it and that strip of edge. With the blade off to the side the centre runs that far outside the ring, past
+    the edge: those rings are left out like the first one by the edge, nothing driven outside the space for the
+    centre (the body checked or not)."""
+    for body in ({}, dict(NX60I, body_fit=False)):
+        cfg = PlannerConfig(mower_width=0.18, perimeter_passes=0, obstacle_passes=2, blade_offset=off, **body)
+        plan = plan_coverage(rect(0, 0, 10, 8), [rect(0.25, 3, 1.25, 4)], cfg, start=(5, 1, 0.0))
+        assert not [h for h in check_plan(plan)['hard'] if 'outside' in h]
+
+
 def test_union_of_a_polygon_crossing_itself():
     """union() repairs what GEOS can't unite: a figure eight (as GEOS now and then buffers a way crossing itself, the
     union of a garden's swept area fails on it) becomes its two loops, nothing of either lost."""

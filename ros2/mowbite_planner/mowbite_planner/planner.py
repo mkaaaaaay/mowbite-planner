@@ -360,9 +360,11 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
             blobs = holes_in.buffer(first + k * loop_spacing, QUAD_SEGS)
             strips = [Polygon(strip.exterior) for a in polygons(inside)
                       for strip in polygons(blobs.difference(before).intersection(a)) if strip.area >= half * half]
-            if not k:
-                # (no loop before the first one: by the edge there's none to go back along, the island gets none)
-                strips = [s for s in strips if robot_space.buffer(1e-6).covers(s.exterior)]
+            if not k or off:
+                # (no loop before the first one: by the edge there's none to go back along, the island gets none. With
+                # the blade off to the side the centre runs `off` outside a strip's ring: not past the edge either)
+                strips = [s for s in strips if robot_space.buffer(1e-6).covers(
+                    s.buffer(off, QUAD_SEGS).exterior if off else s.exterior)]
             drive_levels[k] = polygonal(inside.buffer(1.0, QUAD_SEGS).difference(union(strips)))
             before = blobs
     perimeter_levels = drive_levels[:most]
