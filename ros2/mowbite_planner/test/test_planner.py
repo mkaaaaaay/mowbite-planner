@@ -5,6 +5,7 @@ import itertools
 import math
 import os
 import random
+import struct
 import sys
 import threading
 import time
@@ -1908,6 +1909,38 @@ def test_body_fit_drives_on(monkeypatch):
     fitted, checked = doubled.stats['body_fit'], check_plan(doubled)
     assert fitted['jumps'] == [] and checked['body_out'] == []
     assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
+
+
+def test_body_fit_drives_on_not_too_far(monkeypatch):
+    """A rectangle body (its front corners square) in a benchmark's garden of hard bits (the main zone of
+    RTK_Planner_Ultimate_Benchmark_v2: points twice, a 2 cm spike, a 23 degree spike, an hourglass, a horseshoe, a dead
+    end, round trees 0.32 m apart): where the outermost loop gets into the 23 degree spike's tip nothing fits, and
+    driving on got back onto the path only some 140 m further on, the outer loops all left out in between (the points
+    as OpenMower keeps them, float32: with the decimals it gets back on sooner). Driving on leaves FIT_ON_MAX m of loops
+    and lanes out at most: turning round further to the side instead, about half as much left out, no jump."""
+    def kept(pts):
+        return [tuple(struct.unpack('f', struct.pack('f', v))[0] for v in p) for p in pts]
+
+    zone = [(0.0, 0.0), (0.0, 0.0), (4.0, 0.0), (8.0, 0.0), (8.01, -0.02), (8.02, 0.0), (12.0, 0.0), (18.0, 0.0),
+            (12.0, 2.5), (12.0, 5.0), (8.0, 5.0), (8.0, 6.5), (12.0, 6.5), (12.0, 14.0), (8.0, 14.0), (8.0, 8.5),
+            (4.0, 8.5), (4.0, 14.0), (0.0, 14.0), (0.0, 12.7), (-4.0, 12.7), (-4.0, 12.0), (0.0, 12.0), (0.0, 6.5),
+            (7.3, 6.5), (7.3, 5.0), (0.0, 5.0), (0.04, 4.5), (-0.03, 4.0), (0.04, 3.5), (-0.04, 3.0), (0.03, 2.5),
+            (-0.03, 2.0), (0.04, 1.5), (-0.02, 1.0)]
+    trees = [[(round(x + r * math.cos(-math.radians(15 * k)), 3), round(2.5 + r * math.sin(-math.radians(15 * k)), 3))
+              for k in range(24)] for x, r in ((3.5, 0.6), (4.92, 0.5))]
+    islands = [kept(o) for o in trees + [rect(3.75, 3.5, 4.75, 4.3), rect(0.25, 9.5, 1.25, 10.5),
+                                         rect(9.5, 10.5, 10.5, 11.5)]]
+    zone = kept(zone)
+    cfg = PlannerConfig(mower_width=0.18, overlap=1 - 0.14 / 0.18, perimeter_passes=3, angle=0.0, perimeter_offset=0.0,
+                        lane_order='skip', narrow_parts='loops', robot_width=0.41, robot_front=0.43, robot_rear=0.18,
+                        blade_ahead=0.185)
+    plan = plan_coverage(zone, islands, cfg, start=(-1.5, 0.5, 0.0), end=(-1.5, 0.5))
+    monkeypatch.setattr(bodyfit, 'FIT_ON_MAX', math.inf)
+    before = plan_coverage(zone, islands, cfg, start=(-1.5, 0.5, 0.0), end=(-1.5, 0.5))
+    fit, was = plan.stats['body_fit'], before.stats['body_fit']
+    assert max(m for _, _, m in was['places']) > 100.0
+    assert fit['skipped_m'] < 0.7 * was['skipped_m'] and fit['jumps'] == [] and len(plan.section_starts) == 1
+    assert check_plan(plan)['left_m2'] < check_plan(before)['left_m2']
 
 
 @pytest.mark.parametrize('lead', [True, 'other', False])
