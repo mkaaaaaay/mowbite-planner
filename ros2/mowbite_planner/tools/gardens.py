@@ -3,12 +3,19 @@
 A garden is a map like OpenMower's map.json (mowing areas, obstacles, navigation areas, a docking station) and the
 mowing areas in it to plan, by name:
 
+  model                every situation the planner meets once, each at a place of its own (see model())
+  torture              a path planner benchmark's torture test, its coordinates as given (see torture())
   real-mkay, real-ape  the gardens of ROS_HOME-like folders (map.json, mowbite_planner_angle.json), see REAL
   test-<name>          the gardens of the planner's tests (test/test_planner.py's GARDEN with TREE and BED, ...)
   <kind>-<seed>        made up, nasty on purpose (see KINDS): the same kind and seed give the same garden
+  export:<path>        a tester's garden, the MowBite app's export (mowbite-garden-export) with its mower: 'own'
+
+python3 tools/gardens.py --map model > map.json writes a garden's map (to look at it in the app, or to simulate it
+there).
 
 A mower (see MOWERS) is what a mower keeps for the planner (mowbite_planner_settings.json), its mower_logic
-parameters and its blade.
+parameters and its blade; 'own' is the mower an export brings (see export_garden), with its FTC controller's
+parameters, wheel distance and antenna for the simulated mower (Mower.sim).
 
 The real gardens and mowers are looked for next to the repo (MOWBITE_PROJECT, its parent folder by default):
 scripts/omsim/<who>/data and logs/mower-tracks-20261022.
@@ -67,6 +74,14 @@ MOWERS: Dict[str, Tuple[Sequence[str], Sequence[str], float, Dict[str, Any]]] = 
     # no body at all (not among the defaults of simbench)
     'bare': ((), (), 0.18, {}),
 }
+# an export of the MowBite app: format, version; the ROS parameters in its params the simulated mower takes (as the
+# node's planner.simulate: MowerModel's values, its FTC controller's under FTC_PARAMS by their own names)
+EXPORT = 'export:'
+EXPORT_FORMAT = ('mowbite-garden-export', 1)
+FTC_PARAMS = '/move_base_flex/FTCPlanner/'
+SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
+              'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
+              'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
 # OpenMower's mower_logic defaults (MowerLogic.cfg) where a mower has no parameter file
 MOWER_LOGIC_DEFAULTS = {'outline_count': 3, 'outline_overlap_count': 0, 'outline_offset': 0.0, 'mow_angle_offset': 0.0,
                         'mow_angle_offset_is_absolute': False, 'mow_angle_increment': 0.0, 'tool_width': 0.14}
@@ -99,6 +114,8 @@ class Garden:
     source: str = ''
     m2: float = 0.0  # the first area's outline
     problems: List[str] = field(default_factory=list)  # validate()'s, for the real and test gardens
+    zones: Dict[str, List[List[XY]]] = field(default_factory=dict)  # where each situation is: name -> outlines
+    mower: Optional['Mower'] = None  # an export's own (see export_garden)
 
 
 @dataclass
@@ -111,6 +128,7 @@ class Mower:
     mower_logic: Dict[str, Any]
     blade: float = 0.18
     source: str = ''
+    sim: Dict[str, Any] = field(default_factory=dict)  # MowerModel's values of its own (see export_garden)
 
 
 class _Retry(Exception):
@@ -156,7 +174,7 @@ def _first(paths: Sequence[str]) -> Optional[str]:
 def mower(name: str) -> Mower:
     """A mower of MOWERS by name."""
     if name not in MOWERS:
-        raise KeyError(f'no mower {name!r} (there are: {", ".join(MOWERS)})')
+        raise KeyError(f'no mower {name!r} (there are: {", ".join(MOWERS)}, own with an export\'s garden)')
     settings, params, blade, extra = MOWERS[name]
     found, stored = _first(settings), {}
     if settings and found is None:
@@ -179,17 +197,62 @@ def _json(path: str, default: Any) -> Any:
         return default
 
 
+def mower_of(name: str, garden: Garden) -> Mower:
+    """A mower by name, 'own' the garden's (an export's)."""
+    if name != 'own':
+        return mower(name)
+    if garden.mower is None:
+        raise KeyError(f'{garden.name} has no mower of its own (only an export has)')
+    return garden.mower
+
+
+def _from_map(name: str, data: Dict[str, Any], angle: Dict[str, Any], kind: str, source: str) -> Garden:
+    """The active mowing areas of a map like map.json (the not mowable ones too)."""
+    ids = [str(a.get('id')) for a in data.get('areas', []) if a.get('properties', {}).get('type') == 'mow'
+           and a.get('properties', {}).get('active') is not False]
+    garden = Garden(name, data, ids, angle, kind, source)
+    garden.m2 = _outline_m2(data, ids[0]) if ids else 0.0
+    garden.problems = validate(garden, limits=False)
+    return garden
+
+
 def real_garden(name: str) -> Garden:
-    """A ROS_HOME-like folder of REAL: the active mowing areas of its map.json (the not mowable ones too)."""
+    """A ROS_HOME-like folder of REAL (see _from_map)."""
     root = REAL[name]
     data = _json(os.path.join(root, 'map.json'), None)
     if data is None:
         raise FileNotFoundError(f'{name}: no map.json in {root}')
-    ids = [str(a.get('id')) for a in data.get('areas', []) if a.get('properties', {}).get('type') == 'mow'
-           and a.get('properties', {}).get('active') is not False]
-    garden = Garden(name, data, ids, _json(os.path.join(root, 'mowbite_planner_angle.json'), {}), 'real', root)
-    garden.m2 = _outline_m2(data, ids[0]) if ids else 0.0
-    garden.problems = validate(garden, limits=False)
+    return _from_map(name, data, _json(os.path.join(root, 'mowbite_planner_angle.json'), {}), 'real', root)
+
+
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def export_garden(name: str) -> Garden:
+    """export:<path>, the MowBite app's export of a mower (EXPORT_FORMAT): its map (see _from_map), the stripes'
+    rotation, and its mower 'own': the settings stored as the planner keeps them (mowbite_planner_settings.json),
+    mower_logic's parameters (OpenMower's defaults where it has none), the blade, for the simulated mower its FTC
+    controller's parameters, wheel distance and antenna (Mower.sim, MowerModel's names, the others left to
+    simbench)."""
+    path = name[len(EXPORT):]
+    data = _json(path, None)
+    if data is None:
+        raise FileNotFoundError(f'{name}: no export at {path}')
+    if (data.get('format'), data.get('version')) != EXPORT_FORMAT:
+        raise ValueError(f'{name}: not an export of {EXPORT_FORMAT[0]} version {EXPORT_FORMAT[1]}')
+    planner = data.get('planner_settings') or {}
+    settings = planner.get('settings') or {}
+    params = data.get('params') or {}
+    stored = {n: s.get('value') for n, s in settings.items() if s.get('stored')}
+    blade = settings.get('mower_width', {}).get('value')
+    mower_logic = {k[len('/mower_logic/'):]: v for k, v in params.items() if k.startswith('/mower_logic/')}
+    sim = {k[len(FTC_PARAMS):]: v for k, v in params.items() if k.startswith(FTC_PARAMS) and _number(v)}
+    sim.update({n: params[p] for n, p in SIM_PARAMS.items() if _number(params.get(p))})
+    garden = _from_map(name, data.get('map') or {}, {'steps': planner.get('angle_steps', 0),
+                                                     'finished': planner.get('finished_mows', 0)}, 'export', path)
+    garden.mower = Mower('own', stored, mower_logic or dict(MOWER_LOGIC_DEFAULTS),
+                         blade if _number(blade) else 0.18, f'{path} ({data.get("mower_model") or "no model"})', sim)
     return garden
 
 
@@ -508,12 +571,14 @@ def _two(rnd: random.Random, m2: float) -> Draft:
 KINDS = tuple(BASES) + ('neck', 'strip', 'acute', 'trees', 'edge', 'island', 'two', 'mixed')
 
 
-def _recorded(rnd: random.Random, poly: Polygon) -> List[XY]:
-    """The outline as recorded: a point every few cm to dm (the corners kept), a little off, from anywhere on it, either
-    way round. The exact outline if that comes out broken."""
+def _recorded(rnd: random.Random, poly: Polygon, dense: Optional[bool] = None) -> List[XY]:
+    """The outline as recorded: a point every few cm to dm (the corners kept; dense: points between them, else now and
+    then only the corners), a little off, from anywhere on it, either way round. The exact outline if that comes out
+    broken."""
     pts = list(poly.exterior.coords)[:-1]
     step, noise = max(rnd.uniform(*RECORD_STEP), poly.length / RECORD_POINTS), rnd.choice(RECORD_NOISE)
-    dense = rnd.random() < 0.7
+    if dense is None:
+        dense = rnd.random() < 0.7
     out: List[XY] = []
     for a, b in zip(pts, pts[1:] + pts[:1]):
         out.append(a)
@@ -577,6 +642,158 @@ def generate(kind: str, seed: int) -> Garden:
     raise ValueError(f'{kind}-{seed}: no garden in {TRIES} tries ({"; ".join(why[:3]) or "drafts failed"})')
 
 
+# the model garden ---------------------------------------------------------------------------------------------------
+
+MODEL = 'model'
+
+
+def model() -> Garden:
+    """Every situation the planner meets once, each at a place of its own (zones: name -> where), by hand, the
+    outlines as recorded (the same every time). The main lawn (lawn0, 215 m2): a round edge, an acute corner with a
+    stump just inside it, a corner inwards, a step 0.25 m into the edge and back out (a light well), a neck to a lawn
+    behind it with a post 0.65 m before one of its corners, from there a passage 0.85 m wide with a right-angled bend
+    to a small lawn, a strip to a small lawn, a dead end too narrow to turn in with the dock at its end; a sandbox, a
+    bed too close to the edge for the body, two pots too close to each other, thin trunks drawn as small circles, a
+    table and a sunshade closing the strip between it and the edge, an L-shaped bed, a bed with a sharp tip, a shed
+    over the edge, a mowing area of its own in it (lawn2). A second lawn (lawn1) only got to over a path from the
+    patio by the main lawn, an inactive mowing area next to the path."""
+    rnd = random.Random(MODEL)
+    south = [(x, -1.2 * math.sin(math.pi * (x - 3.0) / 8.0) if 3.0 < x < 11.0 else 0.0)
+             for x in [0.0] + [3.0 + 0.5 * k for k in range(17)] + [16.0]]
+    lawn = Polygon(south + [
+        (16.0, 4.1), (17.5, 4.1), (17.5, 2.5), (21.5, 2.5), (21.5, 6.5),
+        (20.85, 6.5), (20.85, 8.65), (24.0, 8.65), (24.0, 7.6), (27.0, 7.6), (27.0, 10.6), (24.0, 10.6), (24.0, 9.5),
+        (20.0, 9.5), (20.0, 6.5),  # (the passage with a bend, the small lawn at its end)
+        (17.5, 6.5), (17.5, 4.9), (16.0, 4.9),
+        (16.0, 8.3), (18.5, 10.0),  # (the acute corner: 35 degrees)
+        (13.0, 10.0), (13.0, 9.75), (10.5, 9.75), (10.5, 10.0),  # (the light well)
+        (2.7, 10.0), (2.7, 14.0), (4.5, 14.0), (4.5, 17.0), (0.5, 17.0), (0.5, 14.0), (2.0, 14.0), (2.0, 10.0),
+        (0.0, 10.0), (0.0, 7.0), (1.6, 6.0), (0.0, 5.0), (0.0, 1.9), (-3.0, 1.9), (-3.0, 1.0), (0.0, 1.0)])
+    second, own = _box(-9.0, 5.0, -4.5, 10.0), _box(9.6, 0.4, 12.4, 2.4)
+    # (recorded, driving round them: the lawns, the beds, the sandbox, the stump, the shed; drawn in the app: the rest)
+    recorded = [
+        _disk(16.75, 9.55, 0.25),  # the stump
+        _box(7.5, 3.0, 9.5, 4.4),  # the sandbox
+        _box(6.0, 8.8, 9.5, 9.65),  # the bed 0.35 m off the edge
+        Polygon([(11.0, 4.6), (13.6, 4.6), (13.6, 5.3), (11.8, 5.3), (11.8, 6.6), (11.0, 6.6)]),  # the L bed
+        _box(13.2, -0.6, 15.4, 1.1),  # the shed
+    ]
+    drawn = [
+        _disk(4.0, 3.2, 0.25), _disk(4.85, 3.2, 0.25),  # the pots, 0.35 m apart
+        _disk(11.8, 7.6, 0.1, 12), _disk(13.4, 2.8, 0.1, 12), _disk(6.0, 6.6, 0.1, 12), _disk(19.5, 4.5, 0.15, 12),
+        _disk(21.04, 2.96, 0.06, 12),  # the post 0.65 m before the corner
+        _box(0.8, 7.5, 2.3, 8.4), _disk(0.45, 8.75, 0.3),  # the table 0.8 m off the edge, the sunshade
+        Polygon([(3.4, 5.1), (5.6, 5.7), (3.5, 6.0)]),  # the bed with a tip
+        _disk(-6.5, 7.5, 0.3),  # a tree on the second lawn
+    ]
+    patio, path = _box(-4.0, 2.8, 0.15, 4.6), _box(-5.2, 3.2, -3.8, 5.3)
+    garden = _garden(MODEL, [_recorded(rnd, p, dense=True) for p in (lawn, second, own)],
+                     [_recorded(rnd, p, dense=True) for p in recorded] + [list(p.exterior.coords)[:-1] for p in drawn],
+                     [list(p.exterior.coords)[:-1] for p in (patio, path)], (-2.6, 1.45, math.pi), [0, 1, 2], MODEL,
+                     'hand-made', limits=False)
+    meadow = _box(-9.0, 0.5, -5.6, 4.4).exterior.coords[:-1]  # (inactive: nothing goes over it)
+    garden.map['areas'].append({'id': 'meadow', 'properties': {'type': 'mow', 'name': 'meadow', 'active': False},
+                                'outline': [{'x': x, 'y': y} for x, y in meadow]})
+    zones = {
+        'round edge': _box(2.5, -1.4, 9.4, 0.8),
+        'acute corner and stump': Polygon([(15.6, 7.9), (18.9, 9.6), (18.9, 10.3), (15.6, 10.3)]),
+        'neck': _box(15.7, 3.8, 17.8, 5.2),
+        'lawn behind with a trunk': _box(18.6, 3.6, 20.4, 5.4),
+        'post before a corner': _box(20.4, 2.3, 21.7, 3.6),
+        'passage with a bend': _box(19.8, 6.4, 24.2, 9.7),
+        'small lawn after the passage': _box(23.8, 7.4, 27.2, 10.8),
+        'light well in the edge': _box(10.2, 9.3, 13.3, 10.2),
+        'strip and small lawn': _box(0.3, 9.7, 4.7, 17.2),
+        'dead end with the dock': _box(-3.2, 0.8, 0.6, 2.1),
+        'corner inwards': _box(-0.1, 4.6, 2.2, 7.3),
+        'table and sunshade': _box(-0.1, 7.3, 2.6, 9.4),
+        'sandbox': _box(6.9, 2.4, 10.1, 5.0),
+        'bed by the edge': _box(5.5, 8.3, 10.0, 10.1),
+        'pots': _box(3.4, 2.6, 5.5, 3.8),
+        'thin trunks': unary_union([_box(x - 0.6, y - 0.6, x + 0.6, y + 0.6) for x, y in ((11.8, 7.6), (13.4, 2.8),
+                                                                                        (6.0, 6.6))]),
+        'L bed': _box(10.5, 4.1, 14.1, 7.1),
+        'bed with a tip': _box(3.0, 4.7, 6.2, 6.4),
+        'shed over the edge': _box(12.6, -0.1, 16.0, 1.7),
+        'mowing area in it': _box(9.5, 0.0, 12.5, 2.5),
+        'patio': _box(-4.2, 2.6, 0.3, 4.8),
+        'second lawn over the path': _box(-9.3, 4.8, -3.6, 10.3),
+    }
+    garden.zones = _zone_rings(zones)
+    garden.problems = validate(garden, limits=False)
+    return garden
+
+
+def _zone_rings(zones: Dict[str, Any]) -> Dict[str, List[List[XY]]]:
+    return {name: [[(round(x, 3), round(y, 3)) for x, y in p.exterior.coords] for p in _polygons(z)]
+            for name, z in zones.items()}
+
+
+TORTURE = 'torture'
+
+
+def torture() -> Garden:
+    """The torture test of a path planner benchmark ("RTK_Planner_Ultimate_Benchmark_v2", its coordinates as given but
+    for the hourglass): the main zone (lawn0) with points twice, a 2 cm spike, 4 cm of GPS jitter along an edge, a
+    23 degree spike, an hourglass (0.70 m at its waist, 0.55 m in the test: too narrow for a body and its margins), a
+    horseshoe, a dead end 0.7 m wide, two round trees 0.32 m apart, an island 0.45 m above them, one 0.25 m off the
+    edge and one in the horseshoe's right arm; a kidney-shaped lawn with an oval bed (lawn1); an L turned by 37 degrees
+    (lawn2); the transit paths (their lines, 0.8 m wide), the dock on the first. And the curved corridor of the test's
+    first version (lawn3, moved next to the kidney, a path from there). Its settings: mower_width 0.22, overlap 0,
+    perimeter_passes 2, obstacle_passes 1, the lanes at 0, 37, 45, 90 and 127 degrees."""
+    main = [(0.0, 0.0), (0.0, 0.0), (4.0, 0.0), (8.0, 0.0), (8.01, -0.02), (8.02, 0.0), (12.0, 0.0), (18.0, 0.0),
+            (12.0, 2.5), (12.0, 5.0), (8.0, 5.0), (8.0, 6.5), (12.0, 6.5), (12.0, 14.0), (8.0, 14.0), (8.0, 8.5),
+            (4.0, 8.5), (4.0, 14.0), (0.0, 14.0), (0.0, 12.7), (-4.0, 12.7), (-4.0, 12.0), (0.0, 12.0), (0.0, 6.5),
+            (7.3, 6.5), (7.3, 5.0), (0.0, 5.0), (0.04, 4.5), (-0.03, 4.0), (0.04, 3.5), (-0.04, 3.0), (0.03, 2.5),
+            (-0.03, 2.0), (0.04, 1.5), (-0.02, 1.0)]
+    kidney = [(16.0, 5.5), (17.8, 5.1), (19.8, 5.2), (21.6, 5.8), (23.1, 6.9), (24.0, 8.4), (24.2, 10.2), (23.7, 11.9),
+              (22.6, 13.3), (21.0, 14.1), (19.3, 14.2), (17.9, 13.5), (17.2, 12.3), (17.4, 11.0), (18.2, 9.9),
+              (18.3, 8.7), (17.5, 7.7), (16.2, 7.1), (15.5, 6.3)]
+    turned = [(2.0, 16.5), (8.389, 21.315), (5.982, 24.509), (2.787, 22.102), (0.982, 24.498), (-2.213, 22.091)]
+    banana = [(25.0, 0.0), (26.5, 0.0), (27.2, 2.5), (28.5, 4.7), (30.5, 6.3), (33.0, 7.0), (33.0, 8.5), (29.8, 7.7),
+              (27.3, 5.8), (25.7, 3.1)]
+    tree_a = [(4.1, 2.5), (4.08, 2.345), (4.02, 2.2), (3.924, 2.076), (3.8, 1.98), (3.655, 1.92), (3.5, 1.9),
+              (3.345, 1.92), (3.2, 1.98), (3.076, 2.076), (2.98, 2.2), (2.92, 2.345), (2.9, 2.5), (2.92, 2.655),
+              (2.98, 2.8), (3.076, 2.924), (3.2, 3.02), (3.345, 3.08), (3.5, 3.1), (3.655, 3.08), (3.8, 3.02),
+              (3.924, 2.924), (4.02, 2.8), (4.08, 2.655)]
+    tree_b = [(5.42, 2.5), (5.403, 2.371), (5.353, 2.25), (5.274, 2.146), (5.17, 2.067), (5.049, 2.017), (4.92, 2.0),
+              (4.791, 2.017), (4.67, 2.067), (4.566, 2.146), (4.487, 2.25), (4.437, 2.371), (4.42, 2.5),
+              (4.437, 2.629), (4.487, 2.75), (4.566, 2.854), (4.67, 2.933), (4.791, 2.983), (4.92, 3.0),
+              (5.049, 2.983), (5.17, 2.933), (5.274, 2.854), (5.353, 2.75), (5.403, 2.629)]
+    bed = [(20.5, 7.5), (19.8, 7.8), (19.5, 8.5), (19.7, 9.3), (20.3, 9.9), (21.1, 10.1), (21.8, 9.8), (22.1, 9.1),
+           (21.9, 8.3), (21.3, 7.7)]
+    islands = [tree_a, tree_b] + [list(_box(*b).exterior.coords)[:-1] for b in (
+        (3.75, 3.5, 4.75, 4.3), (0.25, 9.5, 1.25, 10.5), (9.5, 10.5, 10.5, 11.5))] + [bed]
+    paths = [LineString(line).buffer(0.4, cap_style=3, join_style=2) for line in (
+        [(-1.5, 0.5), (-0.5, 0.5), (0.5, 0.5)], [(11.5, 7.2), (13.8, 6.8), (16.2, 6.2)],
+        [(2.0, 13.5), (2.0, 15.2), (2.2, 17.0)], [(22.8, 7.4), (25.0, 5.6), (26.9, 4.2)])]
+    garden = _garden(TORTURE, [main, kidney, turned, banana], islands, [list(p.exterior.coords)[:-1] for p in paths],
+                     (-1.5, 0.5, 0.0), [0, 1, 2, 3], TORTURE, 'RTK_Planner_Ultimate_Benchmark_v2', limits=False)
+    garden.zones = _zone_rings({
+        'dirty points': unary_union([_box(-0.3, -0.3, 0.5, 0.5), _box(7.6, -0.3, 8.4, 0.4)]),
+        'sawtooth edge': _box(-0.2, 0.9, 0.8, 5.0),
+        '23 degree spike': _box(11.5, -0.2, 18.2, 2.7),
+        'hourglass waist': _box(6.8, 4.4, 8.5, 7.1),
+        'horseshoe bend': _box(0.0, 7.1, 12.0, 9.2),
+        'island by the edge': _box(-0.1, 9.2, 1.8, 10.8),
+        'dead end': _box(-4.2, 11.8, 0.6, 12.9),
+        'round trees': _box(2.6, 1.6, 5.7, 3.3),
+        'island above the trees': _box(3.4, 3.3, 5.1, 4.6),
+        'island in the right arm': _box(9.0, 10.0, 11.0, 12.0),
+        'kidney': Polygon(kidney),
+        'L turned by 37 degrees': Polygon(turned),
+        'banana': Polygon(banana),
+        'transit paths': unary_union(paths),
+        'dock': _box(-2.0, 0.0, -1.0, 1.0),
+    })
+    garden.problems = validate(garden, limits=False)
+    return garden
+
+
+# the gardens made by hand, by name
+HAND_MADE: Dict[str, Callable[[], Garden]] = {MODEL: model, TORTURE: torture}
+
+
 # checks and lookups -------------------------------------------------------------------------------------------------
 
 def _outline(area: Dict[str, Any]) -> List[XY]:
@@ -626,7 +843,9 @@ def validate(garden: Garden, limits: bool = True) -> List[str]:
     ids = list(lawns)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
-            if lawns[a].intersection(lawns[b]).area > 1e-3 and garden.kind != 'real':
+            # (one lying in the other is a mowing area of its own in it, see mapfile's nested)
+            if lawns[a].intersection(lawns[b]).area > 1e-3 and garden.kind != 'real' and \
+                    not lawns[a].contains(lawns[b]) and not lawns[b].contains(lawns[a]):
                 problems.append(f'mowing areas {a} and {b} lie over each other')
     for area_id in garden.areas:
         lawn = lawns.get(area_id)
@@ -645,28 +864,36 @@ def validate(garden: Garden, limits: bool = True) -> List[str]:
 
 def garden(name: str) -> Garden:
     """A garden by name (see the module)."""
+    if name in HAND_MADE:
+        return HAND_MADE[name]()
     if name in REAL:
         return real_garden(name)
     if name.startswith('test-') and name[len('test-'):] in TESTS:
         return from_tests(name)
+    if name.startswith(EXPORT):
+        return export_garden(name)
     kind, _, seed = name.rpartition('-')
     if kind in KINDS and seed.isdigit():
         return generate(kind, int(seed))
-    raise KeyError(f'no garden {name!r}: real-mkay, real-ape, test-<{"|".join(TESTS)}> or <kind>-<seed>, kinds '
-                   f'{", ".join(KINDS)}')
+    raise KeyError(f'no garden {name!r}: {", ".join(HAND_MADE)}, real-mkay, real-ape, test-<{"|".join(TESTS)}>, '
+                   f'{EXPORT}<path> or <kind>-<seed>, kinds {", ".join(KINDS)}')
 
 
 def names(kinds: Sequence[str] = KINDS, seeds: Sequence[int] = range(5), real: bool = True,
-          tests: bool = True) -> List[str]:
-    """Garden names: the real ones, the tests' and kinds x seeds made up."""
-    return ([n for n in REAL if os.path.exists(os.path.join(REAL[n], 'map.json'))] if real else []) + \
+          tests: bool = True, hand_made: bool = True) -> List[str]:
+    """Garden names: the hand-made ones (HAND_MADE), the real ones, the tests' and kinds x seeds made up."""
+    return (list(HAND_MADE) if hand_made else []) + \
+        ([n for n in REAL if os.path.exists(os.path.join(REAL[n], 'map.json'))] if real else []) + \
         ([f'test-{t}' for t in TESTS] if tests and os.path.exists(TEST_FILE) else []) + \
         [f'{k}-{s}' for k in kinds for s in seeds]
 
 
-if __name__ == '__main__':  # every kind once, how they come out
+if __name__ == '__main__':  # every kind once, how they come out (--map <name>: that garden's map.json)
     import sys
-    for n in sys.argv[1:] or [f'{k}-0' for k in KINDS]:
+    if sys.argv[1:2] == ['--map'] and len(sys.argv) == 3:
+        print(json.dumps(garden(sys.argv[2]).map, indent=1))
+        sys.exit(0)
+    for n in sys.argv[1:] or list(HAND_MADE) + [f'{k}-0' for k in KINDS]:
         g = garden(n)
         print(f'{g.name:14} {g.m2:6.1f} m2  areas {len(g.areas)}  obstacles '
               f'{sum(a["properties"]["type"] == "obstacle" for a in g.map["areas"]):2}  points '

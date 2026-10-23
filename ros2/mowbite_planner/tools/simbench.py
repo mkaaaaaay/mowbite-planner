@@ -6,22 +6,40 @@ a bench for finding planner bugs. Not part of the package (not on the mower).
     python3 tools/simbench.py --seeds 10 --mowers mkay,tango      # kinds x 10 seeds, the real and the tests' gardens
     python3 tools/simbench.py --case neck-3/0@tango#0             # one case again, exactly
     python3 tools/simbench.py --list --kinds neck,strip           # the cases only
+    python3 tools/simbench.py --settings all --out bench-settings # every setting (SETTING_VALUES), see below
+    python3 tools/simbench.py --gardens export:garden.json        # a tester's garden and mower (the app's export)
+    python3 tools/simbench.py --compare before after              # two runs (their --out), case by case
 
 A case is <garden>/<area>@<mower>#<seed>: a garden of tools/gardens.py by name, the index of the area among the
-garden's areas to plan, a mower of gardens.MOWERS and the seed of the simulated mower (MowerModel.realistic), the
-simulation run with seeds 0..--sim-seeds - 1 without it. Every case plans in a process of its own, killed after
+garden's areas to plan, a mower of gardens.MOWERS (own: an export's, see gardens.export_garden) and the seed of the
+simulated mower (MowerModel.realistic, an export's with its own values: Mower.sim), the simulation run with seeds
+0..--sim-seeds - 1 without it. Settings after the mower, +<setting>=<value> each
+(+pairs=<k>: the k-th of settings_rows()), go into the area's own (map.json's properties.planner, like the app sets
+them for an area): they beat the mower's and mower_logic's. Every case plans in a process of its own, killed after
 --timeout s. What looks wrong is an anomaly with a score (see SCORES), a case's severity is its worst score and a
 fifth of the others. In --out: results.json (every case, worst first), summary.md and <case>.png of the flagged ones
 (severity FLAG at least): the garden, the plan, the simulated track, what's left unmowed, where the body sticks out.
+lawn_left_m2 is what's left of the lawn as drawn (the area but its obstacles and the areas lying in it), the same
+lawn for every plan of an area whatever the settings or the slots the planner closes (left_m2 is check_plan's, of
+the plan's own free space: not comparable between those).
+
+--settings ofat plans each area of the gardens made by hand (gardens.HAND_MADE: model, torture; else the gardens
+--kinds and --seeds say, seed 0) with each value of SETTING_VALUES on its own, --settings pairs with every two values
+of two settings together at least once (settings_rows()), --settings all both; and as the mower has it, which the
+summary compares them with. The zones of the gardens made by hand (where each situation is) get what's left and
+the places the body sticks out in them (rec['zones'], the summary's Zones).
 
 The simulation (mowbite_planner.simulate) is used if it can be imported, else only the plans are checked.
 """
 
 import argparse
+import dataclasses
+import functools
 import json
 import math
 import multiprocessing
 import os
+import random
 import re
 import sys
 import time
@@ -34,13 +52,16 @@ sys.path.insert(0, os.path.join(TOOLS, '..'))
 sys.path.insert(0, TOOLS)
 
 import gardens  # noqa: E402
-from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
-from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan  # noqa: E402
+from mowbite_planner import PlannerConfig, PlanningError, swept_area  # noqa: E402
+from mowbite_planner.config import LANE, LEFT_TUFT, PERIMETER, TRANSIT, TURN, TURN_TYPES, CoveragePlan  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
+from mowbite_planner.geometry import polygons  # noqa: E402
+from mowbite_planner.mapfile import area_job, openmower_settings  # noqa: E402
 from mowbite_planner.mqtt_service import PlannerService  # noqa: E402
 from mowbite_planner.planner import plan_coverage  # noqa: E402
 from mowbite_planner.report import SPOT_TURN, check_plan, drive_time  # noqa: E402
 from shapely.geometry import Point, Polygon  # noqa: E402
+from shapely.ops import unary_union  # noqa: E402
 
 try:
     from mowbite_planner.simulate import MowerModel, evaluate, simulate
@@ -101,6 +122,60 @@ SIM_BODY = 0.05
 # simulated s / drive_time s outside 1 +- DURATION
 DURATION = 0.4
 
+# --settings: every setting of the planner the app sets (planner.settings), the values a case takes, the usual one
+# first. Not the body's (robot_*: the mowers have theirs, a rectangle, an outline or none), not the ones mower_logic
+# sets with every request (skip_*, angle_steps, finished_mows), not the node's own (planner: slic3r is OpenMower's,
+# leftovers_auto). Settings that only go together are one entry (angle_min with angle_max, a lane spacing range)
+SETTING_VALUES: Dict[Any, Tuple[Any, ...]] = {
+    'mower_width': (0.18, 0.14, 0.3),
+    'overlap': (0.15, 0.0, 0.4),
+    'lane_spacing_mode': ('fixed', 'auto'),
+    ('lane_spacing_min', 'lane_spacing_max'): ((None, None), (0.08, 0.12)),
+    'perimeter_passes': (-1, 0, 1, 3),
+    'obstacle_passes': (-1, 0, 2),
+    'fill_pattern': ('lanes', 'crosshatch', 'concentric'),
+    'crosshatch_angle': (1.5708, 0.7854),
+    'perimeter_order': ('first', 'last'),
+    'perimeter_direction': ('auto', 'ccw', 'cw', 'random'),
+    'angle': (None, 0.0, 1.2),
+    'angle_strategy': ('longest_edge', 'min_width', 'optimal'),
+    'angle_offset': (0.0, 0.5),
+    ('angle_min', 'angle_max'): ((None, None), (0.2, 0.9)),
+    'angle_step': (0.0873, 0.349),
+    'angle_increment': (0.0, 0.8),
+    'angle_increment_every': (1, 3),
+    'perimeter_offset': (None, -0.05, 0.1),
+    'turn_radius': (0.25, 0.0, 0.5),
+    'turn_types': (TURN_TYPES, ('u_turn',), ('pivot',), ('bulb', 'u_turn'), ('detour', 'pivot')),
+    'lane_order': ('skip', 'snake'),
+    'nested_areas': (True, False),
+    'narrow_parts': ('loops', 'lanes'),
+    'turn_on_spot': (False, True),
+    'turn_radius_auto': (False, True),
+    'split_zones': (False, True),
+    'headland_turns': (False, True),
+    'headland_corners': ('rounded', 'sharp'),
+    'route_order': ('nearest', 'optimized'),
+    'bend_max_gap': (0.0, 1.5),
+    'bend_max_offset': (0.5, 0.2),
+    'transit_edge_distance': (0.0, 0.3),
+    'transit_edge_cost': (2.0, 5.0),
+    'lane_overlap_passes': (0, 1, 3),
+    'lane_overlap_limit': (False, True),
+    'edges': ('recorded', 'hard'),
+    'edge_margin': (0.05, 0.0, 0.15),
+    'obstacle_margin': (0.1, 0.0, 0.25),
+    'spin_margin': (0.05, 0.0, 0.15),
+    'body_fit': (True, False),
+    'mop_up': (False, True),
+    'blade_offset': (0.0, -0.05, 0.08),
+    'blade_ahead': (0.0, 0.18, -0.1),
+}
+# the ones whose value is a list ('|' between its items in a case)
+LIST_SETTINGS = ('turn_types',)
+# settings_rows(): candidates for each row, the best kept (the same rows every time)
+PAIR_TRIES, PAIR_SEED = 30, 0
+
 
 # planning like the node ---------------------------------------------------------------------------------------------
 
@@ -150,6 +225,113 @@ def plan_area(garden: gardens.Garden, area_id: str, mower: gardens.Mower) -> Cov
     service.planner = lambda *args, **kw: kept.append(_node_plan(*args, **kw)) or kept[-1]
     service.plan({'area_id': area_id})
     return kept[-1]
+
+
+def with_settings(garden: gardens.Garden, area_id: str, settings: Dict[str, Any]) -> gardens.Garden:
+    """The garden with those settings the area's own (its properties.planner, on top of what it has)."""
+    if not settings:
+        return garden
+    data = json.loads(json.dumps(garden.map))
+    for area in data.get('areas', []):
+        if area.get('id') == area_id:
+            props = area.setdefault('properties', {})
+            props['planner'] = dict(props.get('planner') or {}, **settings)
+    return dataclasses.replace(garden, map=data)
+
+
+def lawn_of(garden: gardens.Garden, area_id: str):
+    """The lawn as drawn: the area but its obstacles and the mowing areas lying in it (see lawn_left_m2)."""
+    job = area_job(garden.map, area_id)
+    lawn = Polygon(job.boundary).buffer(0)
+    holes = [Polygon(r).buffer(0) for r in list(job.obstacles) + list(job.nested) if len(r) >= 3]
+    return lawn.difference(unary_union(holes)) if holes else lawn
+
+
+# --settings ---------------------------------------------------------------------------------------------------------
+
+def _code(v: Any) -> str:  # a setting's value in a case
+    if v is None:
+        return 'null'
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if isinstance(v, (list, tuple)):
+        return '|'.join(str(x) for x in v)
+    return str(v)
+
+
+def _value(name: str, text: str) -> Any:  # back from _code
+    if name in LIST_SETTINGS:
+        return tuple(t for t in text.split('|') if t)
+    if text in ('true', 'false', 'null'):
+        return {'true': True, 'false': False, 'null': None}[text]
+    for kind in (int, float):
+        try:
+            return kind(text)
+        except ValueError:
+            pass
+    return text
+
+
+def _named(key: Any, value: Any) -> Dict[str, Any]:  # an entry of SETTING_VALUES with one of its values: the settings
+    return dict(zip(key, value)) if isinstance(key, tuple) else {key: value}
+
+
+def pairwise(values: Dict[Any, Sequence[Any]], tries: int = PAIR_TRIES, seed: int = PAIR_SEED) -> List[Dict[Any, Any]]:
+    """Rows of a value for each entry of values, every two values of two entries together in one of them at least
+    (pairwise, greedy: a row starts from such a pair in none yet and takes for each entry in turn the value that brings
+    the most more, of `tries` such rows the one with the most; the same rows for the same values and seed)."""
+    keys = list(values)
+    n = len(keys)
+    todo = {(a, i, b, j) for a in range(n) for b in range(a + 1, n)
+            for i in range(len(values[keys[a]])) for j in range(len(values[keys[b]]))}
+
+    def pair(k: int, i: int, m: int, w: int) -> Tuple[int, int, int, int]:
+        return (k, i, m, w) if k < m else (m, w, k, i)
+
+    rnd = random.Random(seed)
+    rows: List[Dict[Any, Any]] = []
+    while todo:
+        a, i, b, j = min(todo)
+        best, most = {}, -1
+        for _ in range(tries):
+            row = {a: i, b: j}
+            order = [k for k in range(n) if k not in row]
+            rnd.shuffle(order)
+            for k in order:
+                gain = [sum(pair(k, v, m, w) in todo for m, w in row.items()) for v in range(len(values[keys[k]]))]
+                row[k] = rnd.choice([v for v, g in enumerate(gain) if g == max(gain)])
+            new = sum(pair(k, row[k], m, row[m]) in todo for k in range(n) for m in range(k + 1, n))
+            if new > most:
+                best, most = row, new
+        todo -= {pair(k, best[k], m, best[m]) for k in range(n) for m in range(k + 1, n)}
+        rows.append({keys[k]: values[keys[k]][v] for k, v in sorted(best.items())})
+    return rows
+
+
+@functools.lru_cache(maxsize=None)
+def settings_rows() -> Tuple[Dict[str, Any], ...]:
+    """pairwise(SETTING_VALUES) as settings (+pairs=<k> in a case)."""
+    return tuple({n: v for key, value in row.items() for n, v in _named(key, value).items()}
+                 for row in pairwise(SETTING_VALUES))
+
+
+def settings_one_by_one(mower: gardens.Mower) -> List[Dict[str, Any]]:
+    """Each value of SETTING_VALUES on its own, but where the mower plans with it anyway (as plan_area plans)."""
+    stored = {n: v for n, v in mower.stored.items() if n not in NODE_SETTINGS}
+    base = PlannerConfig(lane_order='skip').with_overrides(dict(launch_settings(), **stored)).with_overrides(
+        {'mower_width': stored.get('mower_width', mower.blade)})
+    theirs = openmower_settings(mower.mower_logic, base.mower_width)
+
+    def now(name: str) -> Any:
+        return theirs[name] if name in MOWER_LOGIC and name not in stored and name in theirs else getattr(base, name)
+
+    return [named for key, values in SETTING_VALUES.items() for named in (_named(key, v) for v in values)
+            if any(_canon(now(n)) != _canon(v) for n, v in named.items())]
+
+
+def with_case(base: str, settings: Dict[str, Any]) -> str:
+    """The case of base (<garden>/<area>@<mower>) with those settings."""
+    return base + ''.join(f'+{n}={_code(v)}' for n, v in settings.items())
 
 
 # measuring ----------------------------------------------------------------------------------------------------------
@@ -287,8 +469,11 @@ def plan_anomalies(rec: Dict[str, Any], check: Dict[str, Any]) -> List[Dict[str,
     if spin_share >= SPIN_SHARE:
         _add(found, 'spins', f'{rec["spins"]} spins, {100 * spin_share:.0f} % of the time',
              100 * (spin_share - SPIN_SHARE), 30)
-    if rec['sections'] > 1 and rec['free_parts'] == 1:
-        _add(found, 'sections', f'{rec["sections"]} sections in a lawn of one piece')
+    # (more sections than the parts the mower drives between: where it gets to the next part on its own; not where the
+    # lawn is of one piece but the space its centre may take isn't, a neck too narrow with these settings)
+    parts = rec.get('transit_parts') or rec['free_parts']
+    if rec['sections'] > parts:
+        _add(found, 'sections', f'{rec["sections"]} sections, {parts} parts to drive in')
     return found
 
 
@@ -316,23 +501,37 @@ def sim_anomalies(rec: Dict[str, Any], ev: Dict[str, Any], seed: int) -> List[Di
     return found
 
 
-def parse(case: str) -> Tuple[str, int, str, Optional[int]]:
-    """garden, area index, mower, seed (None: all of --sim-seeds) of <garden>/<area>@<mower>[#<seed>]."""
+def parse(case: str) -> Tuple[str, int, str, Optional[int], Dict[str, Any]]:
+    """garden, area index, mower, seed (None: all of --sim-seeds) and settings of
+    <garden>/<area>@<mower>[+<setting>=<value>...][#<seed>] (+pairs=<k>: the k-th of settings_rows())."""
     head, _, seed = case.partition('#')
-    rest, _, mower = head.rpartition('@')
+    rest, _, tail = head.rpartition('@')
+    mower, *more = tail.split('+')
     name, _, area = rest.rpartition('/')
     if not (name and area.isdigit() and mower and (seed == '' or seed.isdigit())):
-        raise ValueError(f'not a case: {case!r} (<garden>/<area>@<mower>#<seed>)')
-    return name, int(area), mower, int(seed) if seed else None
+        raise ValueError(f'not a case: {case!r} (<garden>/<area>@<mower>[+<setting>=<value>...]#<seed>)')
+    settings: Dict[str, Any] = {}
+    for item in more:
+        key, eq, text = item.partition('=')
+        if key == 'pairs' and text.isdigit() and int(text) < len(settings_rows()):
+            settings.update(settings_rows()[int(text)])
+        elif eq and key in PlannerConfig.names():
+            settings[key] = _value(key, text)
+        else:
+            raise ValueError(f'not a setting of a case: {item!r} in {case!r}')
+    return name, int(area), mower, int(seed) if seed else None, settings
 
 
 def run_case(case: str, opts: argparse.Namespace, planned: Callable[[float], None] = lambda s: None) -> Dict[str, Any]:
     """Plans, checks, simulates and draws one case: its record (JSON)."""
-    name, index, mower_name, seed = parse(case)
-    garden, mower = gardens.garden(name), gardens.mower(mower_name)
+    name, index, mower_name, seed, settings = parse(case)
+    garden = gardens.garden(name)
+    mower = gardens.mower_of(mower_name, garden)
     area_id = garden.areas[index]
+    garden = with_settings(garden, area_id, settings)
     rec: Dict[str, Any] = {'case': case, 'garden': name, 'kind': garden.kind, 'area': area_id, 'mower': mower_name,
-                           'outline_m2': round(gardens._outline_m2(garden.map, area_id), 2), 'anomalies': []}
+                           'outline_m2': round(gardens._outline_m2(garden.map, area_id), 2), 'anomalies': [],
+                           'settings': {n: list(v) if isinstance(v, tuple) else v for n, v in settings.items()}}
     t0 = time.perf_counter()
     try:
         plan = plan_area(garden, area_id, mower)
@@ -350,18 +549,38 @@ def run_case(case: str, opts: argparse.Namespace, planned: Callable[[float], Non
     rec['plan_s'] = round(time.perf_counter() - t0, 2)
     planned(rec['plan_s'])
     try:
-        check = measure(rec, plan)
+        check = measure(rec, plan, lawn_of(garden, area_id), garden.zones)
     except Exception as e:  # (check_plan, export and drive_time are the package's too)
         _add(rec['anomalies'], 'crash', f'checking the plan: {type(e).__name__}: {e} ({_where(e)})')
         rec['traceback'] = traceback.format_exc(limit=-6)
         return _finish(rec, opts, garden, plan)
-    sims = [] if opts.no_sim else _simulated(rec, plan, [seed] if seed is not None else range(opts.sim_seeds))
+    sims = [] if opts.no_sim else _simulated(rec, plan, [seed] if seed is not None else range(opts.sim_seeds),
+                                             mower.sim)
+    for name, z in _zones(garden.zones).items():
+        n = sum(z.contains(Point(p[0], p[1])) for s in rec.get('sim', []) for p in s.get('body_places', []))
+        if n:
+            rec.setdefault('zones', {}).setdefault(name, {})['sim_body'] = n
     return _finish(rec, opts, garden, plan, check, sims)
 
 
-def measure(rec: Dict[str, Any], plan: CoveragePlan) -> Dict[str, Any]:
-    """rec with the plan's numbers and anomalies, check_plan's result."""
+def _zones(zones: Dict[str, List[List[Tuple[float, float]]]]) -> Dict[str, Any]:  # name -> where (a geometry)
+    return {name: unary_union([Polygon(r) for r in rings]) for name, rings in zones.items()}
+
+
+def measure(rec: Dict[str, Any], plan: CoveragePlan, lawn=None,
+            zones: Optional[Dict[str, List[List[Tuple[float, float]]]]] = None) -> Dict[str, Any]:
+    """rec with the plan's numbers and anomalies (lawn_left_m2 of the lawn, see lawn_of; with zones, see
+    gardens.model, what's left and the places the body sticks out in each: rec['zones']), check_plan's result."""
     check = check_plan(plan)
+    if lawn is not None:
+        rest = polygons(lawn.difference(swept_area(plan, plan.config.mower_width, 0.01)))
+        rest = unary_union([p for p in rest if p.area >= LEFT_TUFT]) if rest else Polygon()
+        rec['lawn_left_m2'] = round(rest.area, 3)
+        for name, z in _zones(zones or {}).items():
+            got = {'left_m2': round(rest.intersection(z).area, 3),
+                   'body': sum(z.contains(Point(b['x'], b['y'])) for b in check['body_out'])}
+            if any(got.values()):
+                rec.setdefault('zones', {})[name] = got
     ways = kinds_m(plan)
     total = sum(ways.values())
     drive = drive_time(plan.poses)
@@ -370,6 +589,7 @@ def measure(rec: Dict[str, Any], plan: CoveragePlan) -> Dict[str, Any]:
     rec.update(
         poses=len(plan.poses), path_m=round(total, 1), sections=len(plan.section_starts),
         free_parts=len(getattr(free, 'geoms', [free])), pieces=len(plan_pieces(plan)),
+        transit_parts=len(list(polygons(plan.transit_space))) if plan.transit_space is not None else None,
         area_m2=check.get('area_m2', round(free.area, 3)), angle_deg=round(math.degrees(plan.angle), 1),
         left_m2=check.get('left_m2', 0.0), left_pieces=check.get('left_pieces', 0),
         left_biggest=left[0]['m2'] if left else 0.0, left_at=left[0]['outline'][0] if left else None,
@@ -377,9 +597,11 @@ def measure(rec: Dict[str, Any], plan: CoveragePlan) -> Dict[str, Any]:
         body_out=len(check['body_out']), body_places=group([(b['x'], b['y']) for b in check['body_out']]),
         body_kinds=sorted({b['kind'] for b in check['body_out']}),
         transit_share=round(ways[TRANSIT] / total, 3) if total else 0.0, drive_s=round(drive['s'], 1),
+        mow_share=round((ways[PERIMETER] + ways[LANE]) / total, 3) if total else 0.0,
         spin_s=round(drive['spin_s'], 1), hard=check['hard'], soft=check['soft'],
         stats={k: plan.stats.get(k) for k in ('lanes', 'cells', 'loops', 'turns_u_turn', 'turns_bulb', 'turns_detour',
-                                               'turns_pivot', 'turns_fallback', 'mop_up', 'chosen', 'timings')},
+                                               'turns_pivot', 'turns_fallback', 'mop_up', 'chosen', 'timings',
+                                               'edge_slots')},
         **turning(plan))
     reachable = reach(plan)
     pieces = [Polygon(p['outline']).buffer(0).intersection(reachable).area for p in left]
@@ -388,24 +610,29 @@ def measure(rec: Dict[str, Any], plan: CoveragePlan) -> Dict[str, Any]:
     if pieces and max(pieces) > 0:
         rec['left_at'] = left[pieces.index(max(pieces))]['outline'][0]
     rec['body_fit'] = {k: (plan.stats.get('body_fit') or {}).get(k) for k in ('fixed', 'left', 'skipped_m')}
-    rec['anomalies'] = plan_anomalies(rec, check)
+    # (body_fit off: the body sticking out is what was asked for, not an anomaly; body_out still says where)
+    rec['anomalies'] = [a for a in plan_anomalies(rec, check) if plan.config.body_fit or a['kind'] != 'body_out']
     return check
 
 
-def _simulated(rec: Dict[str, Any], plan: CoveragePlan, seeds: Sequence[int]) -> List[Any]:
-    """rec with the simulation's numbers and anomalies for each seed: [(seed, evaluate's, track)]."""
+def _simulated(rec: Dict[str, Any], plan: CoveragePlan, seeds: Sequence[int],
+               own: Optional[Dict[str, Any]] = None) -> List[Any]:
+    """rec with the simulation's numbers and anomalies for each seed: [(seed, evaluate's, track)]; own: the mower's
+    values over MowerModel.realistic's (those of its names, like the node's planner.simulate)."""
     sims = []
     if simulate is not None:
+        own = {k: v for k, v in (own or {}).items() if k in MowerModel.names()}
         for s in seeds:
             t1 = time.perf_counter()
             try:
-                res = simulate(plan, MowerModel.realistic(seed=s))
+                res = simulate(plan, MowerModel.realistic(seed=s).with_overrides(own))
                 ev = evaluate(plan, res)
             except Exception as e:
                 _add(rec['anomalies'], 'sim_error', f'seed {s}: {type(e).__name__}: {e} ({_where(e)})')
                 continue
             sims.append((s, ev, _track(getattr(res, 'history', ()))))
-            rec['anomalies'] += sim_anomalies(rec, ev, s)
+            rec['anomalies'] += [a for a in sim_anomalies(rec, ev, s)
+                                 if plan.config.body_fit or a['kind'] != 'sim_body']
             rec.setdefault('sim', []).append(dict(
                 {k: ev.get(k) for k in ('s', 'driven_m', 'mowed_m2', 'left_m2', 'left_pieces', 'planned_left_m2',
                                         'tracking', 'spins', 'aborted')},
@@ -497,6 +724,10 @@ def draw(path: str, garden: gardens.Garden, area_id: str, rec: Dict[str, Any], p
         ax.plot(b['x'], b['y'], 'x', color='#e3242b', ms=6, mew=1.2, zorder=7)
     for x, y in rec.get('pirouettes', []):
         ax.plot(x, y, 'o', mfc='none', mec='black', ms=14, mew=1.2, zorder=7)
+    for name, rings in garden.zones.items():  # (the model garden's: where each situation is)
+        for ring in rings:
+            ax.plot(*zip(*ring), color='#2ca02c', lw=0.6, ls='--', alpha=0.7, zorder=2)
+        ax.annotate(name, rings[0][0], fontsize=5, color='#2ca02c', zorder=8)
     for _, ev, track in sims[:1]:  # (the first seed's)
         for blades, pts in track:
             if len(pts) > 1:
@@ -538,9 +769,10 @@ def _work(case: str, opts: argparse.Namespace, conn: Any) -> None:
     conn.close()
 
 
-def run(cases: Sequence[str], opts: argparse.Namespace, log: Callable[[str], None]) -> List[Dict[str, Any]]:
+def run(cases: Sequence[str], opts: argparse.Namespace, log: Callable[[str], None],
+        saved: Optional[str] = None) -> List[Dict[str, Any]]:
     """Every case in a process of its own, opts.jobs at a time, killed after opts.timeout s planning (or as long
-    again checking and simulating)."""
+    again checking and simulating); each record on a line of its own to saved as it's done (JSON lines)."""
     try:
         ctx = multiprocessing.get_context('fork')
     except ValueError:
@@ -554,11 +786,12 @@ def run(cases: Sequence[str], opts: argparse.Namespace, log: Callable[[str], Non
         proc.join()
         rec = {'case': case, 'anomalies': [], 'plan_s': round((at or time.time()) - started, 1)}
         _add(rec['anomalies'], kind, why)
-        name, index, mower, _ = parse(case)
+        name, index, mower, _, settings = parse(case)
         try:
             garden = gardens.garden(name)
             rec.update(garden=name, kind=garden.kind, area=garden.areas[index], mower=mower,
-                       outline_m2=round(gardens._outline_m2(garden.map, garden.areas[index]), 2))
+                       outline_m2=round(gardens._outline_m2(garden.map, garden.areas[index]), 2),
+                       settings={n: list(v) if isinstance(v, tuple) else v for n, v in settings.items()})
             rec = _finish(rec, opts, garden)
         except Exception as e:
             rec.update(bench_error=str(e), severity=severity(rec['anomalies']))
@@ -566,6 +799,9 @@ def run(cases: Sequence[str], opts: argparse.Namespace, log: Callable[[str], Non
 
     def report(rec: Dict[str, Any]) -> None:
         done.append(rec)
+        if saved:
+            with open(saved, 'a') as f:
+                f.write(json.dumps(rec) + '\n')
         what = ', '.join(f'{a["kind"]} {a["score"]:.0f}' for a in rec['anomalies'][:4]) or rec.get('bench_error', '')
         log(f'[{len(done)}/{len(cases)} {time.time() - t0:5.0f} s] {rec["case"]:28} {rec.get("plan_s", 0):6.1f} s  '
             f'severity {rec.get("severity", 0):5.1f}  {what}')
@@ -601,10 +837,17 @@ def run(cases: Sequence[str], opts: argparse.Namespace, log: Callable[[str], Non
 
 
 def cases_of(opts: argparse.Namespace, log: Callable[[str], None]) -> List[Tuple[str, float]]:
-    """(case, m2) of the gardens and mowers asked for, the real gardens with every mower (in --quick with its own)."""
-    kinds = opts.kinds.split(',') if opts.kinds else list(gardens.KINDS)
-    names = gardens.names(kinds, range(opts.seed_from, opts.seed_from + opts.seeds), not opts.no_real,
-                          not opts.no_tests)
+    """(case, m2) of the gardens and mowers asked for, the real gardens with every mower (in --quick with its own), an
+    export's with its own (MOWERS too only by --mowers); with --settings each also with the settings (see the
+    module)."""
+    if opts.gardens:
+        names = opts.gardens.split(',')
+    elif opts.settings and not opts.kinds:
+        names = list(gardens.HAND_MADE)
+    else:
+        kinds = opts.kinds.split(',') if opts.kinds else list(gardens.KINDS)
+        names = gardens.names(kinds, range(opts.seed_from, opts.seed_from + opts.seeds), not opts.no_real,
+                              not opts.no_tests, hand_made=not opts.kinds)
     own = {'real-mkay': 'mkay', 'real-ape': 'tango'}
     out = []
     for name in names:
@@ -613,12 +856,109 @@ def cases_of(opts: argparse.Namespace, log: Callable[[str], None]) -> List[Tuple
         except (ValueError, OSError) as e:
             log(f'{name}: {e}')
             continue
+        mowers = (opts.mowers or ('own' if garden.mower else 'mkay,tango,rect')).split(',')
+        mowers = {m: gardens.mower_of(m, garden) if opts.settings in ('ofat', 'all') else None for m in mowers
+                  if m != 'own' or garden.mower}
         for i, area in enumerate(garden.areas):
-            for mower in opts.mowers.split(','):
+            m2 = gardens._outline_m2(garden.map, area)
+            for mower, kept in mowers.items():
                 if opts.quick and name in own and own[name] != mower:
                     continue
-                out.append((f'{name}/{i}@{mower}', gardens._outline_m2(garden.map, area)))
+                base = f'{name}/{i}@{mower}'
+                out.append((base, m2))
+                if kept is not None:
+                    out += [(with_case(base, s), m2) for s in settings_one_by_one(kept)]
+                if opts.settings in ('pairs', 'all'):
+                    out += [(f'{base}+pairs={k}', m2) for k in range(len(settings_rows()))]
     return out
+
+
+def _base(case: str) -> str:  # <garden>/<area>@<mower> of a case
+    return re.split(r'[+#]', case, maxsplit=1)[0]
+
+
+def _variant(case: str) -> str:  # its settings (+<setting>=<value>... or +pairs=<k>)
+    return case.split('#')[0][len(_base(case)):]
+
+
+def settings_summary(recs: Sequence[Dict[str, Any]]) -> List[str]:
+    """The summary's lines for --settings: the cases of each value (or row of settings_rows()) against the mower's own
+    settings, case by case (the same garden, area and mower): the worst severity, what failed (crash, timeout, refused,
+    aborted, nav_error, body_out), the lawn left and the planning time more."""
+    own = {_base(r['case']): r for r in recs if not _variant(r['case'])}
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for r in recs:
+        if _variant(r['case']):
+            groups.setdefault(_variant(r['case']), []).append(r)
+    failing = ('crash', 'timeout', 'refused', 'aborted', 'nav_error', 'body_out', 'stuck')
+    rows = []
+    for variant, rs in groups.items():
+        worst = max(r.get('severity', 0) for r in rs)
+        failed = sorted({a['kind'] for r in rs for a in r['anomalies'] if a['kind'] in failing})
+        both = [(r, own[_base(r['case'])]) for r in rs if 'lawn_left_m2' in r and
+                'lawn_left_m2' in own.get(_base(r['case']), {})]
+        more = sum(r['lawn_left_m2'] - o['lawn_left_m2'] for r, o in both)
+        slower = sum(r.get('plan_s', 0) - o.get('plan_s', 0) for r, o in both)
+        rows.append((bool(failed), worst, more, variant, len(rs), failed, len(both), slower))
+    out = ['', '## Settings', '', f'{len(groups)} settings or rows of them, each against the mower\'s own '
+           '(the same garden, area and mower). lawn m2 / plan s more: of the cases planned both ways.', '',
+           '| settings | cases | worst | failed | lawn m2 more | plan s more |', '|---|---|---|---|---|---|']
+    for _, worst, more, variant, n, failed, planned, slower in sorted(rows, key=lambda r: (-r[0], -r[1], -r[2])):
+        out.append(f'| `{variant}` | {n} | {worst:.0f} | {", ".join(failed)} | '
+                   f'{more:+.2f} ({planned}) | {slower:+.0f} |')
+    return out
+
+
+def compare(a: Sequence[Dict[str, Any]], b: Sequence[Dict[str, Any]], names: Tuple[str, str] = ('a', 'b'),
+            top: int = 10) -> str:
+    """Two runs case by case (the cases of both): what's left (lawn_left_m2 where both have it, else check_plan's),
+    pirouettes, planning time, the simulated body, anomalies; by kind of garden and mower, the biggest changes."""
+    old, new = ({r['case']: r for r in recs} for recs in (a, b))
+    both = sorted(set(old) & set(new))
+    lawn = all('lawn_left_m2' in old[c] and 'lawn_left_m2' in new[c] for c in both if 'poses' in old[c] and
+               'poses' in new[c])
+    key = 'lawn_left_m2' if lawn else 'left_m2'
+
+    def left(r: Dict[str, Any]) -> float:
+        return r.get(key, 0.0) or 0.0
+
+    def body(r: Dict[str, Any]) -> float:
+        return max([s.get('body_worst') or 0.0 for s in r.get('sim', [])], default=0.0)
+
+    def count(rs: Sequence[Dict[str, Any]], kind: str) -> int:
+        return sum(any(x['kind'] == kind for x in r['anomalies']) for r in rs)
+
+    rs = [(old[c], new[c]) for c in both]
+    olds, news = [o for o, _ in rs], [n for _, n in rs]
+    out = [f'# simbench {names[0]} -> {names[1]}', '',
+           f'{len(both)} cases in both ({len(set(old) - set(new))} only in {names[0]}, {len(set(new) - set(old))} only '
+           f'in {names[1]}). Left: {key}' + ('' if lawn else ' (not every case has lawn_left_m2: check_plan\'s, not '
+                                            'comparable where the slots by the edge closed differ)') + '.', '',
+           '| | ' + ' | '.join(names) + ' |', '|---|---|---|',
+           f'| left m2 | {sum(map(left, olds)):.2f} | {sum(map(left, news)):.2f} |',
+           f'| plan s | {sum(r.get("plan_s", 0) for r in olds):.0f} | {sum(r.get("plan_s", 0) for r in news):.0f} |',
+           f'| pirouettes | {sum(len(r.get("pirouettes", [])) for r in olds)} | '
+           f'{sum(len(r.get("pirouettes", [])) for r in news)} |',
+           f'| simulated body > {SIM_BODY:.2f} m in | {sum(body(r) > SIM_BODY for r in olds)} | '
+           f'{sum(body(r) > SIM_BODY for r in news)} |']
+    for kind in sorted({x['kind'] for r in olds + news for x in r['anomalies']}, key=lambda k: -SCORES.get(k, 0)):
+        out.append(f'| {kind} | {count(olds, kind)} | {count(news, kind)} |')
+    slots = [c for c in both if (old[c].get('stats') or {}).get('edge_slots') != (new[c].get('stats') or {}).get(
+        'edge_slots')]
+    by: Dict[Tuple[str, str], List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+    for o, n in rs:
+        by.setdefault((o.get('kind') or o['case'].split('/')[0], o.get('mower', '')), []).append((o, n))
+    out += ['', '| kind | mower | ' + ' | '.join(names) + ' |', '|---|---|---|---|']
+    out += [f'| {k} | {m} | {sum(left(o) for o, _ in v):.2f} | {sum(left(n) for _, n in v):.2f} |'
+            for (k, m), v in sorted(by.items())]
+    changes = sorted(rs, key=lambda on: left(on[1]) - left(on[0]))
+    for title, picked in (('Less left', [on for on in changes if left(on[1]) < left(on[0]) - 1e-3][:top]),
+                          ('More left', [on for on in changes[::-1] if left(on[1]) > left(on[0]) + 1e-3][:top])):
+        out += ['', f'## {title}', '']
+        out += [f'- `{o["case"]}` {left(o):.2f} -> {left(n):.2f} m2' + (' (slots by the edge closed differ)'
+                                                                         if o['case'] in slots else '')
+                for o, n in picked] or ['- none']
+    return '\n'.join(out) + '\n'
 
 
 def summary(recs: Sequence[Dict[str, Any]], opts: argparse.Namespace, seconds: float, top: int = 40) -> str:
@@ -650,6 +990,20 @@ def summary(recs: Sequence[Dict[str, Any]], opts: argparse.Namespace, seconds: f
     for r in flagged[:min(top, 15)]:
         out.append(f'- `{r["case"]}` ({r["severity"]}): ' + '; '.join(f'{a["kind"]}: {a["detail"]}'
                                                                        for a in r['anomalies'][:5]))
+    zoned = [r for r in recs if r.get('zones')]
+    if zoned:
+        names = sorted({z for r in zoned for z in r['zones']},
+                       key=lambda z: -sum(r['zones'].get(z, {}).get('left_m2', 0.0) for r in zoned))
+        out += ['', '## Zones', '', 'Of the gardens made by hand: what\'s left there (m2, all cases; cases with 0.05 '
+                'm2 and more), places where the body sticks out (planned, simulated).', '',
+                '| zone | left m2 | cases left | body places | simulated |', '|---|---|---|---|---|']
+        for z in names:
+            got = [r['zones'][z] for r in zoned if z in r['zones']]
+            out.append(f'| {z} | {sum(g.get("left_m2", 0.0) for g in got):.2f} | '
+                       f'{sum(g.get("left_m2", 0.0) >= 0.05 for g in got)} | {sum(g.get("body", 0) for g in got)} | '
+                       f'{sum(g.get("sim_body", 0) for g in got)} |')
+    if any(_variant(r['case']) for r in recs):
+        out += settings_summary(recs)
     errors = [r for r in recs if r.get('bench_error')]
     if errors:
         out += ['', '## Bench errors (not the planner\'s)', ''] + [f'- `{r["case"]}`: {r["bench_error"]}'
@@ -662,11 +1016,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--out', default='simbench-out', help='folder for results.json, summary.md, the pictures')
     ap.add_argument('--quick', action='store_true', help='each kind once (seed 0), mkay and tango, the real gardens '
                     'with their own mower, not the tests\'')
-    ap.add_argument('--case', action='append', help='this case only (repeatable), <garden>/<area>@<mower>#<seed>')
-    ap.add_argument('--kinds', help=f'kinds of made-up gardens, of {",".join(gardens.KINDS)} (default all)')
-    ap.add_argument('--seeds', type=int, default=5, help='made-up gardens of each kind (default 5)')
+    ap.add_argument('--case', action='append', help='this case only (repeatable), '
+                    '<garden>/<area>@<mower>[+<setting>=<value>...]#<seed>')
+    ap.add_argument('--kinds', help=f'kinds of made-up gardens, of {",".join(gardens.KINDS)} (default all and the '
+                    f'gardens made by hand, {",".join(gardens.HAND_MADE)}; with --settings only those)')
+    ap.add_argument('--seeds', type=int, help='made-up gardens of each kind (default 5, with --settings 1)')
+    ap.add_argument('--settings', choices=('ofat', 'pairs', 'all'), help='every setting: each value on its own, '
+                    'every two together, or both (see the module); not the real gardens nor the tests\'')
+    ap.add_argument('--compare', nargs=2, metavar=('BEFORE', 'AFTER'), help='two runs (their --out folders or '
+                    'results.json), case by case, to stdout; nothing is planned')
     ap.add_argument('--seed-from', type=int, default=0, help='the first garden seed')
-    ap.add_argument('--mowers', default='mkay,tango,rect', help=f'of {",".join(gardens.MOWERS)}')
+    ap.add_argument('--gardens', help='these gardens only, by name (see tools/gardens.py), export:<path> a '
+                    'tester\'s, the MowBite app\'s export')
+    ap.add_argument('--mowers', help=f'of {",".join(gardens.MOWERS)}, own: an export\'s (default mkay,tango,rect, '
+                    'an export\'s garden with its own)')
     ap.add_argument('--no-real', action='store_true', help='not the real gardens')
     ap.add_argument('--no-tests', action='store_true', help='not the gardens of the tests')
     ap.add_argument('--no-sim', action='store_true', help='plans only, no simulation')
@@ -675,10 +1038,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument('--timeout', type=float, default=300.0, help='s for a plan (and for checking and simulating)')
     ap.add_argument('--png', choices=('flagged', 'all', 'none'), default='flagged')
     ap.add_argument('--list', action='store_true', help='the cases only')
+    ap.add_argument('--resume', action='store_true', help='on with a run in --out that stopped: the cases it did '
+                    '(its cases.jsonl, every case written there when done) are kept, not run again')
     opts = ap.parse_args(argv)
+    if opts.compare:
+        runs = []
+        for path in opts.compare:
+            with open(os.path.join(path, 'results.json') if os.path.isdir(path) else path) as f:
+                runs.append(json.load(f)['cases'])
+        print(compare(runs[0], runs[1], tuple(os.path.basename(os.path.normpath(p)) for p in opts.compare)), end='')
+        return 0
+    if opts.seeds is None:
+        opts.seeds = 1 if opts.settings else 5
+    if opts.settings:
+        opts.no_real = opts.no_tests = True
     if opts.quick:
         opts.seeds, opts.seed_from, opts.no_tests = 1, 0, True
-        if opts.mowers == ap.get_default('mowers'):
+        if opts.mowers is None:
             opts.mowers = 'mkay,tango'
 
     def log(text: str) -> None:
@@ -697,10 +1073,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print('\n'.join(cases))
         return 0
     os.makedirs(opts.out, exist_ok=True)
+    saved, kept = os.path.join(opts.out, 'cases.jsonl'), []
+    if opts.resume and os.path.exists(saved):
+        with open(saved) as f:
+            kept = [json.loads(line) for line in f if line.strip()]
+        done = {r['case'] for r in kept}
+        cases = [c for c in cases if c not in done]
+        log(f'{len(kept)} cases done before')
+    elif os.path.exists(saved):
+        os.remove(saved)  # (a run of its own)
     log(f'{len(cases)} cases, {opts.jobs} processes, simulation: '
         f'{"off" if opts.no_sim else "on" if simulate is not None else "not available (" + SIM_MISSING + ")"}')
     t0 = time.time()
-    recs = sorted(run(cases, opts, log), key=lambda r: (-r.get('severity', 0), r['case']))
+    recs = sorted(kept + run(cases, opts, log, saved), key=lambda r: (-r.get('severity', 0), r['case']))
     seconds = time.time() - t0
     with open(os.path.join(opts.out, 'results.json'), 'w') as f:
         json.dump({'seconds': round(seconds, 1), 'sim': SIM_MISSING or 'on', 'cases': recs}, f, indent=1)
