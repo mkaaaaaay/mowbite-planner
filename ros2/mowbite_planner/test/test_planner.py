@@ -34,7 +34,7 @@ from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.route import _Route, _arcs, _rows, _spins, best_order  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
-from mowbite_planner.geometry import polygons  # noqa: E402
+from mowbite_planner.geometry import polygons, union  # noqa: E402
 from mowbite_planner.report import LEFT_SHOWN, check_plan, drive_time, track_mowed  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 
@@ -1909,6 +1909,16 @@ def test_body_fit_drives_on(monkeypatch):
     fitted, checked = doubled.stats['body_fit'], check_plan(doubled)
     assert fitted['jumps'] == [] and checked['body_out'] == []
     assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
+
+
+def test_union_of_a_polygon_crossing_itself():
+    """union() repairs what GEOS can't unite: a figure eight (as GEOS now and then buffers a way crossing itself, the
+    union of a garden's swept area fails on it) becomes its two loops, nothing of either lost."""
+    eight = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+    square = Polygon(rect(0.5, 0.5, 1.5, 1.5))
+    assert not eight.is_valid
+    got = union([eight, square])
+    assert got.is_valid and math.isclose(got.area, 2.5) and got.covers(Point(0.2, 1.0)) and got.covers(Point(1.8, 1.0))
 
 
 def test_body_fit_drives_on_not_too_far(monkeypatch):

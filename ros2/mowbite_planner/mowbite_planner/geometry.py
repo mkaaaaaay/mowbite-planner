@@ -70,7 +70,15 @@ def clean_polygon(points: Sequence[Sequence[float]]):
 
 def union(geoms: Iterable) -> object:
     geoms = [g for g in geoms if g is not None and not g.is_empty]
-    return unary_union(geoms) if geoms else Polygon()
+    if not geoms:
+        return Polygon()
+    try:
+        return unary_union(geoms)
+    except ShapelyError:
+        # GEOS now and then buffers a way that crosses itself into a polygon crossing itself, the union fails on it:
+        # those made valid first (a figure eight its two loops, see clean_polygon)
+        return unary_union([g if g.is_valid else make_valid(g) if make_valid is not None else g.buffer(0)
+                            for g in geoms])
 
 
 def subtract(geom, parts: Sequence) -> object:
