@@ -78,7 +78,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         default, ideal, omsim, or {preset, name: value, ...}: MowerModel's values; this mower's FTC
                         values, wheel distance and antenna offset over the preset's), seeds (1..SIM_SEEDS runs, the
                         first one answered, runs: each one's key numbers), track (true: the track like
-                        position_history, [{blades, points}], and the events, t in s from the start)} gives {area_id,
+                        position_history, [{blades, points}], and the events, t in s from the start), playback (s:
+                        where the mower really was that often, [[t, x, y, yaw, blade 0 or 1]], to play it back)}
+                        gives {area_id,
                         fingerprint, kept, model (its values that aren't an ideal mower's), duration: {min, mow_min,
                         model_min}, driven_m, mowed_m2, left_m2, left_pieces, planned_left_m2, left (like check_plan's,
                         where the blade really went), body: {places [[x, y, m]] where the body got m into the margins,
@@ -237,6 +239,8 @@ FTC_PARAMS = '/move_base_flex/FTCPlanner'
 # from these parameters over a preset's (its FTC controller's from FTC_PARAMS too)
 SIM_PRESETS = {'ideal': MowerModel, 'omsim': MowerModel.omsim, 'realistic': MowerModel.realistic}
 SIM_SEEDS = 5
+# s between two points of planner.simulate's playback at least and at most
+SIM_PLAYBACK = (0.5, 60.0)
 SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
               'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
               'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
@@ -802,6 +806,10 @@ class MowbitePlannerRos1:
         if isinstance(seeds, bool) or not isinstance(seeds, int) or not 1 <= seeds <= SIM_SEEDS:
             raise PlanningError('seeds must be a whole number 1..%d' % SIM_SEEDS)
         track = params.pop('track', False)
+        step = params.pop('playback', None)
+        if step is not None and (isinstance(step, bool) or not isinstance(step, (int, float)) or
+                                 not SIM_PLAYBACK[0] <= step <= SIM_PLAYBACK[1]):
+            raise PlanningError('playback must be s between two points, %g..%g' % SIM_PLAYBACK)
         for name in ('poses', 'report', 'trace'):
             params.pop(name, None)
         keep = []
@@ -825,6 +833,9 @@ class MowbitePlannerRos1:
             out['runs'] = [{'seed': model.seed + k, 'min': round(e['s'] / 60.0, 1), 'left_m2': e.get('left_m2'),
                             'worst': e['body']['worst'], 'nav_errors': e['nav_errors'], 'aborted': e['aborted']}
                            for k, (_, e) in enumerate(runs)]
+        if step is not None:  # where it really was, for an app to play it back
+            out['playback'] = [[round(t, 1), round(x, 3), round(y, 3), round(yaw, 2), 1 if blade else 0]
+                               for t, x, y, yaw, _, _, _, blade, _, _ in self.every(got.samples, step)]
         if track:
             out['track'] = [{'blades': seg['attributes']['blades'],
                              'points': [[round(x, 3), round(y, 3)] for x, y in seg['points']]} for seg in got.history]
@@ -835,6 +846,18 @@ class MowbitePlannerRos1:
                       else 'an outline', 'seed %d' % model.seed if seeds == 1 else '%d seeds' % seeds,
                       ev['s'] / 60.0, ev.get('left_m2', 0.0), ev.get('planned_left_m2', 0.0),
                       100.0 * ev['body']['worst'], ev['nav_errors'], ', given up' if ev['aborted'] else '')
+        return out
+
+    @staticmethod
+    def every(samples, step):
+        """The samples step s apart at least (the first and the last ones always)."""
+        out, after = [], None
+        for s in samples:
+            if after is None or s[0] >= after:
+                out.append(s)
+                after = s[0] + step
+        if samples and out[-1] is not samples[-1]:
+            out.append(samples[-1])
         return out
 
     @staticmethod

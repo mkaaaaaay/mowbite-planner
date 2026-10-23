@@ -919,7 +919,7 @@ def test_rpc_simulate(planner):
     assert slower['model'] == {'speed_fast': 0.3, 'seed': 0}
     assert slower['duration']['mow_min'] > ideal['duration']['mow_min']
     small = {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]}
-    real, error = rpc_waited('planner.simulate', dict(small, seeds=2, track=True,
+    real, error = rpc_waited('planner.simulate', dict(small, seeds=2, track=True, playback=2,
                                                       model={'preset': 'realistic', 'seed': 7}))
     assert error is None and real['area_id'] is None and real['model']['seed'] == 7
     assert real['model']['positioning'] is True and real['model']['speed_fast'] == 0.3
@@ -928,6 +928,10 @@ def test_rpc_simulate(planner):
     assert any(seg['blades'] for seg in real['track'])
     assert real['events'][0]['type'] == 'STATE' and real['events'][0]['t'] >= 0
     assert all('job_id' not in e for e in real['events'])
+    times = [p[0] for p in real['playback']]
+    assert times[0] == 0 and all(b - a >= 2.0 - 0.1 - 1e-6 for a, b in zip(times, times[1:-1]))  # (to 0.1 s)
+    assert times[-1] == pytest.approx(real['duration']['min'] * 60.0, abs=3.1)  # (the minutes to 0.1)
+    assert {p[4] for p in real['playback']} == {0, 1}
     assert len(json.dumps(real)) < 200000
     assert any('simulated' in line for _, line in rospy.log)
 
@@ -939,6 +943,8 @@ def test_rpc_simulate(planner):
     ({'area_id': 'a', 'model': ['ideal']}, 'model must be'),
     ({'area_id': 'a', 'model': {'gps_sigma': 'a lot'}}, 'gps_sigma'),
     ({'area_id': 'a', 'model': {'wheels': 3}}, 'wheels'),
+    ({'area_id': 'a', 'playback': 0.1}, 'playback'),
+    ({'area_id': 'a', 'playback': 'yes'}, 'playback'),
     ({'area_id': 'nope'}, 'nope'),
 ])
 def test_rpc_simulate_errors(planner, params, message):
