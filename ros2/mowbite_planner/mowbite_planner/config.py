@@ -76,8 +76,9 @@ EARLIER_LEFT = 1e-3
 # still sticks out (a corner too tight for the body, its front swinging out further than LOOP_IN[1]), Dubins' way of
 # LOOP_ROUND m (the widest that fits) in its place from the loop's way LOOP_ROUND_REACH m before it at most onto its way
 # as far after it, the closest first: the corner rounded off, the loop on along the edge on both sides (stretches less
-# than LOOP_ROUND_GAP m apart one, LOOP_ROUND_TRIES tried at most for a stretch, _Route.loop_round). Kept where the
-# path then leaves LOOP_GAIN m2 less unmowed
+# than LOOP_ROUND_GAP m apart one, LOOP_ROUND_TRIES tried at most for a stretch, _Route.loop_round: a sharp corner
+# where an edge meets a bed only fits further off it than the closest few hundred ways). Kept where the path then
+# leaves LOOP_GAIN m2 less unmowed
 LOOP_LEFT = 1.5
 LOOP_GAIN = 0.05
 LOOP_IN = (0.02, 0.1)
@@ -87,7 +88,7 @@ LOOP_TRIES = 300
 LOOP_ROUND = (1.0, 0.75, 0.5, 0.35, 0.25)
 LOOP_ROUND_REACH = 3.0
 LOOP_ROUND_GAP = 1.0
-LOOP_ROUND_TRIES = 1500
+LOOP_ROUND_TRIES = 6000
 # the further ways of bodyfit's _fit_body (and the way in to the plan's start, see route's START_CLEAR) get off the path
 # and back on it easing off and onto its line: t m along it FIT_EASE_OFF m * (e^(t / l) - 1) off it at most, l
 # FIT_EASE times how far the body reaches behind the centre getting off, ahead of it getting back on (the rear, the

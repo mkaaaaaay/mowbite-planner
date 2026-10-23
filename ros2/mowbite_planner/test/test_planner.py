@@ -27,8 +27,8 @@ from mowbite_planner.maneuvers import (CORNER_ANGLE, MAX_ARC_STEP, bulb_turn, co
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH, FIT_ROUND, FIT_SPOTS,  # noqa: E402
                                      FIT_START, FIT_TRIES, TURN_AHEAD)
-from mowbite_planner.config import (LANE, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, TURN, ZERO_TURN,  # noqa: E402
-                                    Lane, PathSegment)
+from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT,  # noqa: E402
+                                    TURN, ZERO_TURN, Lane, PathSegment)
 from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.route import _Route, _arcs, _rows, _spins, best_order  # noqa: E402
@@ -1749,6 +1749,38 @@ def test_loop_round_tight_tip(monkeypatch):
     report, before = check_plan(plan), check_plan(without)
     assert report['body_out'] == [] and before['body_out'] == []
     assert report['left_m2'] < before['left_m2'] - 0.5
+
+
+def test_loop_round_where_beds_meet_the_edge(monkeypatch):
+    """Beds by a round edge (the slots by them closed): where the outermost loop turns off the edge onto a bed
+    the corner is sharp, Dubins' arc round it only fits further off it than the closest few hundred ways loop_round
+    tries (LOOP_ROUND_TRIES): with them all the corners rounded, little of the loop left out, far less unmowed than
+    with a fourth of them (the loop left out from one bed to the next, 26 m)."""
+    lawn = [(1.96, 6.72), (1.99, 7.14), (2.06, 7.57), (2.16, 8.03), (2.3, 8.48), (2.47, 8.88), (2.69, 9.23),
+            (2.94, 9.54), (3.23, 9.81), (3.56, 10.02), (3.93, 10.19), (4.34, 10.32), (4.79, 10.4), (5.27, 10.44),
+            (6.63, 10.44), (7.69, 10.4), (8.24, 10.34), (8.46, 10.3), (8.65, 10.26), (8.81, 10.19), (8.95, 10.09),
+            (9.07, 9.95), (9.16, 9.77), (9.24, 9.56), (9.29, 9.31), (9.33, 9.03), (9.34, 8.71), (9.33, 8.35),
+            (9.25, 7.55), (9.13, 6.78), (8.99, 6.06), (8.82, 5.39), (8.62, 4.78), (8.5, 4.5), (8.37, 4.24), (8.22, 4.0),
+            (8.03, 3.79), (7.81, 3.61), (7.56, 3.46), (7.28, 3.34), (6.98, 3.25), (6.64, 3.19), (6.28, 3.15),
+            (5.88, 3.14), (5.48, 3.16), (5.1, 3.2), (4.74, 3.27), (4.39, 3.36), (4.06, 3.48), (3.75, 3.62),
+            (3.46, 3.79), (3.19, 3.98), (2.94, 4.19), (2.7, 4.43), (2.49, 4.69), (2.31, 4.98), (2.17, 5.28),
+            (2.07, 5.61), (2.0, 5.96), (1.96, 6.33)]
+    beds = [[(2.99, 4.7), (3.38, 4.94), (3.38, 5.32), (3.42, 5.52), (2.64, 5.74), (2.43, 5.42), (2.47, 4.92)],
+            [(6.58, 4.36), (5.35, 3.37), (4.44, 4.49), (5.67, 5.48)],
+            [(8.55, 6.74), (7.46, 6.31), (7.78, 5.49), (8.87, 5.92)]]
+    body = ((0.44, 0.048), (0.407, 0.139), (0.376, 0.174), (0.204, 0.201), (0.021, 0.215), (-0.08, 0.214),
+            (-0.145, 0.179), (-0.19, 0.056), (-0.19, -0.056), (-0.145, -0.179), (-0.08, -0.214), (0.021, -0.215),
+            (0.204, -0.201), (0.376, -0.174), (0.407, -0.139), (0.44, -0.048))
+    cfg = PlannerConfig(mower_width=0.18, blade_ahead=0.185, robot_outline=body, edges='recorded',
+                        perimeter_offset=0.05, turn_radius=0.25, lane_spacing_mode='fixed', overlap=0.15,
+                        perimeter_passes=4, angle=0.4, mop_up=False)
+    dock = (2.94, 10.21, 2.38)
+    plan = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2])
+    monkeypatch.setattr('mowbite_planner.route.LOOP_ROUND_TRIES', LOOP_ROUND_TRIES // 4)
+    fewer = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2])
+    assert plan.stats['edge_slots'] == fewer.stats['edge_slots'] > 0
+    assert plan.stats['body_fit']['skipped_m'] < 10.0 < fewer.stats['body_fit']['skipped_m']
+    assert check_plan(plan)['left_m2'] < check_plan(fewer)['left_m2'] - 0.5
 
 
 def test_spin_margin_kept():
