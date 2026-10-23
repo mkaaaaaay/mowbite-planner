@@ -1,7 +1,7 @@
 # The MowBite Planner next to OpenMower, a Dockge stack of its own (e.g. /opt/stacks/mowbite-planner/compose.yaml):
 # OpenMower's compose.yaml stays as it is, its .env gets OM_PLANNER=external (open_mower_ros doesn't start slic3r then).
 # Built on the mower from this repository, on the OpenMower image OPENMOWER_VERSION (the VERSION of OpenMower's .env,
-# its layers are there already). A newer planner or OpenMower version: docker compose up -d --build
+# its layers are there already). A newer planner or OpenMower version: Update in Dockge (docker compose up -d)
 services:
   mowbite_planner:
     build:
@@ -11,6 +11,9 @@ services:
       args:
         OPENMOWER_IMAGE: ghcr.io/clemenselflein/open_mower_ros:${OPENMOWER_VERSION:-edge}
     image: mowbite_planner:${OPENMOWER_VERSION:-edge}
+    # built anew on every docker compose up (Dockge's Update and Deploy): the newest planner, on OpenMower's image as
+    # it is then
+    pull_policy: build
     container_name: mowbite_planner
     # it ends when OpenMower's ROS master restarts, back up it registers again
     restart: unless-stopped

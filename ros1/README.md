@@ -44,8 +44,10 @@ and no planner, `mower_logic` gives up after 60 s and starts again every 70 s, a
 3. Only then `OM_PLANNER=external` in OpenMower's `.env`, and OpenMower's stack restarted (`docker compose up -d`).
    OpenMower then doesn't start slic3r, the planner container starts again with it and answers.
 
-Updating: `docker compose up -d --build`. After an OpenMower update too, then `docker image prune -f`: the planner
-image is built on OpenMower's, the old one would keep the old OpenMower image (GBs) on the disk.
+Updating: Update in Dockge (`docker compose up -d`: with `pull_policy: build` it builds the newest planner every
+time, so starting it from Dockge needs the internet). After an OpenMower update too, then `docker image prune -f &&
+docker builder prune -f`: the planner image is built on OpenMower's, the old one would keep the old OpenMower image
+(GBs) on the disk, and every build leaves some build cache.
 
 Going back, the other way round: `OM_PLANNER` out of OpenMower's `.env`, OpenMower restarted (`VERSION` as before if
 you like), then the planner stack stopped.
