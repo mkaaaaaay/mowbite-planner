@@ -2546,6 +2546,20 @@ def test_mowed_near_lane_ends():
     assert len(runs) > 8 and route.mowed(ends, route.segments).wkb == unary_union([route.blade(r) for r in runs]).wkb
 
 
+def test_drawn_obstacle_stays_for_the_body():
+    """With edges recorded the body may be where it was driving round an obstacle, into it along its line. One smaller
+    than the body is wide can't have been driven round (the body would have been over all of it): it's drawn (a post, a
+    trunk), its line is its real edge, the body keeps the margin off all of it (no lane runs its front over it). A
+    bigger one keeps the middle the band leaves."""
+    lawn, post, bed = rect(0, 0, 6, 4), circle(2.0, 2.0, 0.12, 16), circle(4.5, 2.0, 0.6, 32)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2, edges='recorded'))
+    plan = plan_coverage(lawn, [post, bed], cfg, start=(1, 1, 0.0))
+    space = plan.body_space
+    assert not space.intersects(Polygon(post).buffer(cfg.obstacle_margin - 0.005))
+    assert not space.contains(Point(4.5, 2.0)) and space.contains(Point(4.5 + 0.55, 2.0))
+    assert check_plan(plan)['body_out'] == []
+
+
 def test_body_space_kept(monkeypatch):
     """The body space of the last plans is taken as it is for the same area again (another angle), by every thread:
     the plan is the same as with it worked out afresh, and gets a copy of it. Another margin works it out again. Each

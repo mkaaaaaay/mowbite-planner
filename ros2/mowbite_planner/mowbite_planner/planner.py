@@ -58,6 +58,10 @@ MAX_COORDINATE = 1e7
 LEFT_GAIN = 0.05
 # m, how far apart _edge_gaps closes a slot by the edge straight across
 EDGE_STEP = 0.03
+# m2, with the body checked (edges recorded) an obstacle of which less than this is left once the body's band round its
+# line is taken off (smaller than the body is wide: it can't have been driven round with the body in it) was drawn: its
+# line is its real edge, the body keeps its margin off all of it (_body_space)
+DRAWN = 1e-4
 
 
 # entry point -----------------------------------------------------------------------------------------------
@@ -800,8 +804,9 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
                 margin_of: List[float], cfg: PlannerConfig) -> Tuple[object, Footprint]:
     """Where the body may be, and its Footprint there: where the edges really are, where the body was while its centre
     drove them (the outline and the drivable areas, the obstacles and areas to keep out of, each the way its points go),
-    into an obstacle or an area to keep out of only along its own edge (hard edges: the lines themselves), edge_margin
-    and each one's margin off that. The last ones worked out are kept (_BODY_SPACES), the last one of this thread with
+    into an obstacle or an area to keep out of only along its own edge (hard edges: the lines themselves; one too small
+    to have been driven round, of which that leaves less than DRAWN, its line), edge_margin and each one's margin off
+    that. The last ones worked out are kept (_BODY_SPACES), the last one of this thread with
     its Footprint (_BODY_SPACE), the plan gets a copy."""
     outlines, away_from = ([[(float(p[0]), float(p[1])) for p in ring] for ring in rings]
                           for rings in (outlines, away_from))
@@ -816,7 +821,11 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
             outer = union([clean_polygon(o) for o in outlines] +
                           ([] if hard else [_driven(outlines, cfg.body_outline)]))
             band = None if hard else _driven(away_from, cfg.body_outline)
-            inner = [clean_polygon(w) if band is None else clean_polygon(w).difference(band) for w in away_from]
+            inner = []
+            for w in away_from:
+                w = clean_polygon(w)
+                rest = w if band is None else w.difference(band)
+                inner.append(rest if rest.area >= DRAWN else w)
             space = subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb
             _keep(_BODY_SPACES, shared, space)
         space = wkb.loads(space)
