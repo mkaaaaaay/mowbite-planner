@@ -2,7 +2,7 @@
 left) and what's worth knowing (soft), with how much is mowed once, more than once and not at all."""
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point
 from shapely.prepared import prep
@@ -145,17 +145,9 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     mowed = swept_area(plan, width).intersection(plan.free_space) if width > 0 else None
     out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': body}
     if mowed is not None:
-        # what's meant to be mowed: with the first loop further in than half the blade (perimeter_offset,
-        # robot_width) a strip along the edges stays
+        target, pieces, got = left_of(plan, mowed)
+        out.update(got)
         margin = max(0.0, cfg.blade_loop_offset - 0.5 * width) if cfg else 0.0
-        target = inset(plan.free_space, margin) if margin > 1e-9 else plan.free_space
-        left = target.difference(mowed)
-        pieces = [p for p in polygons(left) if p.area >= TUFT]
-        out.update(mowed_m2=round(mowed.area, 3), left_m2=round(left.area, 3), left_pieces=len(pieces),
-                   area_m2=round(plan.free_space.area, 3))
-        out['left'] = [{'m2': round(p.area, 3),
-                        'outline': [[round(x, 3), round(y, 3)] for x, y in p.simplify(LEFT_SIMPLIFY).exterior.coords]}
-                       for p in sorted(pieces, key=lambda p: -p.area)[:LEFT_SHOWN]]
         if margin > 1e-9:
             edge = plan.free_space.area - target.area
             out['edge_left_m2'] = round(edge, 3)
@@ -194,6 +186,26 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     if total > 0 and kinds[TRANSIT] / total > 0.1:
         soft.append(f'{100 * kinds[TRANSIT] / total:.0f} % of the way are drives between the parts of the plan')
     return out
+
+
+def left_of(plan: CoveragePlan, mowed) -> Tuple[Any, List[Any], Dict[str, Any]]:
+    """What mowed (a geometry in plan.free_space) leaves of the area: (what's meant to be mowed, the pieces left of it
+    of TUFT m2 at least, {'mowed_m2', 'left_m2', 'left_pieces', 'area_m2', 'left'}), for check_plan and for a mow
+    simulated or driven. What's meant to be mowed: with the first loop further in than half the blade
+    (perimeter_offset, robot_width) a strip along the edges stays. left: the LEFT_SHOWN biggest pieces, biggest first,
+    [{'m2', 'outline': [[x, y], ...]}], the outline simplified to LEFT_SIMPLIFY and rounded to mm."""
+    cfg = plan.config
+    width = cfg.mower_width if cfg else 0.0
+    margin = max(0.0, cfg.blade_loop_offset - 0.5 * width) if cfg else 0.0
+    target = inset(plan.free_space, margin) if margin > 1e-9 else plan.free_space
+    left = target.difference(mowed)
+    pieces = [p for p in polygons(left) if p.area >= TUFT]
+    got = {'mowed_m2': round(mowed.area, 3), 'left_m2': round(left.area, 3), 'left_pieces': len(pieces),
+           'area_m2': round(plan.free_space.area, 3),
+           'left': [{'m2': round(p.area, 3),
+                     'outline': [[round(x, 3), round(y, 3)] for x, y in p.simplify(LEFT_SIMPLIFY).exterior.coords]}
+                    for p in sorted(pieces, key=lambda p: -p.area)[:LEFT_SHOWN]]}
+    return target, pieces, got
 
 
 def left_unmowed(plan: CoveragePlan):
