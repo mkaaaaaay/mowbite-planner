@@ -266,8 +266,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     # (and the gaps between two too narrow for the body, see _gaps, or between one and the edge, see _edge_gaps)
     gaps = [g for g in _gaps(away_from, margin_of, [max(k, centre) for k in keep], cfg) if g.intersects(area)] \
         if cfg.body else []
-    slots = [g for g in _edge_gaps(area, list(drivable) + list(reach_over), away_from, margin_of,
-                                   [max(k, centre) for k in keep], centre, cfg)
+    slots = [g for g in _edge_gaps(area, list(drivable) + list(reach_over), away_from, margin_of, cfg)
              if g.intersects(area)] if cfg.body and edge_slots else []
     blocked = union(grown[:len(obstacles)] + gaps + slots)
     free = polygonal(area.difference(blocked)) if not blocked.is_empty else area
@@ -767,20 +766,22 @@ def _gaps(shapes: List[object], margin_of: List[float], off: List[float], cfg: P
 
 
 def _edge_gaps(area, drivable: Sequence[Sequence[Sequence[float]]], shapes: List[object], margin_of: List[float],
-               off: List[float], centre: float, cfg: PlannerConfig) -> List[Polygon]:
+               cfg: PlannerConfig) -> List[Polygon]:
     """The slots between an obstacle or area to keep out of and the edge (where no area the mower may drive through
     lies beyond it: the edge's real edge robot_width / 2 out from its line, hard: the line) where the body, facing
     straight across, has less than body_tolerance to spare with the margins kept, like _gaps: all of the slot,
     straight across from the one to the other, as far as it stays narrower than that by half the body's width more
     (beside a closed bit it's a dead end the mower can't turn in). The loops go round the obstacle there as round one
-    on the edge: a bed moved a little off the edge doesn't take the outermost loop through a slot by it."""
+    on the edge: a bed moved a little off the edge doesn't take the outermost loop through a slot by it. Also where it
+    comes closer to the edge than the loops' centres keep off both (no way between them then): the wedges either side
+    of where it does are such slots, the loops would run into them."""
     reach = union([area] + [clean_polygon(d) for d in drivable])
     beyond = reach.buffer(1.0, QUAD_SEGS).difference(reach)
     ys = [y for _, y in cfg.body_outline]
     gaps = []
-    for a, m, o in zip(shapes, margin_of, off):
+    for a, m in zip(shapes, margin_of):
         width = m + cfg.edge_margin + cfg.body_tolerance + 2.0 * cfg.wall_half
-        if a.is_empty or not o + centre <= a.distance(beyond) < width:
+        if a.is_empty or not a.distance(beyond) < width:
             continue
         across = width + 0.5 * (max(ys) - min(ys))
         bridges = []

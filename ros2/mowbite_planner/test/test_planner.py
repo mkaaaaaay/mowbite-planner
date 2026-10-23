@@ -1704,6 +1704,19 @@ def test_body_gap_to_the_edge(bulge, nav):
     assert left(plan) < left(other)
 
 
+@pytest.mark.parametrize('gap', [0.08, 0.10])
+def test_body_gap_to_the_edge_closer(gap):
+    """A bed closer to the edge than the loops' centres keep off both (no way between them anyway): the slot by it is
+    closed all the same, the wedges either side of where it comes closest with it, which the loops would run into and
+    get left out of where the body can't follow (a bed 10 cm off a curved edge: 18 m of loops left out)."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, edge_margin=0.05, obstacle_margin=0.05))
+    lawn, bed = rect(0, 0, 10, 6), circle(5.0, 0.8 + gap, 0.8, 48)
+    closed = _plan_coverage(lawn, [bed], cfg, start=(1, 3, 0.0), end=(1, 3))
+    opened = _plan_coverage(lawn, [bed], cfg, start=(1, 3, 0.0), end=(1, 3), edge_slots=False)
+    assert closed.stats['edge_slots'] == 1 and opened.stats['edge_slots'] == 0
+    assert check_plan(closed)['left_m2'] < check_plan(opened)['left_m2']
+
+
 def test_turn_radius_zero():
     """turn_radius 0 with the body checked: on the spot at the lanes' ends, lane after lane, every other curve ZERO_TURN
     wide, the plan of turn_on_spot and lane_order snake (all on the spot a long front by the edges wouldn't fit: whole
