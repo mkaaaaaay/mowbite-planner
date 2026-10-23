@@ -67,9 +67,15 @@ planner container ends and comes back on its own (`restart: unless-stopped`).
 
 ## Settings and RPCs
 
-Set them in the MowBite app or over OpenMower's JSON-RPC (MQTT `rpc/request`), no new image needed. They're kept in
-`/home/openmower/ros/mowbite_planner_settings.json` and used from the next plan on. An interrupted area whose plan
-changes starts again.
+Set them in the MowBite app, on the planner's own settings page or over OpenMower's JSON-RPC (MQTT `rpc/request`),
+no new image needed. They're kept in `/home/openmower/ros/mowbite_planner_settings.json` and used from the next plan
+on. An interrupted area whose plan changes starts again.
+
+**Settings page:** `http://<mower>:8090` (`MOWBITE_WEB_PORT` in the stack's `.env`, `0` turns it off). Every setting
+with a short help, for all areas or one area's own, an obstacle's own gap (tap it on the map), and a preview of the
+plan with what's left unmowed. An area's settings and an obstacle's gap go into OpenMower's map, the map before is
+kept in `/home/openmower/ros/mowbite_map_backups` (the last 10). No login: anyone on your network can change them, as
+over MQTT.
 
 Loops, `perimeter_offset` and `lane_overlap_passes` come from OpenMower's parameters (`outline_count`, ...) until you
 set them here. An area's own values in the map beat both. The lane spacing the planner picks itself from the blade
@@ -80,6 +86,7 @@ set `overlap`.
 | --- | --- |
 | `planner.settings` | every setting with value, default, type, unit, range, and where it comes from |
 | `planner.settings.set` | `{"turn_radius": 0.3, ...}`, checked as a whole, `null` resets one |
+| `planner.area.set` | `{"area_id": ..., "settings": {"turn_radius": 0.3, ...}}` an area's own settings (`null`: back to all areas'), `{"area_id": ..., "margin": 0.2}` an obstacle's own gap (`null`: gone), written into OpenMower's map (`map.replace`) |
 | `planner.plan` | a plan like the app's preview, plus segments, stats, warnings and how long mowing it takes (`duration`, gets better with every finished mow); `report: true` adds a check (unmowed bits, their outlines in `left` to draw them, where the body would stick out) |
 | `planner.drive` | how close the body really got to the edges on a mow (from OpenMower's position history), also logged after every mow |
 | `planner.leftovers` | what a mow really left (from its track) and the passes over it; with `arm: true` the next start of the mower only mows those |

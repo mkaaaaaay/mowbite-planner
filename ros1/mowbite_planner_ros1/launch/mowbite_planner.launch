@@ -19,6 +19,8 @@
     <rosparam param="settings">{turn_radius: 0.25, narrow_parts: loops, edges: recorded, lane_spacing_mode: auto}</rosparam>
     <!-- the settings changed with the planner.settings.set RPC, on top of the ones above. Empty: until the next start -->
     <param name="settings_file" value="$(optenv ROS_HOME ~/.ros)/mowbite_planner_settings.json"/>
+    <!-- the settings page with a preview of the plans: http://<mower>:<port>/ (MOWBITE_WEB_PORT, 0: none) -->
+    <param name="web_port" value="$(optenv MOWBITE_WEB_PORT 8090)"/>
   </node>
   <!-- OpenMower's slic3r planner for the setting planner slic3r: the MowBite Planner hands it mower_logic's request -->
   <node pkg="slic3r_coverage_planner" type="slic3r_coverage_planner" name="slic3r_classic" output="screen"

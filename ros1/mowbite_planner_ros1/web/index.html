@@ -1,0 +1,880 @@
+<!doctype html>
+<!-- The MowBite Planner's settings page (the node's WebPage): the settings from planner.settings, changed ones tried
+     on the map with planner.plan and kept with planner.settings.set. One file, nothing loaded from elsewhere. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MowBite Planner</title>
+<style>
+:root {
+  --bg: #f6f7f4; --panel: #ffffff; --text: #1d2318; --muted: #69725f; --line: #dde2d6; --accent: #2f7d32;
+  --changed: #fff4d6; --changed-line: #e0a800; --error: #c62828;
+  --lawn: #cfe8c4; --lawn-line: #6a9b5a; --obstacle: #b9b9b9; --nav: #cfe3f2; --selected: #2f7d32;
+  --loop: #1e63c6; --lane: #2e9d5b; --turn: #e8731c; --transit: #7d4cc4; --left: #e53935; --body: #c62828;
+  --edge: #333333;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15180f; --panel: #1f2419; --text: #e8ecdf; --muted: #9aa48d; --line: #343b2b; --accent: #7cc47f;
+    --changed: #3b3418; --changed-line: #c9a227; --error: #ef6a6a;
+    --lawn: #2c4423; --lawn-line: #6f9a5d; --obstacle: #5a5a5a; --nav: #23394a; --selected: #9be09d;
+    --loop: #6aa7ff; --lane: #4cc97f; --turn: #ff9a4d; --transit: #b48cf0; --left: #ff5c5c; --body: #ff6b6b;
+    --edge: #d0d0d0;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+         background: var(--panel); }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+header .status { margin-left: auto; color: var(--muted); font-size: 13px; text-align: right; }
+header .status.error { color: var(--error); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; height: calc(100% - 49px); }
+#view { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px;
+         border-bottom: 1px solid var(--line); background: var(--panel); }
+#tools select { max-width: 220px; }
+#map { flex: 1; min-height: 0; width: 100%; touch-action: none; cursor: grab; background: var(--bg); }
+#map.dragging { cursor: grabbing; }
+#busy { position: absolute; top: 56px; left: 50%; transform: translateX(-50%); background: var(--panel);
+        border: 1px solid var(--line); border-radius: 16px; padding: 4px 14px; font-size: 13px; display: none;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, .15); }
+#busy.on { display: block; }
+#facts { padding: 8px 12px; border-top: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+#facts .numbers { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+#facts .numbers b { font-weight: 650; }
+#facts .warn { color: var(--muted); margin-top: 4px; }
+#legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+#legend span::before { content: ""; display: inline-block; width: 16px; height: 0; margin-right: 5px;
+                       vertical-align: middle; border-top: 3px solid var(--c); }
+#legend span.dash::before { border-top-style: dashed; border-top-width: 2px; }
+#legend span.fill::before { height: 10px; border: 0; background: var(--c); opacity: .7; }
+#legend span.dot::before { width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--c); }
+#side { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line);
+        background: var(--panel); }
+#scope { display: flex; padding: 8px 12px 0; }
+#scope button { flex: 1; border-radius: 0; }
+#scope button:first-child { border-radius: 6px 0 0 6px; }
+#scope button:last-child { border-radius: 0 6px 6px 0; border-left: 0; overflow: hidden; text-overflow: ellipsis;
+                           white-space: nowrap; }
+#scope button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+#obstacle { margin: 8px 12px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+#obstacle .top { display: flex; align-items: center; gap: 8px; }
+#obstacle b { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#obstacle input { width: 80px; }
+#obstacle .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+#actions { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+#actions .count { color: var(--muted); font-size: 13px; margin-right: auto; }
+#settings { overflow-y: auto; padding: 4px 12px 24px; }
+#settings .intro { color: var(--muted); font-size: 13px; margin: 8px 0 4px; }
+details { border-bottom: 1px solid var(--line); }
+summary { cursor: pointer; padding: 10px 0; font-weight: 650; list-style-position: inside; }
+summary .note { font-weight: 400; color: var(--muted); font-size: 13px; }
+.row { padding: 8px 6px; margin: 0 -6px; border-radius: 6px; }
+.row.own label::after { content: " ●"; color: var(--accent); font-size: 11px; }
+.row.changed { background: var(--changed); box-shadow: inset 3px 0 0 var(--changed-line); }
+.row .top { display: flex; align-items: center; gap: 8px; }
+.row label { flex: 1; font-weight: 550; }
+.row .help { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.row .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.row .unit { color: var(--muted); font-size: 13px; min-width: 22px; }
+.row input[type=number] { width: 92px; }
+.row textarea { width: 100%; min-height: 60px; font: 12px ui-monospace, monospace; margin-top: 4px; }
+.row input[type=text] { width: 100%; margin-top: 4px; }
+.row .reset { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px; padding: 0 2px; }
+.row .reset:hover { color: var(--text); }
+.row .error { color: var(--error); font-size: 13px; margin-top: 2px; }
+input, select, textarea, button { font: inherit; color: var(--text); background: var(--bg);
+                                  border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
+button { cursor: pointer; background: var(--panel); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 860px) {
+  main { display: block; height: auto; }
+  #view { height: 62vh; }
+  #side { border-left: 0; border-top: 1px solid var(--line); }
+  #settings { overflow: visible; }
+  #actions { position: sticky; top: 0; z-index: 2; background: var(--panel); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>MowBite Planner</h1>
+  <div class="status" id="status">loading…</div>
+</header>
+<main>
+  <section id="view">
+    <div id="tools">
+      <select id="area" aria-label="Area"></select>
+      <button id="preview" class="primary">Preview</button>
+      <button id="fit" title="Show the whole area">Fit</button>
+      <label><input type="checkbox" id="showPlan" checked> plan</label>
+    </div>
+    <svg id="map" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="busy">planning… (a new plan can take a minute)</div>
+    <div id="facts">
+      <div class="numbers" id="numbers">Pick an area to see its plan.</div>
+      <div class="warn" id="warnings"></div>
+      <div id="legend">
+        <span style="--c: var(--loop)">loops</span>
+        <span style="--c: var(--lane)">lanes</span>
+        <span style="--c: var(--turn)">turns</span>
+        <span class="dash" style="--c: var(--transit)">drives</span>
+        <span class="dash" style="--c: var(--edge)">body limit</span>
+        <span class="fill" style="--c: var(--left)">left unmowed</span>
+        <span class="dot" style="--c: var(--body)">body sticks out</span>
+      </div>
+    </div>
+  </section>
+  <aside id="side">
+    <div id="scope">
+      <button id="scopeAll" class="on">All areas</button>
+      <button id="scopeArea">This area</button>
+    </div>
+    <div id="obstacle" hidden></div>
+    <div id="actions">
+      <span class="count" id="count">no changes</span>
+      <button id="discard" disabled>Undo</button>
+      <button id="save" class="primary" disabled>Save</button>
+    </div>
+    <div id="settings">
+      <p class="intro" id="intro"></p>
+    </div>
+  </aside>
+</main>
+<script>
+'use strict';
+
+// [group, label, help] of each setting, in this order on the page; the others go to Other
+const INFO = {
+  robot_width: ['mower', 'Width', 'At the widest point, wheels included.'],
+  robot_front: ['mower', 'Length to the front', 'From the middle between the drive wheels to the front-most point.'],
+  robot_rear: ['mower', 'Length to the back', 'From the middle between the drive wheels to the rear-most point.'],
+  mower_width: ['mower', 'Cutting width', 'The circle the blade tips cut, tip to tip.'],
+  blade_ahead: ['mower', 'Blade ahead', 'Blade centre in front of the middle between the drive wheels ' +
+                '(behind: minus).'],
+  blade_offset: ['mower', 'Blade to the left', 'Only if the blade isn\'t in the middle (to the right: minus).'],
+  robot_outline: ['mower', 'Measured outline', 'Optional, instead of the rectangle: [[x, y], ...] in m, x ahead, ' +
+                  'y to the left, from the middle between the drive wheels.'],
+  edges: ['keep', 'Map lines are', 'recorded: where the mower\'s centre drove when you recorded them. hard: the ' +
+          'real edge (a wall, a bed\'s border), the mower stays inside.'],
+  edge_margin: ['keep', 'Gap to the edge', 'Between the mower and the real edge.'],
+  obstacle_margin: ['keep', 'Gap to obstacles', 'Between the mower and obstacles.'],
+  spin_margin: ['keep', 'Extra gap for turns', 'When turning on the spot and between lanes (the mower wobbles ' +
+                'a bit there).'],
+  body_fit: ['keep', 'Check the whole mower', 'Where it would stick out, take another way or leave the bit out. ' +
+             'Needs the size above.'],
+  perimeter_passes: ['loops', 'Loops along the edge', 'Also around obstacles. -1: as many as the turns need.'],
+  obstacle_passes: ['loops', 'Loops around obstacles', 'Around obstacles in the lawn. -1: as many as along the ' +
+                    'edge, 0: none (the lanes go up to them).'],
+  perimeter_offset: ['loops', 'First loop in from the line', 'Empty: half the cutting width.'],
+  perimeter_order: ['loops', 'Loops', 'first or last: before or after the lanes.'],
+  perimeter_direction: ['loops', 'Loops go round', 'auto: the way the mower faces. random: one way or the other, ' +
+                        'new after every mow.'],
+  lane_overlap_passes: ['loops', 'Lanes reach into the loops', 'By this many loops.'],
+  lane_overlap_limit: ['loops', 'Turns stay inside', 'At the lane ends the mower gets no further out than the ' +
+                       'lanes reach. Best with 2 above.'],
+  fill_pattern: ['lanes', 'Pattern', 'lanes, crosshatch (a second set across) or concentric (loops all the way in).'],
+  crosshatch_angle: ['lanes', 'Crosshatch angle', 'Between the two sets of lanes.'],
+  lane_spacing_mode: ['lanes', 'Lane spacing', 'auto: the planner picks it. fixed: cutting width minus the ' +
+                      'overlap.'],
+  overlap: ['lanes', 'Overlap', 'How much neighbouring lanes overlap (fixed spacing).'],
+  lane_spacing_min: ['lanes', 'Spacing at least', 'For auto. Empty: worked out.'],
+  lane_spacing_max: ['lanes', 'Spacing at most', 'For auto. Empty: worked out.'],
+  angle_strategy: ['lanes', 'Lane direction', 'longest_edge: along the longest edge. min_width: across the ' +
+                   'narrowest side. optimal: the fewest lanes.'],
+  angle: ['lanes', 'Fixed direction', 'Empty: as the lane direction above says.'],
+  angle_offset: ['lanes', 'Turn the direction by', 'On top of the direction worked out.'],
+  angle_min: ['lanes', 'Direction at least', 'Keep the lanes in this range. Empty: any.'],
+  angle_max: ['lanes', 'Direction at most', 'Keep the lanes in this range. Empty: any.'],
+  angle_step: ['lanes', 'Step for optimal', 'How fine optimal tries the directions.'],
+  angle_increment: ['lanes', 'Turn the stripes by', 'A bit after every few mows, so no ruts. 0: always the same.'],
+  angle_increment_every: ['lanes', '…every', 'This many finished mows.'],
+  split_zones: ['lanes', 'Zones', 'A part better mowed another way gets lanes of its own direction (only where ' +
+                'that takes fewer lanes).'],
+  narrow_parts: ['lanes', 'Narrow strips', 'Strips narrower than a turn: lanes anyway, or loops.'],
+  nested_areas: ['lanes', 'Areas in areas', 'A mowing area inside this one is mowed round like an obstacle and ' +
+                 'gets its own plan.'],
+  turn_radius: ['turns', 'Turn radius', 'Of the turns. Larger: gentler on the lawn, needs more room.'],
+  turn_radius_auto: ['turns', 'Wider turns where there\'s room', 'The planner picks each turn\'s radius, the turn ' +
+                     'radius at least.'],
+  turn_on_spot: ['turns', 'Turn on the spot', 'Instead of driving a loop (for lawns that take it).'],
+  headland_turns: ['turns', 'Clean stripes', 'Turns and drives only at the edge, none across the lanes.'],
+  headland_corners: ['turns', 'Corners at the edge', 'rounded, or sharp (turning on the spot).'],
+  lane_order: ['turns', 'Lane order', 'skip: every few lanes first, so every turn is a forward U-turn (what ' +
+               'OpenMower drives). snake: one lane after the other.'],
+  turn_types: ['turns', 'Turns allowed', 'Preferred first: u_turn, bulb (a loop), detour (along the edge), pivot ' +
+               '(on the spot).'],
+  route_order: ['drives', 'Order of the parts', 'nearest: the closest next. optimized: the shortest drives.'],
+  transit_edge_distance: ['drives', 'Drives keep off the edge', 'By this much where that isn\'t a lot longer.'],
+  transit_edge_cost: ['drives', 'How much longer', 'A drive may get for that (times).'],
+  bend_max_gap: ['drives', 'Bend round small obstacles', 'Lanes bend round obstacles up to this size instead of ' +
+                 'ending. 0: never.'],
+  bend_max_offset: ['drives', 'Bend at most', 'How far a bending lane may leave its line.'],
+  mop_up: ['extras', 'Mop up', 'An extra round at the end over the biggest bits left unmowed.'],
+  leftovers_auto: ['extras', 'Go back for what it missed', 'After every mow the planner looks at the real track. ' +
+                   'If 0.3 m² or more was left, it sends the mower out again once (not in the rain).'],
+  planner: ['extras', 'Planner', 'mowbite, or slic3r: OpenMower\'s own planner (no body check).'],
+};
+const GROUPS = [['mower', 'Your mower', true], ['keep', 'Keeping off edges and obstacles', true],
+                ['loops', 'Loops', false], ['lanes', 'Lanes', false], ['turns', 'Turns', false],
+                ['drives', 'Driving between parts', false], ['extras', 'Extras', false], ['other', 'Other', false]];
+const NODE_ONLY = ['planner', 'leftovers_auto'];  // the node's own, planner.plan doesn't take them
+const PERCENT = ['overlap'];
+
+const $ = id => document.getElementById(id);
+const svg = $('map');
+const NS = 'http://www.w3.org/2000/svg';
+let settings = {}, turned = {}, pending = {}, mapData = null, areaId = null, plan = null, view = null, asked = 0;
+// 'all': the settings for all areas (pending), 'area': the chosen area's own (pendingArea); an obstacle picked
+let scope = 'all', pendingArea = {}, obstacleId = null;
+const AREA_SKIP = ['angle_increment_every', 'planner', 'leftovers_auto'];  // only for all areas
+
+async function rpc(method, params) {
+  const r = await fetch('rpc', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({method, params: params || {}})});
+  if (!r.ok) throw new Error(r.status + ' ' + await r.text());
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message);
+  return j.result;
+}
+
+function status(text, error) {
+  $('status').textContent = text;
+  $('status').classList.toggle('error', !!error);
+}
+
+// values as shown: cm for m, degrees for rad, % for shares
+function shown(e, name) {
+  if (e.unit === 'rad') return [180 / Math.PI, '°', 1];
+  if (e.unit === 'm') return [100, 'cm', 0.1];
+  if (PERCENT.includes(name)) return [100, '%', 1];
+  return [1, '', e.type === 'integer' ? 1 : 0.01];
+}
+
+function round(v) { return Math.round(v * 1000) / 1000; }
+
+function globalValue(name) {  // for all areas, the changes not saved yet too
+  const e = settings[name];
+  if (!(name in pending)) return e.value;
+  return pending[name] === null ? e.default : pending[name];
+}
+
+// the chosen area's own settings, as the planner reads them from the map (mapfile.area_settings): OpenMower's
+// properties, MowBite's angle range and its planner object
+function areaOwn() {
+  const a = areas().find(x => x.id === areaId);
+  const p = (a && a.properties) || {}, o = {};
+  const num = v => typeof v === 'number' && isFinite(v);
+  if (num(p.angle)) o.angle = p.angle;
+  if (num(p.outline_count) && p.outline_count >= 0) o.perimeter_passes = Math.trunc(p.outline_count);
+  if (num(p.outline_overlap_count) && p.outline_overlap_count >= 0) {
+    o.lane_overlap_passes = Math.trunc(p.outline_overlap_count);
+  }
+  if (num(p.outline_offset)) o.perimeter_offset = p.outline_offset;
+  if (num(p.angle_min) && num(p.angle_max)) { o.angle_min = p.angle_min; o.angle_max = p.angle_max; }
+  const own = p.planner && typeof p.planner === 'object' ? p.planner : {};
+  Object.assign(o, own);
+  if ('angle_strategy' in own && !('angle' in own)) o.angle = null;
+  return o;
+}
+
+function savedValue(name) {  // as saved, for the scope shown
+  const own = scope === 'area' ? areaOwn() : {};
+  return name in own ? own[name] : settings[name].value;
+}
+
+function valueOf(name) {
+  if (scope !== 'area') return globalValue(name);
+  if (name in pendingArea) return pendingArea[name] === null ? globalValue(name) : pendingArea[name];
+  const own = areaOwn();
+  return name in own ? own[name] : globalValue(name);
+}
+
+function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+
+function changes() { return scope === 'area' ? pendingArea : pending; }
+
+function changed(name) {
+  return scope === 'area' ? name in pendingArea : name in pending && !same(valueOf(name), settings[name].value);
+}
+
+function input(name, e) {
+  const v = valueOf(name);
+  if (e.type === 'boolean') {
+    const el = document.createElement('input');
+    el.type = 'checkbox'; el.checked = !!v;
+    el.onchange = () => set(name, el.checked);
+    return el;
+  }
+  if (e.choices && e.type === 'string') {
+    const el = document.createElement('select');
+    for (const c of e.choices) el.add(new Option(c, c, false, c === v));
+    el.onchange = () => set(name, el.value);
+    return el;
+  }
+  if (e.type === 'list') {
+    const el = document.createElement('input');
+    el.type = 'text'; el.value = (v || []).join(', ');
+    el.onchange = () => set(name, el.value.split(',').map(s => s.trim()).filter(Boolean));
+    return el;
+  }
+  if (e.type === 'points') {
+    const el = document.createElement('textarea');
+    el.value = v ? JSON.stringify(v) : '';
+    el.placeholder = 'none: the rectangle';
+    el.onchange = () => {
+      const t = el.value.trim();
+      if (!t) return set(name, null);
+      try { set(name, JSON.parse(t)); } catch (err) { mark(name, 'not JSON: [[x, y], ...]'); }
+    };
+    return el;
+  }
+  const [k, , step] = shown(e, name);
+  const el = document.createElement('input');
+  el.type = 'number'; el.step = step;
+  if (e.min !== undefined) el.min = round(e.min * k);
+  if (e.max !== undefined) el.max = round(e.max * k);
+  el.value = v === null || v === undefined ? '' : round(v * k);
+  if (e.nullable) el.placeholder = name.startsWith('robot_') ? 'not set' : 'auto';
+  el.onchange = () => {
+    if (el.value.trim() === '') return set(name, e.nullable ? null : e.default);
+    const n = Number(el.value) / k;
+    set(name, e.type === 'integer' ? Math.round(n) : round(n * 1e6) / 1e6);
+  };
+  return el;
+}
+
+function text(v, e, name) {
+  if (v === null || v === undefined) return name.startsWith('robot_') ? 'not set' : e.nullable ? 'auto' : 'none';
+  if (typeof v === 'boolean') return v ? 'on' : 'off';
+  if (Array.isArray(v)) return e.type === 'points' ? v.length + ' points' : v.join(', ');
+  if (typeof v === 'number') {
+    const [k, unit] = shown(e, name);
+    return round(v * k) + (unit ? ' ' + unit : '');
+  }
+  return String(v);
+}
+
+function row(name) {
+  const e = settings[name];
+  const [, label, help] = INFO[name] || ['other', name, ''];
+  const div = document.createElement('div');
+  div.className = 'row' + (changed(name) ? ' changed' : '');
+  div.id = 'row-' + name;
+  const top = document.createElement('div');
+  top.className = 'top';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  lab.title = name;
+  top.append(lab);
+  const el = input(name, e);
+  el.id = 'set-' + name;
+  lab.htmlFor = el.id;
+  if (e.type === 'points' || e.type === 'list') {
+    div.append(top);
+  } else {
+    top.append(el);
+    const unit = document.createElement('span');
+    unit.className = 'unit';
+    unit.textContent = shown(e, name)[1];
+    top.append(unit);
+  }
+  const reset = document.createElement('button');
+  reset.className = 'reset'; reset.textContent = '↺';
+  reset.title = scope === 'area' ? 'Back to all areas\' setting' : 'Back to the default';
+  reset.onclick = () => set(name, null);
+  top.append(reset);
+  if (div.firstChild !== top) div.append(top);
+  if (e.type === 'points' || e.type === 'list') div.append(el);
+  if (help) {
+    const h = document.createElement('div');
+    h.className = 'help'; h.textContent = help;
+    div.append(h);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  let m = 'default ' + text(e.default, e, name);
+  if (e.auto_value !== undefined) m += ', ' + e.auto_value + ': automatic';
+  if (e.from && !changed(name)) m += ' · now from OpenMower (' + e.from.split('/').pop() + ')';
+  if (e.stored) m += ' · saved';
+  if (scope === 'area') {
+    const own = name in areaOwn(), back = pendingArea[name] === null;
+    m = (own && !back ? 'this area only' : back ? 'back to all areas\'' : 'as all areas') + ' · all areas: ' +
+        text(globalValue(name), e, name);
+    if (own && !back) div.classList.add('own');
+  }
+  meta.textContent = m;
+  div.append(meta);
+  if (scope === 'all' && name === 'angle_increment' && (turned.angle_steps || valueOf(name))) {
+    const t = document.createElement('div');
+    t.className = 'meta';
+    t.textContent = 'turned so far ' + round(turned.angle_turned * 180 / Math.PI) + '° (' + turned.angle_steps +
+                    (turned.angle_steps === 1 ? ' step), ' : ' steps), ') + turned.angle_mows +
+                    ' mows towards the next ';
+    const again = document.createElement('button');
+    again.textContent = 'start again';
+    again.disabled = !turned.angle_steps && !turned.angle_mows;
+    again.onclick = async () => {
+      try { took(await rpc('planner.angle.reset')); status('the stripes start again at 0°'); preview(); }
+      catch (err) { status('not reset: ' + err.message, true); }
+    };
+    t.append(again);
+    div.append(t);
+  }
+  return div;
+}
+
+function took(got) {  // planner.settings' answer
+  settings = got.settings;
+  turned = {angle_steps: got.angle_steps, angle_mows: got.angle_mows, angle_turned: got.angle_turned};
+  render();
+}
+
+function render() {
+  const box = $('settings');
+  const open = {};
+  box.querySelectorAll('details').forEach(d => { open[d.dataset.group] = d.open; });
+  box.querySelectorAll('details').forEach(d => d.remove());
+  const names = Object.keys(settings).filter(n => settings[n].settable &&
+                                                 !(scope === 'area' && (AREA_SKIP.includes(n) ||
+                                                                        (INFO[n] || [])[0] === 'mower')));
+  const a = areas().find(x => x.id === areaId);
+  const name = a ? (a.properties || {}).name || 'this area' : 'this area';
+  $('scopeArea').textContent = name;
+  $('scopeArea').disabled = !a;
+  $('scopeAll').classList.toggle('on', scope === 'all');
+  $('scopeArea').classList.toggle('on', scope === 'area');
+  $('intro').textContent = scope === 'area'
+    ? 'Settings only for ' + name + ', on top of all areas\' (● its own). Saved into OpenMower\'s map: don\'t ' +
+      'save here while the map is being edited in an app.'
+    : 'Changes show up on the map with Preview. Save keeps them, the next mow uses them. Lengths in cm, measured ' +
+      'from the middle between the drive wheels.';
+  const ordered = Object.keys(INFO).filter(n => names.includes(n)).concat(names.filter(n => !(n in INFO)));
+  for (const [group, title, first] of GROUPS) {
+    const mine = ordered.filter(n => (INFO[n] ? INFO[n][0] : 'other') === group);
+    if (!mine.length) continue;
+    const d = document.createElement('details');
+    d.dataset.group = group;
+    d.open = group in open ? open[group] : first;
+    const s = document.createElement('summary');
+    s.textContent = title;
+    if (group === 'mower' && !['robot_width', 'robot_front', 'robot_rear'].every(n => valueOf(n) !== null) &&
+        !valueOf('robot_outline')) {
+      const note = document.createElement('span');
+      note.className = 'note'; note.textContent = ' · not set yet: no body check';
+      s.append(note);
+    }
+    d.append(s);
+    for (const n of mine) d.append(row(n));
+    box.append(d);
+  }
+  const n = Object.keys(changes()).filter(changed).length;
+  $('count').textContent = n ? n + (n === 1 ? ' change' : ' changes') + ' not saved' : 'no changes';
+  $('save').disabled = $('discard').disabled = !Object.keys(changes()).length;
+}
+
+function set(name, value) {
+  if (scope === 'area') {
+    pendingArea[name] = value;
+    if (value === null ? !(name in areaOwn()) : same(value, savedValue(name))) delete pendingArea[name];
+  } else {
+    pending[name] = value;
+    if (same(valueOf(name), settings[name].value) && !(value === null && settings[name].stored)) delete pending[name];
+  }
+  render();
+}
+
+function mark(name, message) {
+  const r = $('row-' + name);
+  if (!r) return;
+  let el = r.querySelector('.error');
+  if (!el) { el = document.createElement('div'); el.className = 'error'; r.append(el); }
+  el.textContent = message;
+}
+
+function tried() {  // the changes for planner.plan (they beat the area's own): back to a default as its value
+  const out = {}, own = areaOwn();
+  for (const [n, v] of Object.entries(pending)) {
+    if (NODE_ONLY.includes(n) || n in own) continue;
+    out[n] = v === null ? settings[n].default : v;
+  }
+  for (const [n, v] of Object.entries(pendingArea)) out[n] = v === null ? globalValue(n) : v;
+  return out;
+}
+
+// the map ----------------------------------------------------------------------------------------------------------
+
+function pts(outline) {
+  return (outline || []).map(p => Array.isArray(p) ? p : [p.x, p.y]);
+}
+
+function areas() { return (mapData && mapData.areas) || []; }
+
+function lawns() { return areas().filter(a => (a.properties || {}).type === 'mow'); }
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.append(e);
+  return e;
+}
+
+function pathD(points, close) {
+  if (!points.length) return '';
+  return 'M' + points.map(([x, y]) => x.toFixed(3) + ' ' + (-y).toFixed(3)).join('L') + (close ? 'Z' : '');
+}
+
+const LINE = 'vector-effect: non-scaling-stroke';
+
+function draw() {
+  svg.textContent = '';
+  const world = el('g', {}, svg);
+  const kinds = {mow: 'var(--lawn)', obstacle: 'var(--obstacle)', nav: 'var(--nav)'};
+  const order = {nav: 0, mow: 1, obstacle: 2};
+  const sorted = areas().slice().sort((a, b) => (order[(a.properties || {}).type] ?? 1) -
+                                                (order[(b.properties || {}).type] ?? 1));
+  for (const a of sorted) {
+    const p = a.properties || {};
+    const sel = a.id === areaId || a.id === obstacleId;
+    const path = el('path', {d: pathD(pts(a.outline), true), fill: kinds[p.type] || 'var(--lawn)',
+                             'fill-opacity': p.active === false ? 0.35 : 0.8,
+                             stroke: sel ? 'var(--selected)' : p.type === 'mow' ? 'var(--lawn-line)' : 'none',
+                             'stroke-width': sel ? 2.5 : 1, style: LINE}, world);
+    path.append(title((p.name || p.type || '') + (typeof p.margin === 'number' ? ', gap ' +
+                                                    round(p.margin * 100) + ' cm' : '')));
+    if (p.type === 'mow' || p.type === 'obstacle') {
+      path.style.cursor = 'pointer';
+      path.addEventListener('click', () => {
+        if (moved) return;
+        if (p.type === 'mow') choose(a.id); else obstacle(a.id);
+      });
+    }
+  }
+  if (plan && $('showPlan').checked) drawPlan(world);
+  for (const d of (mapData && mapData.docking_stations) || []) {
+    const q = d.position || {}, h = d.heading || 0;
+    const r = 0.25, x = q.x || 0, y = q.y || 0;
+    const tri = [[x + r * Math.cos(h), y + r * Math.sin(h)], [x + r * Math.cos(h + 2.4), y + r * Math.sin(h + 2.4)],
+                 [x + r * Math.cos(h - 2.4), y + r * Math.sin(h - 2.4)]];
+    el('path', {d: pathD(tri, true), fill: 'var(--text)'}, world).append(title('docking station'));
+  }
+  setView();
+}
+
+function title(t) { const e = document.createElementNS(NS, 'title'); e.textContent = t; return e; }
+
+const COLORS = {perimeter: 'var(--loop)', lane: 'var(--lane)', turn: 'var(--turn)', transit: 'var(--transit)'};
+
+function drawPlan(world) {
+  const space = plan.body_space;
+  if (space) {
+    for (const ring of [...space.outlines, ...space.holes]) {
+      el('path', {d: pathD(ring, true), fill: 'none', stroke: 'var(--edge)', 'stroke-width': 1,
+                  'stroke-dasharray': '4 3', 'stroke-opacity': 0.7, style: LINE}, world);
+    }
+  }
+  const rep = plan.report || {};
+  for (const piece of rep.left || []) {
+    el('path', {d: pathD(piece.outline, true), fill: 'var(--left)', 'fill-opacity': 0.7, stroke: 'var(--left)',
+                'stroke-width': 1, style: LINE}, world).append(title(piece.m2 + ' m² left'));
+  }
+  for (const p of plan.paths || []) {
+    for (const s of p.segments || []) {
+      const way = piece(p, s.start, s.end);
+      if (way.length < 2) continue;
+      const attrs = {d: pathD(way, false), fill: 'none', stroke: COLORS[s.type] || 'var(--text)',
+                     'stroke-width': s.type === 'lane' ? 1.2 : 1.6, 'stroke-linejoin': 'round', style: LINE};
+      if (s.type === 'transit') attrs['stroke-dasharray'] = '5 3';
+      el('path', attrs, world);
+    }
+  }
+  for (const o of rep.body_out || []) {
+    el('circle', {cx: o.x, cy: -o.y, r: 0.08, fill: 'var(--body)'}, world).append(title('body sticks out (' + o.kind +
+                                                                                       ')'));
+  }
+}
+
+// the points of a path from pose start to pose end: its points are only some of the poses (pose_index), the poses
+// between two of them on the straight line from one to the other, 0.1 m apart
+function piece(p, start, end) {
+  const idx = p.pose_index, points = p.points;
+  const at = i => {
+    let k = 0;
+    while (k + 1 < idx.length && idx[k + 1] <= i) k++;
+    if (k + 1 >= idx.length || idx[k] === i) return points[k];
+    const t = (i - idx[k]) / (idx[k + 1] - idx[k]), a = points[k], b = points[k + 1];
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  };
+  const out = [at(start)];
+  for (let k = 0; k < idx.length; k++) if (idx[k] > start && idx[k] < end) out.push(points[k]);
+  out.push(at(end));
+  return out;
+}
+
+// what's shown: [x, y, w, h] of the viewBox (y down, the map's y up)
+function fit() {
+  const a = areas().find(x => x.id === areaId);
+  const rings = a ? [pts(a.outline)] : areas().map(x => pts(x.outline));
+  const all = rings.flat();
+  if (!all.length) { view = [-10, -10, 20, 20]; return setView(); }
+  const xs = all.map(p => p[0]), ys = all.map(p => -p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = Math.max(x1 - x0, y1 - y0) * 0.05 + 0.5;
+  view = [x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad];
+  setView();
+}
+
+function setView() { if (view) svg.setAttribute('viewBox', view.join(' ')); }
+
+function toView(cx, cy) {  // a point on the screen in viewBox units
+  const m = svg.getScreenCTM();
+  if (!m) return [0, 0];
+  const p = new DOMPoint(cx, cy).matrixTransform(m.inverse());
+  return [p.x, p.y];
+}
+
+function zoom(k, cx, cy) {
+  const [px, py] = toView(cx, cy);
+  view = [px - (px - view[0]) * k, py - (py - view[1]) * k, view[2] * k, view[3] * k];
+  setView();
+}
+
+const pointers = new Map();
+let moved = false, pinch = null;
+svg.addEventListener('pointerdown', e => {
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  moved = false;
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch = Math.hypot(a[0] - b[0], a[1] - b[1]);
+  }
+  svg.setPointerCapture(e.pointerId);
+});
+svg.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId) || !view) return;
+  const last = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 1) {
+    if (Math.abs(e.clientX - last[0]) + Math.abs(e.clientY - last[1]) > 0) {
+      const [ax, ay] = toView(last[0], last[1]), [bx, by] = toView(e.clientX, e.clientY);
+      if (moved || Math.hypot(e.clientX - last[0], e.clientY - last[1]) > 2) {
+        moved = true;
+        svg.classList.add('dragging');
+        view[0] -= bx - ax; view[1] -= by - ay;
+        setView();
+      }
+    }
+  } else if (pointers.size === 2 && pinch) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    moved = true;
+    zoom(pinch / d, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+    pinch = d;
+  }
+});
+function up(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  if (!pointers.size) svg.classList.remove('dragging');
+}
+svg.addEventListener('pointerup', up);
+svg.addEventListener('pointercancel', up);
+svg.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (view) zoom(Math.exp(e.deltaY * 0.0015), e.clientX, e.clientY);
+}, {passive: false});
+
+// the plan ---------------------------------------------------------------------------------------------------------
+
+function length(p) {
+  let m = 0;
+  for (const path of p.paths || []) {
+    for (let i = 1; i < path.points.length; i++) {
+      const [a, b] = [path.points[i - 1], path.points[i]];
+      m += Math.hypot(b[0] - a[0], b[1] - a[1]);
+    }
+  }
+  return m;
+}
+
+function facts() {
+  const box = $('numbers'), warn = $('warnings');
+  warn.textContent = '';
+  if (!plan) return;
+  const rep = plan.report || {};
+  const items = [['path', Math.round(length(plan)) + ' m']];
+  if (plan.duration && plan.duration.min) items.push(['about', Math.round(plan.duration.min) + ' min']);
+  if (rep.mowed_m2 !== undefined) items.push(['mowed', rep.mowed_m2.toFixed(1) + ' m²']);
+  if (rep.left_m2 !== undefined) items.push(['left', rep.left_m2.toFixed(2) + ' m²']);
+  items.push(['lanes at', Math.round(plan.angle * 180 / Math.PI) + '°']);
+  if (plan.lane_spacing) items.push(['spacing', Math.round(plan.lane_spacing * 1000) / 10 + ' cm']);
+  if ((rep.body_out || []).length) items.push(['body sticks out', rep.body_out.length + '×']);
+  box.textContent = '';
+  for (const [k, v] of items) {
+    const s = document.createElement('span');
+    s.append(k + ' ');
+    const b = document.createElement('b');
+    b.textContent = v;
+    s.append(b);
+    box.append(s);
+  }
+  const notes = (plan.warnings || []).slice();
+  if (Object.keys(pending).length) notes.unshift('Preview with your changes, not saved yet.');
+  warn.textContent = notes.join(' · ');
+}
+
+async function preview() {
+  if (!areaId) return;
+  const mine = ++asked;
+  $('busy').classList.add('on');
+  $('preview').disabled = true;
+  try {
+    const got = await rpc('planner.plan', {area_id: areaId, report: true, settings: tried()});
+    if (mine !== asked) return;
+    plan = got;
+    status('');
+  } catch (err) {
+    if (mine !== asked) return;
+    plan = null;
+    $('numbers').textContent = 'No plan: ' + err.message;
+    status('', false);
+  } finally {
+    if (mine === asked) {
+      $('busy').classList.remove('on');
+      $('preview').disabled = false;
+    }
+  }
+  draw();
+  facts();
+}
+
+function choose(id) {
+  if (id !== areaId) pendingArea = {};  // (another area's changes not saved: gone)
+  areaId = id;
+  $('area').value = id;
+  plan = null;
+  render();
+  fit();
+  draw();
+  preview();
+}
+
+// an obstacle's own gap (its margin), instead of the gap to obstacles of all
+function obstacle(id) {
+  obstacleId = id;
+  const box = $('obstacle');
+  const a = areas().find(x => x.id === id);
+  box.hidden = !a;
+  box.textContent = '';
+  draw();
+  if (!a) return;
+  const p = a.properties || {};
+  const top = document.createElement('div');
+  top.className = 'top';
+  const name = document.createElement('b');
+  name.textContent = 'Obstacle ' + (p.name || '');
+  const gap = document.createElement('input');
+  gap.type = 'number'; gap.min = 0; gap.max = 100; gap.step = 1;
+  gap.value = typeof p.margin === 'number' ? round(p.margin * 100) : '';
+  gap.placeholder = text(globalValue('obstacle_margin'), settings.obstacle_margin, 'obstacle_margin');
+  const save = document.createElement('button');
+  save.className = 'primary'; save.textContent = 'Save';
+  save.onclick = async () => {
+    save.disabled = true;
+    const v = gap.value.trim();
+    try {
+      await rpc('planner.area.set', {area_id: id, margin: v === '' ? null : Number(v) / 100});
+      await reloadMap();
+      status('saved into the map');
+      obstacle(id);
+      preview();
+    } catch (err) {
+      status('not saved: ' + err.message, true);
+      save.disabled = false;
+    }
+  };
+  const close = document.createElement('button');
+  close.textContent = '✕'; close.title = 'Close';
+  close.onclick = () => { obstacleId = null; box.hidden = true; draw(); };
+  const cm = document.createElement('span');
+  cm.className = 'unit'; cm.textContent = 'cm';
+  top.append(name, gap, cm, save, close);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = 'Gap between the mower and this obstacle. Empty: as all obstacles (' + gap.placeholder + ').';
+  box.append(top, meta);
+}
+
+async function reloadMap() {
+  mapData = await fetch('map').then(r => r.json());
+  areaList();
+  if (areaId) $('area').value = areaId;
+  render();
+  draw();
+}
+
+function areaList() {
+  const sel = $('area');
+  sel.textContent = '';
+  for (const a of lawns()) {
+    const p = a.properties || {};
+    sel.add(new Option((p.name || a.id) + (p.active === false ? ' (not active)' : ''), a.id));
+  }
+  if (!lawns().length) sel.add(new Option('no mowing areas in the map', ''));
+}
+
+$('area').onchange = () => choose($('area').value);
+$('preview').onclick = preview;
+$('fit').onclick = fit;
+$('showPlan').onchange = draw;
+$('scopeAll').onclick = () => { scope = 'all'; render(); };
+$('scopeArea').onclick = () => { scope = 'area'; render(); };
+$('discard').onclick = () => {
+  if (scope === 'area') pendingArea = {}; else pending = {};
+  render();
+  preview();
+};
+$('save').onclick = async () => {
+  $('save').disabled = true;
+  try {
+    if (scope === 'area') {
+      await rpc('planner.area.set', {area_id: areaId, settings: pendingArea});
+      pendingArea = {};
+      await reloadMap();
+      status('saved into the map for this area');
+    } else {
+      const got = await rpc('planner.settings.set', pending);
+      pending = {};
+      took(got);
+      status('saved, the next mow uses them');
+    }
+    preview();
+  } catch (err) {
+    status('not saved: ' + err.message, true);
+    $('save').disabled = false;
+  }
+};
+
+async function load() {
+  try {
+    const [got, data] = await Promise.all([rpc('planner.settings'), fetch('map').then(r => r.json())]);
+    mapData = data;
+    took(got);
+    areaList();
+    const first = lawns().find(a => (a.properties || {}).active !== false) || lawns()[0];
+    status(mapData ? '' : 'no map from OpenMower yet');
+    if (first) choose(first.id); else { fit(); draw(); }
+  } catch (err) {
+    status('the planner doesn\'t answer: ' + err.message, true);
+  }
+}
+
+load();
+</script>
+</body>
+</html>

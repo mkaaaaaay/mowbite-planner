@@ -17,6 +17,8 @@ import tempfile
 import time
 import threading
 import types
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -219,6 +221,7 @@ def planner():
     # no plans kept from other tests, none planned ahead in the background (test_plan_ahead does that itself)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
+    shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups'), ignore_errors=True)
     node_module.PLAN_AHEAD_DELAY = 1e6
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
     node_module.TRACK_WAIT = 0.0
@@ -625,13 +628,119 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
-               'planner.settings', 'planner.settings.set', 'planner.simulate', 'planner.simulate.cancel',
-               'planner.simulate.status']
+    methods = ['planner.angle.reset', 'planner.area.set', 'planner.drive', 'planner.leftovers', 'planner.log',
+               'planner.plan', 'planner.settings', 'planner.settings.set', 'planner.simulate',
+               'planner.simulate.cancel', 'planner.simulate.status']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
     assert rospy.registered == [('mowbite_planner', methods)]
+
+
+def test_web_page(planner):
+    """The settings page: the page itself, the node's map, its RPC methods like over MQTT (the errors too), only
+    JSON taken. A port taken: the node plans all the same, the log says so."""
+    send_map(the_map())
+    page = node_module.WebPage(0, planner.methods, planner.current_map)
+    port = page.server.server_address[1]
+    base = 'http://127.0.0.1:%d' % port
+
+    def post(body, kind='application/json'):
+        req = urllib.request.Request(base + '/rpc', json.dumps(body).encode(), {'Content-Type': kind})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+
+    try:
+        with urllib.request.urlopen(base + '/', timeout=10) as r:
+            assert r.status == 200 and b'<title>MowBite Planner</title>' in r.read()
+        with urllib.request.urlopen(base + '/map', timeout=10) as r:
+            assert [a['id'] for a in json.load(r)['areas']] == ['a', 'bed', 'nav']
+        assert post({'method': 'planner.settings'})['result']['settings']['lane_order']['value'] == 'skip'
+        got = post({'method': 'planner.settings.set', 'params': {'turn_radius': 0.3}})['result']['settings']
+        assert got['turn_radius']['value'] == 0.3 and got['turn_radius']['stored']
+        plan = post({'method': 'planner.plan', 'params': {'area_id': 'a', 'report': True}})['result']
+        assert plan['area_id'] == 'a' and plan['paths'] and 'left_m2' in plan['report']
+        assert post({'method': 'planner.nothing'})['error']['code'] == node_module.METHOD_NOT_FOUND
+        bad = post({'method': 'planner.settings.set', 'params': {'turn_radius': -1}})['error']
+        assert bad['code'] == node_module.RpcError.ERROR_INVALID_PARAMS and 'turn_radius' in bad['message']
+        assert post({'method': 'planner.settings', 'params': [1]})['error']['message'] == \
+            'params must be an object (by name)'
+        for url, body, code in ((base + '/rpc', b'{"method": "planner.settings"}', 415), (base + '/nothing', None,
+                                                                                          404)):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(urllib.request.Request(url, body, {'Content-Type': 'text/plain'}), timeout=10)
+            assert e.value.code == code
+        rospy.params['~web_port'] = port
+        taken = node_module.MowbitePlannerRos1()
+        assert taken.web is None and any('no settings page on port %d' % port in line for _, line in rospy.log)
+    finally:
+        page.server.shutdown()
+        page.server.server_close()
+
+
+def test_area_set(planner, monkeypatch):
+    """planner.area.set: an area's own settings and an obstacle's margin into the map with OpenMower's map.replace
+    (the whole map, only that area changed), the map before backed up. A setting back to all areas' takes OpenMower's
+    property for it along, the planner object goes when it's empty. Bad values and OpenMower's no change nothing."""
+    send_map(the_map(planner={'turn_radius': 0.3}, outline_count=4, angle=0.5))
+    answers = []
+
+    def openmower():  # mower_map: answers what it's asked (answers[0] an error, else the result)
+        for _ in range(200):
+            asked = [m for t, m in rospy.published if t == '/xbot/rpc/request']
+            if asked:
+                m = asked[-1]
+                if answers and answers[0]:
+                    rospy.subscribers['/xbot/rpc/error'](node_module.RpcError(code=-32602, message=answers[0],
+                                                                                id=m.id))
+                else:
+                    rospy.subscribers['/xbot/rpc/response'](node_module.RpcResponse(result='"stored"', id=m.id))
+                return m
+            time.sleep(0.01)
+
+    def area_set(params, error=None):
+        rospy.published.clear()
+        answers[:] = [error]
+        t = threading.Thread(target=openmower)
+        t.start()
+        try:
+            return planner.rpc_area_set(params)
+        finally:
+            t.join()
+
+    got = area_set({'area_id': 'a', 'settings': {'turn_radius': None, 'perimeter_passes': None,
+                                                 'fill_pattern': 'crosshatch'}})
+    sent = [m for t, m in rospy.published if t == '/xbot/rpc/request'][-1]
+    assert sent.method == 'map.replace'
+    written = json.loads(sent.params)[0]
+    assert got['properties'] == written['areas'][0]['properties']
+    assert written['areas'][0]['properties'] == {'name': 'Garden', 'type': 'mow', 'angle': 0.5,
+                                                 'planner': {'fill_pattern': 'crosshatch'}}
+    assert written['areas'][1:] == the_map()['areas'][1:] and planner.current_map() == written
+    backups = os.listdir(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups'))
+    assert len(backups) == 1
+    with open(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups', backups[0])) as f:
+        assert json.load(f)['areas'][0]['properties']['planner'] == {'turn_radius': 0.3}
+    monkeypatch.setattr(node_module, 'MAP_BACKUPS', 2)
+    got = area_set({'area_id': 'a', 'settings': {'fill_pattern': None, 'angle': None}})
+    assert got['properties'] == {'name': 'Garden', 'type': 'mow'}
+    got = area_set({'area_id': 'bed', 'margin': 0.2})
+    assert got['properties'] == {'type': 'obstacle', 'margin': 0.2}
+    backups = sorted(os.listdir(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups')))
+    assert len(backups) == 2 and backups[0].startswith('map_') and backups[0] != backups[1]
+    for params, message in (({'area_id': 'x', 'settings': {'turn_radius': 0.3}}, "no area 'x'"),
+                            ({'area_id': 'a', 'settings': {'turn_radius': -1}}, 'turn_radius'),
+                            ({'area_id': 'a', 'settings': {'planner': 'slic3r'}}, 'not settings an area can have'),
+                            ({'area_id': 'bed', 'settings': {'turn_radius': 0.3}}, 'only for mowing areas'),
+                            ({'area_id': 'a', 'margin': 0.2}, 'only for obstacles'),
+                            ({'area_id': 'bed', 'margin': 2}, 'margin must be 0 to')):
+        rospy.published.clear()
+        with pytest.raises(node_module.PlanningError, match=message):
+            planner.rpc_area_set(params)
+        assert not rospy.published
+    with pytest.raises(node_module.PlanningError, match='OpenMower: Invalid map'):
+        area_set({'area_id': 'bed', 'margin': None}, 'Invalid map')
+    assert planner.current_map()['areas'][1]['properties'] == {'type': 'obstacle', 'margin': 0.2}
 
 
 def test_rpc_settings(planner):

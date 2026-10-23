@@ -31,9 +31,10 @@ lane_order skip for OpenMower's forward only FTC controller), settings_file (whe
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
 until the next start only), plans_dir (where the plans are kept, the last DISK_PLANS of this planner code, default
 $ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
-map_topic, use_map, rpc. The request always gives the lane spacing (with mower_width the overlap), perimeter_offset,
-perimeter_passes, lane_overlap_passes, the skip flags and a concentric fill_pattern; settings beat the first four (an
-area's own outline_count, ... beat those), not the others (an area's planner property can). The angle too, unless
+map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none). The request always gives the lane
+spacing (with mower_width the overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a
+concentric fill_pattern; settings beat the first four (an area's own outline_count, ... beat those), not the others
+(an area's planner property can). The angle too, unless
 settings has angle or angle_strategy and the area has no angle of its own. Whether it has one comes from the saved
 map: a preview in the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just
 added or removed follows the saved area until the edit is saved.
@@ -91,6 +92,12 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         evaluating), fraction (0..1 of all of it), elapsed_s}; running false: the last one's
   planner.simulate.cancel  ends the one running ({cancelled: whether one was}), its planner.simulate answers with the
                         error "cancelled"
+  planner.area.set      an area's own settings or an obstacle's own margin, written into OpenMower's map (its
+                        map.replace, the map before kept in MAP_BACKUPS files next to settings_file): {area_id,
+                        settings: {name: value, null: the area's own gone (and OpenMower's property that stands for it,
+                        OPENMOWER_PROPS)}, margin: m (obstacles and areas to keep out of, null: gone)}, gives {area_id,
+                        properties}. The whole map goes back as the node got it last, only that area changed (whoever
+                        writes the map last wins: an app editing the map meanwhile puts its own back)
   planner.plan          like ext.mowbite_planner.plan of the MQTT service (area_id or outline, settings to try
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
@@ -121,8 +128,10 @@ has to be on (restart: unless-stopped, see compose.yaml).
 
 import collections
 import dataclasses
+import itertools
 import glob
 import hashlib
+import http.server
 import json
 import logging
 import math
@@ -151,7 +160,7 @@ from mowbite_planner.planner import plan_footprint
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
-from mowbite_planner.mapfile import _points, area_job, margins_for, match_area, openmower_settings
+from mowbite_planner.mapfile import _points, area_job, area_settings, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 from mowbite_planner.report import drive_time, track_mowed
 from mowbite_planner.simulate import MowerModel, evaluate, simulate
@@ -253,7 +262,19 @@ SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
               'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
               'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
 # RPC methods answered on a thread of their own (they take a while, the others go on meanwhile)
-BACKGROUND = ('planner.simulate',)
+BACKGROUND = ('planner.simulate', 'planner.area.set')
+# planner.area.set: OpenMower's area properties (and MowBite's) that stand for a planner setting (see area_settings),
+# gone with the area's own value of that setting; s OpenMower may take for map.replace (as the MowBite app gives it);
+# the maps before kept
+OPENMOWER_PROPS = {'angle': 'angle', 'perimeter_passes': 'outline_count',
+                   'lane_overlap_passes': 'outline_overlap_count', 'perimeter_offset': 'outline_offset',
+                   'angle_min': 'angle_min', 'angle_max': 'angle_max'}
+MAP_WAIT = 60.0
+MAP_BACKUPS = 10
+# the settings page (WebPage): its folder, the most a request may send (bytes), JSON-RPC's code for an unknown method
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'web')
+WEB_MAX_REQUEST = 10 * 1024 * 1024
+METHOD_NOT_FOUND = -32601
 # planner.log: the node's last log lines kept in memory
 LOG_LINES = 2000
 
@@ -320,27 +341,105 @@ class XbotRpc:
 
     def answer(self, req):
         try:
-            try:
-                params = json.loads(req.params) if req.params else None
-            except ValueError:
-                params = []
-            if params is None:  # none given, or null
-                params = {}
-            if not isinstance(params, dict):
-                raise PlanningError('params must be an object (by name)')
-            result = json.dumps(self.methods[req.method](params), allow_nan=False)
-        except PlanningError as e:
-            rospy.loginfo('MowBite Planner: %s: %s', req.method, e)
-            return self.fail(req, RpcError.ERROR_INVALID_PARAMS, str(e))
-        except Exception as e:  # noqa: BLE001 - an RPC must not take the planner down
-            rospy.logerr('MowBite Planner: %s failed: %s: %s', req.method, type(e).__name__, e, exc_info=True)
-            return self.fail(req, RpcError.ERROR_INTERNAL, 'internal error: %s' % e)
+            params = json.loads(req.params) if req.params else None
+        except ValueError:
+            params = []
+        result, error = call(self.methods, req.method, params)
+        if error is not None:
+            return self.fail(req, *error)
         if req.id:
             self.response.publish(RpcResponse(result=result, id=req.id))
 
     def fail(self, req, code, message):
         if req.id:
             self.error.publish(RpcError(code=code, message=message, id=req.id))
+
+
+def call(methods, method, params):
+    """An RPC method of methods with params (None: none): (its result as JSON, None) or (None, (code, message)), a
+    PlanningError the caller's mistake."""
+    try:
+        if params is None:  # none given, or null
+            params = {}
+        if not isinstance(params, dict):
+            raise PlanningError('params must be an object (by name)')
+        return json.dumps(methods[method](params), allow_nan=False), None
+    except PlanningError as e:
+        rospy.loginfo('MowBite Planner: %s: %s', method, e)
+        return None, (RpcError.ERROR_INVALID_PARAMS, str(e))
+    except Exception as e:  # noqa: BLE001 - an RPC must not take the planner down
+        rospy.logerr('MowBite Planner: %s failed: %s: %s', method, type(e).__name__, e, exc_info=True)
+        return None, (RpcError.ERROR_INTERNAL, 'internal error: %s' % e)
+
+
+class WebPage:
+    """The settings page with a preview of the plans, http://<mower>:<port>/ without the MowBite app: GET / the page
+    (WEB_DIR's index.html), GET /map the node's map (null before there is one), POST /rpc {method, params} a method
+    of methods like over MQTT, answered {result} or {error: {code, message}}. Only JSON is taken (another web page
+    can't send it without asking first). No login: anyone on the network may change the settings, like over MQTT."""
+
+    def __init__(self, port, methods, the_map):
+        page = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                page.get(self)
+
+            def do_POST(self):
+                page.post(self)
+
+            def log_message(self, *args):
+                pass
+
+        self.methods, self.the_map = methods, the_map
+        self.server = http.server.ThreadingHTTPServer(('', port), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, name='web page', daemon=True).start()
+
+    @staticmethod
+    def send(req, code, body, kind):
+        req.send_response(code)
+        req.send_header('Content-Type', kind)
+        req.send_header('Content-Length', str(len(body)))
+        req.send_header('Cache-Control', 'no-store')
+        req.end_headers()
+        req.wfile.write(body)
+
+    def get(self, req):
+        path = req.path.split('?', 1)[0]
+        if path in ('/', '/index.html'):
+            try:
+                with open(os.path.join(WEB_DIR, 'index.html'), 'rb') as f:
+                    return self.send(req, 200, f.read(), 'text/html; charset=utf-8')
+            except OSError as e:
+                return self.send(req, 500, ('no page: %s' % e).encode(), 'text/plain; charset=utf-8')
+        if path == '/map':
+            return self.send(req, 200, json.dumps(self.the_map()).encode(), 'application/json')
+        self.send(req, 404, b'not found', 'text/plain')
+
+    def post(self, req):
+        if req.path.split('?', 1)[0] != '/rpc':
+            return self.send(req, 404, b'not found', 'text/plain')
+        if req.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
+            return self.send(req, 415, b'JSON only', 'text/plain')
+        try:
+            length = int(req.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= WEB_MAX_REQUEST:
+            return self.send(req, 413, b'too big', 'text/plain')
+        try:
+            body = json.loads(req.rfile.read(length) or b'null')
+        except ValueError:
+            body = None
+        method = body.get('method') if isinstance(body, dict) else None
+        if not isinstance(method, str) or method not in self.methods:
+            result, error = None, (METHOD_NOT_FOUND, 'Method "%s" not found' % method)
+        else:
+            result, error = call(self.methods, method, body.get('params'))
+        out = '{"result": %s}' % result if error is None else json.dumps({'error': {'code': error[0],
+                                                                                     'message': error[1]}})
+        self.send(req, 200, out.encode(), 'application/json')
 
 
 class MowbitePlannerRos1:
@@ -421,18 +520,143 @@ class MowbitePlannerRos1:
         self.sim_status = {'running': False}
         self.service = rospy.Service(rospy.get_param('~service', '/slic3r_coverage_planner/plan_path'), PlanPath,
                                      self.handle)
+        # planner.area.set: one change of the map at a time, the maps before next to settings_file, OpenMower's RPC
+        # methods asked straight over ROS (as xbot_monitoring hands them on) and their answers by id
+        self.map_lock = threading.Lock()
+        self.backups = os.path.join(os.path.dirname(self.file), 'mowbite_map_backups') if self.file else ''
+        self.asked = {}
+        self.ask_ids = itertools.count(1)
+        self.ask_request = rospy.Publisher('/xbot/rpc/request', RpcRequest, queue_size=10)
+        rospy.Subscriber('/xbot/rpc/response', RpcResponse, self.on_answer)
+        rospy.Subscriber('/xbot/rpc/error', RpcError, self.on_answer)
+        self.methods = {'planner.settings': self.rpc_settings, 'planner.settings.set': self.rpc_settings_set,
+                        'planner.area.set': self.rpc_area_set, 'planner.plan': self.rpc_plan,
+                        'planner.drive': self.rpc_drive,
+                        'planner.leftovers': self.rpc_leftovers, 'planner.simulate': self.rpc_simulate,
+                        'planner.simulate.status': self.rpc_simulate_status,
+                        'planner.simulate.cancel': self.rpc_simulate_cancel,
+                        'planner.angle.reset': self.rpc_angle_reset, 'planner.log': self.rpc_log}
         if rospy.get_param('~rpc', True):
-            self.rpc = XbotRpc('mowbite_planner', {'planner.settings': self.rpc_settings,
-                                                   'planner.settings.set': self.rpc_settings_set,
-                                                   'planner.plan': self.rpc_plan,
-                                                   'planner.drive': self.rpc_drive,
-                                                   'planner.leftovers': self.rpc_leftovers,
-                                                   'planner.simulate': self.rpc_simulate,
-                                                   'planner.simulate.status': self.rpc_simulate_status,
-                                                   'planner.simulate.cancel': self.rpc_simulate_cancel,
-                                                   'planner.angle.reset': self.rpc_angle_reset,
-                                                   'planner.log': self.rpc_log})
+            self.rpc = XbotRpc('mowbite_planner', self.methods)
+        self.web = None
+        port = int(rospy.get_param('~web_port', 0) or 0)
+        if port:
+            try:
+                self.web = WebPage(port, self.methods, self.current_map)
+                rospy.loginfo('MowBite Planner: settings page on port %d', port)
+            except OSError as e:  # (taken: the planner plans all the same)
+                rospy.logwarn('MowBite Planner: no settings page on port %d: %s', port, e)
         rospy.loginfo('MowBite Planner answers %s', self.service.resolved_name)
+
+    def current_map(self):
+        with self.lock:
+            return self.map
+
+    def ask(self, method, params, wait):
+        """Another node's RPC method (OpenMower's), its result. PlanningError where it says no or doesn't answer in
+        wait s."""
+        rid = 'mowbite_planner-%x-%d' % (int(time.time()), next(self.ask_ids))
+        waiting = self.asked[rid] = {'done': threading.Event()}
+        try:
+            self.ask_request.publish(RpcRequest(method=method, params=json.dumps(params), id=rid))
+            if not waiting['done'].wait(wait):
+                raise PlanningError('OpenMower didn\'t answer %s in %.0f s' % (method, wait))
+        finally:
+            self.asked.pop(rid, None)
+        if 'error' in waiting:
+            raise PlanningError('OpenMower: %s' % waiting['error'])
+        return waiting.get('result')
+
+    def on_answer(self, msg):
+        """An answer on /xbot/rpc/response or /xbot/rpc/error, one of ask()'s or another's."""
+        waiting = self.asked.get(msg.id)
+        if waiting is None:
+            return
+        if hasattr(msg, 'code'):
+            waiting['error'] = msg.message
+        else:
+            try:
+                waiting['result'] = json.loads(msg.result)
+            except ValueError:
+                waiting['result'] = msg.result
+        waiting['done'].set()
+
+    def rpc_area_set(self, params):
+        """planner.area.set, see the top."""
+        area_id, settings = params.get('area_id'), params.get('settings')
+        if settings is not None and not isinstance(settings, dict):
+            raise PlanningError('settings must be an object of planner settings')
+        settable = set(PlannerConfig.names()) - set(FIXED)
+        unknown = sorted(set(settings or {}) - settable)
+        if unknown:
+            raise PlanningError('not settings an area can have: %s' % ', '.join(unknown))
+        with self.map_lock:
+            with self.lock:
+                data = self.map
+            if data is None:
+                raise PlanningError('no map from OpenMower yet')
+            before, data = data, json.loads(json.dumps(data))
+            area = next((a for a in data.get('areas', []) if isinstance(a, dict) and a.get('id') == area_id), None)
+            if area is None:
+                raise PlanningError('no area %r in the map' % area_id)
+            props = area.get('properties')
+            if not isinstance(props, dict):
+                props = area['properties'] = {}
+            if settings:
+                if props.get('type') != 'mow':
+                    raise PlanningError('settings only for mowing areas')
+                own = dict(props.get('planner') or {})
+                for name, value in settings.items():
+                    if value is None:
+                        own.pop(name, None)
+                        if name in OPENMOWER_PROPS:
+                            props.pop(OPENMOWER_PROPS[name], None)
+                    else:
+                        own[name] = value
+                if own:
+                    props['planner'] = own
+                else:
+                    props.pop('planner', None)
+                # (as a plan of it takes them)
+                base = self.current.base.with_overrides({'mower_width': self.current.mower_width})
+                base.with_overrides(area_settings(area)).validate()
+            if 'margin' in params:
+                margin = params['margin']
+                if props.get('type') == 'mow':
+                    raise PlanningError('a margin only for obstacles and areas to keep out of')
+                if margin is None:
+                    props.pop('margin', None)
+                elif isinstance(margin, bool) or not isinstance(margin, (int, float)) or \
+                        not 0.0 <= margin <= limits.MAX_BLADE_OFFSET:
+                    raise PlanningError('margin must be 0 to %g m' % limits.MAX_BLADE_OFFSET)
+                else:
+                    props['margin'] = margin
+            self.backup_map(before)
+            self.ask('map.replace', [data], MAP_WAIT)
+            with self.lock:
+                self.map = data
+        rospy.loginfo('MowBite Planner: area %s now %s', area_id, json.dumps(
+            {k: v for k, v in props.items() if k in ('planner', 'margin') or k in OPENMOWER_PROPS.values()},
+            sort_keys=True))
+        self.plan_ahead_later()
+        return {'area_id': area_id, 'properties': props}
+
+    def backup_map(self, data):
+        """The map as it was, next to settings_file, the last MAP_BACKUPS kept."""
+        if not self.backups:
+            return
+        try:
+            os.makedirs(self.backups, exist_ok=True)
+            now = time.time()
+            name = os.path.join(self.backups, 'map_%s_%03d.json' % (time.strftime('%Y%m%d_%H%M%S', time.localtime(now)),
+                                                                   int(now * 1000) % 1000))
+            with open(name + '.tmp', 'w') as f:
+                json.dump(data, f)
+            os.replace(name + '.tmp', name)
+            for old in sorted(glob.glob(os.path.join(self.backups, 'map_*.json')))[:-MAP_BACKUPS]:
+                os.remove(old)
+        except OSError as e:  # (the change goes ahead all the same, like the app's without its container)
+            rospy.logwarn('MowBite Planner: map not backed up (%s): %s', self.backups, e)
 
     @property
     def base(self):
