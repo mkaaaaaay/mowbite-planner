@@ -43,6 +43,9 @@ OUT_ARC = 0.01
 OUT_NEAR = 0.15
 # fits_turn's answers kept (the same turn again, to the bit: the same answer), cleared at this many
 TURNS_KEPT = 100000
+# poses_fit and all_fit: every SCOUT-th pose (of those not turning on the spot) looked at first, one of them out and
+# the whole is: most ways that don't fit are found so with a part of the work, the answer the same
+SCOUT = 4
 # m, with shapely 1.7 squares of the map this big are looked up once whether all of them lies in a _Zone
 CELL = 0.1
 # m, with shapely 2 a _Zone knows of every square this big at once whether all of it lies in it
@@ -348,4 +351,15 @@ class Footprint:
 
     def poses_fit(self, poses: Sequence, on_turn: OnTurn = False) -> bool:
         # (the last ones first: a way or a turn that sticks out mostly does so further on)
-        return next(self._bad(poses, True, on_turn), None) is None
+        turn = self._on_turn(poses, on_turn)
+        if len(poses) > 2 * SCOUT:
+            some = [i for i in range(len(poses) - 1, -1, -SCOUT) if not self.spins(poses, i)]
+            if not all(self.fit([poses[i] for i in some], [turn[i] for i in some])):
+                return False
+        return next(self._bad(poses, True, turn), None) is None
+
+    def all_fit(self, poses: Sequence) -> bool:
+        """all(fit(poses)), every SCOUT-th looked at first."""
+        if len(poses) > 2 * SCOUT and not all(self.fit(poses[SCOUT // 2::SCOUT])):
+            return False
+        return all(self.fit(poses))

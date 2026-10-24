@@ -774,7 +774,7 @@ class _Route:
             # (step apart at most: on the outside of a bend they get further apart)
             new = join(*(sample_straight(x, y, u, v, math.atan2(v - y, u - x), self.step)[:-1]
                          for (_, x, y), (_, u, v) in zip(pts, pts[1:])), [poses[j1]])
-            if spins(poses[j0 - 1:j0] + new) > spins(poses[j0 - 1:j1 + 1]) or not all(fp.fit(new)) or \
+            if spins(poses[j0 - 1:j0] + new) > spins(poses[j0 - 1:j1 + 1]) or not fp.all_fit(new) or \
                     not self.area.is_free([(p.x, p.y) for p in new]):
                 return None
             return new
@@ -870,7 +870,7 @@ class _Route:
                     tries += 1
                     m = dubins(poses[j0], poses[j1], r, self.step, loops=False, turning=turn + 0.5 * math.pi)[:1]
                     way = join(*(piece.poses for piece in m[0].pieces)) if m else None
-                    if way and all(fp.fit(way)) and self.area.is_free([(p.x, p.y) for p in way]):
+                    if way and fp.all_fit(way) and self.area.is_free([(p.x, p.y) for p in way]):
                         got = j0, j1, way
                         break
                 if got is not None or tries >= LOOP_ROUND_TRIES:
