@@ -64,6 +64,8 @@ LEFT_TOTAL = 0.1
 MAX_BLADE_OFFSET = 1.0
 # m, the body reaches this far from base_link at most (a size in mm is caught, not checked on a grid of that size)
 MAX_BODY = 5.0
+# segments of a rounded corner of the body (robot_front_width, robot_rear_width): a quarter circle
+BODY_ROUND_SEGS = 6
 # m, where the only turn between two lanes is on the spot (or a drive), they end this much earlier at a time for a
 # rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow
 ROUND_STEP = 0.05
@@ -251,6 +253,10 @@ class PlannerConfig:
     robot_width: Optional[float] = None
     robot_front: Optional[float] = None
     robot_rear: Optional[float] = None
+    # m, the body's width right at its front and its back where it's rounded there: the rectangle's corners there a
+    # quarter circle each, of half what that is narrower than robot_width. None: square corners
+    robot_front_width: Optional[float] = None
+    robot_rear_width: Optional[float] = None
     robot_outline: Optional[Tuple[XY, ...]] = None
     # 'recorded': the outline, obstacles and areas to keep out of are where the centre drove, with the body checked the
     # body may be where it was while they were recorded (half its width each side, the front ahead and the rear
@@ -375,11 +381,10 @@ class PlannerConfig:
     @property
     def body_outline(self) -> Tuple[XY, ...]:
         """The body's corners counter-clockwise: robot_outline (a point given twice in a row once), or the rectangle
-        of robot_width, robot_front and robot_rear."""
+        of robot_width, robot_front and robot_rear (its corners rounded, robot_front_width, robot_rear_width)."""
         if self.robot_outline is None:
-            half = 0.5 * self.robot_width
-            return ((self.robot_front, half), (-self.robot_rear, half), (-self.robot_rear, -half),
-                    (self.robot_front, -half))
+            return _rounded_box(self.robot_width, self.robot_front, self.robot_rear, self.robot_front_width,
+                                self.robot_rear_width)
         pts = [(float(x), float(y)) for x, y in self.robot_outline]
         pts = [p for i, p in enumerate(pts) if p != pts[i - 1]]
         return tuple(pts if Polygon(pts).exterior.is_ccw else pts[::-1])
@@ -469,9 +474,14 @@ class PlannerConfig:
             raise PlanningError('angle_min and angle_max go together')
         if self.perimeter_offset is not None:
             finite('perimeter_offset')
-        for name in ('robot_width', 'robot_front', 'robot_rear'):
+        for name in ('robot_width', 'robot_front', 'robot_rear', 'robot_front_width', 'robot_rear_width'):
             if getattr(self, name) is not None:
-                finite(name, 0.0, 2.0 * MAX_BODY if name == 'robot_width' else MAX_BODY)
+                finite(name, 0.0, MAX_BODY if name in ('robot_front', 'robot_rear') else 2.0 * MAX_BODY)
+        for name in ('robot_front_width', 'robot_rear_width'):
+            if getattr(self, name) is not None and self.robot_width is not None and getattr(self, name) > \
+                    self.robot_width:
+                raise PlanningError(f'{name} ({getattr(self, name)} m) can\'t be more than robot_width '
+                                    f'({self.robot_width} m)')
         if self.robot_outline is not None:
             try:
                 pts = [(float(x), float(y)) for x, y in self.robot_outline
@@ -530,7 +540,7 @@ INTERNAL = ('waypoint_spacing', 'simplify_tolerance', 'min_lane_length', 'transi
 RETIRED = ('min_turn_radius', 'smooth_spins', 'allow_reverse', 'k_turn')
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
 _OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear',
-             'robot_outline', 'lane_spacing_min', 'lane_spacing_max')
+             'robot_front_width', 'robot_rear_width', 'robot_outline', 'lane_spacing_min', 'lane_spacing_max')
 _FLOATS = tuple(f.name for f in dataclasses.fields(PlannerConfig) if isinstance(f.default, float)) + _OPTIONAL
 
 
@@ -615,6 +625,34 @@ class CoveragePlan:
     narrow: object = None
     cells: List[Tuple[float, List[List['Lane']]]] = dataclasses.field(default_factory=list)
     origins: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
+
+
+def _rounded_box(width: float, front: float, rear: float, front_width: Optional[float],
+                 rear_width: Optional[float]) -> Tuple[XY, ...]:
+    """The rectangle width wide, front ahead of the centre and rear behind it, counter-clockwise, its front corners
+    a quarter circle of half what front_width is narrower than width, its back ones of rear_width's (None: square).
+    Each a polygon round the circle (BODY_ROUND_SEGS sides on it): the body no smaller than it says."""
+    half, length = 0.5 * width, front + rear
+
+    def radius(w: Optional[float], room: float) -> float:
+        return 0.0 if w is None else max(0.0, min(half - 0.5 * w, room))
+
+    rf = radius(front_width, length)
+    rr = radius(rear_width, length - rf)
+    step = 0.5 * math.pi / BODY_ROUND_SEGS
+    out: List[XY] = []
+    for cx, cy, r, a0 in ((front - rf, half - rf, rf, 0.0), (rr - rear, half - rr, rr, 0.5 * math.pi),
+                          (rr - rear, rr - half, rr, math.pi), (front - rf, rf - half, rf, 1.5 * math.pi)):
+        if r <= 0.0:
+            out.append((cx, cy))
+            continue
+        # where the sides touch the circle and, between, the corners of the sides round it
+        out.append((cx + r * math.cos(a0), cy + r * math.sin(a0)))
+        out += [(cx + r / math.cos(0.5 * step) * math.cos(a0 + (k + 0.5) * step),
+                 cy + r / math.cos(0.5 * step) * math.sin(a0 + (k + 0.5) * step)) for k in range(BODY_ROUND_SEGS)]
+        out.append((cx + r * math.cos(a0 + 0.5 * math.pi), cy + r * math.sin(a0 + 0.5 * math.pi)))
+    pts = [(round(x, 9), round(y, 9)) for x, y in out]
+    return tuple(p for i, p in enumerate(pts) if p != pts[i - 1])
 
 
 def _keep(kept: 'collections.OrderedDict', key: str, value: Any) -> None:

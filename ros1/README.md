@@ -61,8 +61,9 @@ planner container ends and comes back on its own (`restart: unless-stopped`).
 - [ ] `docker logs -f mowbite_planner 2>&1 | grep MowBite` says `MowBite Planner answers
   /slic3r_coverage_planner/plan_path`. If OpenMower's log still starts `slic3r_coverage_planner`,
   `OM_PLANNER=external` didn't arrive.
-- [ ] Your mower's size set (the app's planner menu, or `robot_width`, `robot_front`, `robot_rear`), the blade too
-  (`mower_width`, `blade_ahead`). Until then the log says `no body check` with every plan.
+- [ ] Your mower's size set (the app's planner menu, the settings page, or `robot_width`, `robot_front`, `robot_rear`,
+  for a rounded front or back `robot_front_width`, `robot_rear_width`), the blade too (`mower_width`,
+  `blade_ahead`). Until then the log says `no body check` with every plan.
 - [ ] Check the plan in the app (map, the area, "show mowing plan"): loops along the edge and around obstacles,
   then lanes. If the log says `MowBite Planner: <reason>` instead, the area isn't planned and the reason says why.
 - [ ] Mow it, emergency stop at hand. If the mower struggles in the turns, give the area a larger `turn_radius`.

@@ -1,5 +1,6 @@
 """The mower's body around the point its path is for (OpenMower's base_link, the middle between the drive
-wheels): its outline (robot_outline, or a rectangle robot_front ahead of it, robot_rear behind, robot_width wide).
+wheels): its outline (robot_outline, or a rectangle robot_front ahead of it, robot_rear behind, robot_width wide,
+its corners rounded by robot_front_width and robot_rear_width).
 Checks whether it stays in the space it may take at poses, turning on the spot where the heading jumps, spin_margin
 further in there and on the turns between lanes."""
 

@@ -44,7 +44,8 @@ yet. Everything is done in Dockge. More details: [`ros1/README.md`](ros1/README.
 3. **Switch OpenMower over.** Add `OM_PLANNER=external` to OpenMower's `.env` and restart OpenMower. Really in this
    order: otherwise OpenMower finds no planner and keeps restarting.
 4. **Tell it your mower's size.** Open `http://<mower>:8090`, under "Your mower": width, length to the front and to
-   the back (from the middle between the drive wheels), cutting width and where the blade sits.
+   the back (from the middle between the drive wheels), cutting width and where the blade sits. Is it rounded at the
+   front or back? Then also how wide it is right there: square corners would bump into everything on paper.
 5. **Look at the plan** on that page (or in the MowBite app) before the first mow, emergency stop at hand.
 
 **Updating:** open the planner's stack in Dockge and press **Update**. Do the same after an OpenMower update. Now and

@@ -1911,6 +1911,26 @@ def test_body_fit_drives_on(monkeypatch):
     assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
 
 
+def test_body_rounded_corners():
+    """robot_front_width and robot_rear_width round the rectangle's corners off (a quarter circle each, half what it's
+    narrower than robot_width): as long and wide as before, smaller, never inside the circles (the body no smaller
+    than it says). Without them the rectangle as it was; wider than the body: an error."""
+    square = PlannerConfig(**NX60I)
+    assert square.body_outline == ((0.43, 0.2), (-0.14, 0.2), (-0.14, -0.2), (0.43, -0.2))
+    for front, rear in ((0.10, None), (0.10, 0.12), (0.0, 0.40)):
+        cfg = PlannerConfig(**NX60I, robot_front_width=front, robot_rear_width=rear)
+        shape = Polygon(cfg.body_outline)
+        assert shape.is_valid and shape.exterior.is_ccw and shape.bounds == Polygon(square.body_outline).bounds
+        assert shape.area < Polygon(square.body_outline).area
+        r = 0.2 - 0.5 * front
+        arc = [(0.43 - r + r * math.cos(a), 0.2 - r + r * math.sin(a))
+               for a in (0.5 * math.pi * k / 49 for k in range(50))]
+        assert all(shape.buffer(1e-9).covers(Point(p)) for p in arc)
+        assert not shape.covers(Point(0.43 - 0.1 * r, 0.2 - 0.1 * r))  # (the square corner's gone)
+    with pytest.raises(PlanningError, match='robot_front_width'):
+        PlannerConfig(**NX60I, robot_front_width=0.5).validate()
+
+
 @pytest.mark.parametrize('off', [0.08, -0.08])
 def test_island_by_the_edge_blade_to_the_side(off):
     """More loops round the islands than along the outline (none here): an island 0.25 m from the edge gets its ring
