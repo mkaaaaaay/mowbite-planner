@@ -31,7 +31,9 @@ lane_order skip for OpenMower's forward only FTC controller), settings_file (whe
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
 until the next start only), plans_dir (where the plans are kept, the last DISK_PLANS of this planner code, default
 $ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
-map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none). The request always gives the lane
+map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none), workers (processes of their own that
+plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once too; 0: all in this one). The request
+always gives the lane
 spacing (with mower_width the overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a
 concentric fill_pattern; settings beat the first four (an area's own outline_count, ... beat those), not the others
 (an area's planner property can). The angle too, unless
@@ -135,6 +137,7 @@ import http.server
 import json
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 import os
 import pickle
 import threading
@@ -156,7 +159,7 @@ import mowbite_planner
 from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D, SegmentInfo, plan_coverage,
                              quaternion_to_yaw, yaw_to_quaternion)
 from mowbite_planner import config as limits
-from mowbite_planner.planner import plan_footprint
+from mowbite_planner.planner import plan_footprint, set_workers
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
@@ -529,6 +532,8 @@ class MowbitePlannerRos1:
         self.ask_request = rospy.Publisher('/xbot/rpc/request', RpcRequest, queue_size=10)
         rospy.Subscriber('/xbot/rpc/response', RpcResponse, self.on_answer)
         rospy.Subscriber('/xbot/rpc/error', RpcError, self.on_answer)
+        self.workers = max(0, int(rospy.get_param('~workers', 0) or 0))
+        set_workers(self.workers)
         self.methods = {'planner.settings': self.rpc_settings, 'planner.settings.set': self.rpc_settings_set,
                         'planner.area.set': self.rpc_area_set, 'planner.plan': self.rpc_plan,
                         'planner.drive': self.rpc_drive,
@@ -1396,8 +1401,9 @@ class MowbitePlannerRos1:
 
     def plan_ahead(self, count=None):
         """Every active mowing area of the map planned like planner.plan would (the app's preview), kept for it. Not
-        with planner slic3r (it plans at once, nothing kept). One at a time: after another change (count isn't the
-        latest any more) it ends with the area it's at, the next one plans them as they are then."""
+        with planner slic3r (it plans at once, nothing kept). One run at a time (with workers its areas at once): after
+        another change (count isn't the latest any more) it begins no more of them, the next one plans them as they are
+        then."""
         with self.ahead_run:
             if self.current.planner == 'slic3r':
                 return
@@ -1409,12 +1415,16 @@ class MowbitePlannerRos1:
                 if props.get('type') == 'mow' and props.get('active') is not False and \
                         props.get('mowable') is not False and area.get('id'):
                     areas.append(area)
-            t0, done = time.perf_counter(), 0
-            for area in areas:
-                if count is not None and count != self.ahead_count:
-                    return
-                if self.ahead_plan(area['id']):
-                    done += 1
+            t0 = time.perf_counter()
+
+            def ahead(area):
+                return (count is None or count == self.ahead_count) and self.ahead_plan(area['id'])
+
+            # (with processes of their own the areas at once, each its plans in them)
+            with ThreadPoolExecutor(max(1, self.workers)) as threads:
+                done = sum(threads.map(ahead, areas))
+            if count is not None and count != self.ahead_count:
+                return
             if areas:
                 rospy.loginfo('MowBite Planner: %d areas planned ahead in %.1f s', done, time.perf_counter() - t0)
 

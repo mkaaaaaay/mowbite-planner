@@ -1911,6 +1911,21 @@ def test_body_fit_drives_on(monkeypatch):
     assert fit['skipped_m'] < fitted['skipped_m'] and report['left_m2'] < checked['left_m2']
 
 
+def test_workers_plan_the_same():
+    """With processes of their own (set_workers) the same plan: a bed 0.1 m from the edge leaves a slot too narrow for
+    the body, the plans with it closed and open made at once."""
+    args = (rect(0, 0, 10, 8), [rect(0.1, 3, 1.3, 4)], PlannerConfig(**MOWER, **NX60I))
+    alone = plan_coverage(*args, start=(5, 1, 0.0))
+    try:
+        planner.set_workers(2)
+        together = plan_coverage(*args, start=(5, 1, 0.0))
+    finally:
+        planner.set_workers(0)
+    assert planner._edge_slot_count(args[0], args[1], args[2], (), (), (), ()) == 1
+    assert [(p.x, p.y, p.yaw) for p in together.poses] == [(p.x, p.y, p.yaw) for p in alone.poses]
+    assert together.stats['edge_slots'] == alone.stats['edge_slots']
+
+
 def test_body_rounded_corners():
     """robot_front_width and robot_rear_width round the rectangle's corners off (a quarter circle each, half what it's
     narrower than robot_width): as long and wide as before, smaller, never inside the circles (the body no smaller

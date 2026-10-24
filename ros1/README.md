@@ -52,7 +52,8 @@ docker builder prune -f`: the planner image is built on OpenMower's, the old one
 Going back, the other way round: `OM_PLANNER` out of OpenMower's `.env`, OpenMower restarted (`VERSION` as before if
 you like), then the planner stack stopped.
 
-Settings and plans live where OpenMower keeps its ROS data (`/home/openmower/ros`). When OpenMower restarts, the
+It plans in up to 3 processes of their own at once (`MOWBITE_WORKERS` in the stack's `.env`, `0`: in one), the
+CM4 has 4 cores. Settings and plans live where OpenMower keeps its ROS data (`/home/openmower/ros`). When OpenMower restarts, the
 planner container ends and comes back on its own (`restart: unless-stopped`).
 
 ## First run

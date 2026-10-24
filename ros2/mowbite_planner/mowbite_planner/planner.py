@@ -28,7 +28,11 @@ import bisect
 import dataclasses
 import hashlib
 import math
+import multiprocessing
+import threading
 import time
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely import wkb
@@ -80,6 +84,75 @@ def _check_coordinates(what: str, points: Sequence[Sequence[float]]) -> None:
                                 f'the map origin: {list(p[:2])}')
 
 
+# set_workers: processes of their own plan (an area's plans round its slots by the edge at once, the plans of callers on
+# threads of their own at once), the same plans as in this one. Started fresh (spawn), not forked from a process with
+# threads of its own
+_WORKERS = 0
+_POOL: Optional[ProcessPoolExecutor] = None
+_POOL_LOCK = threading.Lock()
+
+
+def set_workers(n: int) -> None:
+    """Plans in up to n processes of their own from now on, 0 (the default): all in this one."""
+    global _WORKERS, _POOL
+    with _POOL_LOCK:
+        if _POOL is not None and int(n) != _WORKERS:
+            _POOL.shutdown()  # (it ends what it's at: not waiting, Python 3.8 complains when the pipes close)
+            _POOL = None
+        _WORKERS = max(0, int(n))
+
+
+def _pool() -> Optional[ProcessPoolExecutor]:
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None and _WORKERS > 0:
+            _POOL = ProcessPoolExecutor(_WORKERS, mp_context=multiprocessing.get_context('spawn'))
+        return _POOL
+
+
+def _planned(args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
+    """_plan_coverage (in a process of the pool): the plan and its probe as _plan_coverage left it."""
+    return _plan_coverage(*args, **kw), kw.get('probe')
+
+
+def _later(args: tuple, kw: Dict[str, Any]) -> 'Future':
+    """_planned in a process of the pool where there's one (a future of it), else at once."""
+    pool = _pool()
+    if pool is not None:
+        try:
+            return pool.submit(_planned, args, kw)
+        except (BrokenProcessPool, RuntimeError):  # (one of them died, or it's shut down: in this one)
+            set_workers(_WORKERS)
+    done: Future = Future()
+    try:
+        done.set_result(_planned(args, kw))
+    except BaseException as e:  # noqa: BLE001 - handed on by result()
+        done.set_exception(e)
+    return done
+
+
+def _result(future: 'Future', args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
+    try:
+        return future.result()
+    except BrokenProcessPool:  # (a process of the pool died, say out of memory: in this one, the pool anew)
+        with _POOL_LOCK:
+            global _POOL
+            _POOL = None
+        return _planned(args, kw)
+
+
+def _edge_slot_count(boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, margins, reach_over) -> int:
+    """How many slots by the edge _plan_coverage closes (see _edge_gaps), worked out the same way before planning."""
+    if not cfg.body:
+        return 0
+    area = clean_polygon(boundary)
+    away_from = [clean_polygon(w) for w in list(obstacles) + list(keep_out)]
+    margin_of = [cfg.obstacle_margin if m is None else m for m in margins]
+    margin_of += [cfg.obstacle_margin] * (len(obstacles) + len(keep_out) - len(margin_of))
+    return sum(1 for g in _edge_gaps(area, list(drivable) + list(reach_over), away_from, margin_of, cfg)
+               if g.intersects(area))
+
+
 def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
                   config: Optional[PlannerConfig] = None, start: Optional[Sequence[float]] = None,
                   end: Optional[Sequence[float]] = None,
@@ -91,7 +164,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
     lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
     report.track_mowed): only what that left, see _plan_coverage. A slot by the edge too narrow for the body (see
-    _edge_gaps) is closed where that leaves less unmowed than going through it (stats['edge_slots']: how many)."""
+    _edge_gaps) is closed where that leaves less unmowed than going through it (stats['edge_slots']: how many). With
+    set_workers the plans in processes of their own, both ways round the slots at once."""
     cfg = config or PlannerConfig()
     cfg.validate()
     choice: Dict[str, bool] = {}
@@ -100,14 +174,35 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         return _plan_coverage(boundary, obstacles, c, start, end, drivable, keep_out, margins, reach_over=reach_over,
                               **more)
 
+    def later(c: PlannerConfig, **more: Any) -> Tuple['Future', tuple, Dict[str, Any]]:
+        args = (boundary, obstacles, c, start, end, drivable, keep_out, margins)
+        kw = dict(reach_over=reach_over, **more)
+        return _later(args, kw), args, kw
+
+    def got(planning: Tuple['Future', tuple, Dict[str, Any]], probe: Any) -> CoveragePlan:
+        plan, filled = _result(*planning)
+        if isinstance(probe, dict) and filled is not probe:  # (filled in another process)
+            probe.update(filled)
+        return plan
+
+    def slotted(c: PlannerConfig) -> bool:
+        try:
+            return _edge_slot_count(boundary, obstacles, c, drivable, keep_out, margins, reach_over) > 0
+        except Exception:  # noqa: BLE001 - (what's wrong with the input planning says)
+            return False
+
     def area_plan(c: PlannerConfig, probe: Any = False) -> CoveragePlan:
         # the slots closed or not, whichever leaves less of the lawn (with them open) unmowed (LEFT_GAIN less to close
         # them): worked out with the first plan, the same for the other lane spacings
         if 'edge_slots' in choice:
-            return one(c, probe=probe, edge_slots=choice['edge_slots'])
+            return got(later(c, probe=probe, edge_slots=choice['edge_slots']), probe)
         mine = {} if isinstance(probe, dict) else probe
-        closed = one(c, probe=mine)
-        opened = closed if not closed.stats['edge_slots'] else one(c, probe=probe, edge_slots=False)
+        closing = later(c, probe=mine)
+        # (in processes of their own both at once where it'll have slots)
+        opening = later(c, probe=probe, edge_slots=False) if _pool() is not None and slotted(c) else None
+        closed = got(closing, mine)
+        opened = closed if not closed.stats['edge_slots'] else got(opening or later(c, probe=probe, edge_slots=False),
+                                                                   probe)
 
         def left(plan: CoveragePlan) -> float:
             return sum(p.area for p in polygons(opened.free_space.difference(swept_area(plan, c.mower_width, 0.01)))

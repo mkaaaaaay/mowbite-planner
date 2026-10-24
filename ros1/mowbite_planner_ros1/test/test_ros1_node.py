@@ -1173,6 +1173,27 @@ def test_plan_ahead(planner, monkeypatch):
     assert calls == [1, 1, 1]
 
 
+def test_workers(planner):
+    """workers: the plans in processes of their own, the areas planned ahead at once, the same plans as in the node's
+    own process."""
+    second = area('b', [(0, 12), (8, 12), (8, 18), (0, 18)], name='Back', type='mow')
+    send_map(the_map(areas=[second]))
+    alone = {a: planner.rpc_plan({'area_id': a})['fingerprint'] for a in ('a', 'b')}
+    shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'))  # (planned anew, not read back)
+    rospy.params['~workers'] = 2
+    try:
+        together = node_module.MowbitePlannerRos1()
+        assert together.workers == 2
+        send_map(the_map(areas=[second]))
+        together.plans.clear()
+        together.plan_ahead()
+        assert any('2 areas planned ahead' in line for _, line in rospy.log)
+        got = {a: together.rpc_plan({'area_id': a}) for a in ('a', 'b')}
+        assert {a: g['fingerprint'] for a, g in got.items()} == alone and all(g['kept'] for g in got.values())
+    finally:
+        node_module.set_workers(0)
+
+
 def test_plan_ahead_one_at_a_time(planner, monkeypatch):
     """A plan asked for while it's being planned (planning ahead, then the app or mower_logic) is waited for, not
     planned twice. Planning ahead after another change ends early: the latest plans the areas as they are then."""

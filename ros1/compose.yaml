@@ -25,3 +25,4 @@ services:
       - ROS_HOME=/data/ros
       - OM_BLADE_WIDTH=${OM_BLADE_WIDTH:-0.18}
       - MOWBITE_WEB_PORT=${MOWBITE_WEB_PORT:-8090}
+      - MOWBITE_WORKERS=${MOWBITE_WORKERS:-3}
