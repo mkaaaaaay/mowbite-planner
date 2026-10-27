@@ -44,8 +44,8 @@ from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftove
                       _round_corners, _turn_at, _unmowed)
 from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, LOOP_GAIN,
                      LOOP_LEFT, LOOP_ON, MAX_BLADE_OFFSET, MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES,
-                     SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, PlannerConfig,
-                     PlanningError, SegmentInfo, _keep)
+                     SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, NothingLeft,
+                     PlannerConfig, PlanningError, SegmentInfo, _keep)
 from .footprint import Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells, zone_angles
@@ -788,7 +788,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                                 'robot_rear)')
         poses, segments, leftover = _leftovers(route, free, mowed, start_xy)
         if not poses:
-            raise PlanningError(f'nothing left to mow where the mower gets to ({leftover["left_m2"]:.2f} m2 left)')
+            raise NothingLeft(f'nothing left to mow where the mower gets to ({leftover["left_m2"]:.2f} m2 left)')
         took('leftovers')
     turning, arcs, deepest = _field_turns(route, poses, segments) if route.field is not None and mowed is None \
         else ([], 0, 0.0)

@@ -121,6 +121,10 @@ class PlanningError(ValueError):
     """The request can't be planned (bad parameters, no area left to mow)."""
 
 
+class NothingLeft(PlanningError):
+    """Of what a mow left (plan_coverage's mowed) the mower gets to nothing."""
+
+
 @dataclass
 class PlannerConfig:
     mower_width: float = 0.22  # m, cutting width

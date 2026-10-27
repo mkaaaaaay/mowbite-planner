@@ -3,7 +3,7 @@
 planner.py and the modules it uses need only shapely, node.py wraps them as a ROS 2 node.
 """
 
-from .config import CoveragePlan, PlannerConfig, PlanningError, SegmentInfo
+from .config import CoveragePlan, NothingLeft, PlannerConfig, PlanningError, SegmentInfo
 from .mathutil import Pose2D, normalize_angle, quaternion_to_yaw, yaw_to_quaternion
 from .planner import plan_coverage, swept_area
 
@@ -13,6 +13,7 @@ __version__ = '0.1.0'
 __all__ = [
     '__version__',
     'CoveragePlan',
+    'NothingLeft',
     'PlannerConfig',
     'PlanningError',
     'Pose2D',

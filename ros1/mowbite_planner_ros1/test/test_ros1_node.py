@@ -1458,7 +1458,8 @@ def test_duration(planner):
 
 def test_leftovers(planner):
     """planner.leftovers: what a mow's track left of the area and the passes over it. Armed, mower_logic's next plan
-    for the area is those passes alone (again while that job runs), an area with nothing left gets no paths; when
+    for the area is those passes alone (again while that job runs), an area with nothing left or hardly mowed gets no
+    paths; when
     that job is finished it's over and counts as no mow (the lanes don't turn on). Not armed: a look only."""
     rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded',
                                  'blade_ahead': 0.17, 'angle_increment': 0.1})
@@ -1508,14 +1509,17 @@ def test_leftovers(planner):
         f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses']]}) + '\n')
     result, _ = rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
     assert result['areas']['a']['paths'] == [] and 'nothing left' in result['areas']['a']['message']
+    assert result['areas']['a']['reason'] == 'nothing_left'
     assert planner.handle(request()).paths == []
-    # a track that isn't a mow of the area (hardly anything of it mowed): no leftovers, armed the plan as ever
+    # a track that isn't a mow of the area (hardly anything of it mowed, say the job skipped it): no leftovers, armed
+    # no paths either (not the whole plan: the leftovers' job mows leftovers only)
     with open(os.path.join(folder, '1791377701_short.jsonl'), 'w') as f:
         f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
         f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses'][:200]]}) + '\n')
     result, _ = rpc('planner.leftovers', {'job_id': 'short', 'arm': True})
     assert result['areas']['a']['paths'] == [] and 'most of the area is left' in result['areas']['a']['message']
-    assert len(poses(planner.handle(request()))) == whole
+    assert result['areas']['a']['reason'] == 'most_left' and 0.0 < result['armed']
+    assert planner.handle(request()).paths == []
     # asked for by the area's name: armed for its id. The leftovers' job thrown away (JOB_RESET): the plan as ever
     result, _ = rpc('planner.leftovers', {'job_id': 'mown', 'arm': True, 'area_id': 'Garden'})
     assert list(result['areas']) == ['a'] and len(poses(planner.handle(request()))) == len(first)

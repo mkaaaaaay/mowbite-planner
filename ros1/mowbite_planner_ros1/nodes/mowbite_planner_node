@@ -70,11 +70,11 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         areas: {id: like planner.plan's answer with only those passes (the one nearest the dock
                         first; paths empty and message where there's nothing to do), left_m2: unmowed pieces of 0.02 m2 at
                         least, stats.leftovers: {pieces, passes, area: m2 the passes mow}}}. With more than half of
-                        an area left it's no mow of it: no paths, a message, and armed that area is planned as
-                        ever. arm true: the next
-                        plans mower_logic asks for (within LEFTOVERS_ARMED s) are these, an area with nothing left
-                        gets no paths (mower_logic skips it): start mowing as ever and the mower only mows what
-                        was left. That job doesn't count as a mow (angle_increment, duration). armed: s it still is
+                        an area left it's no mow of it: no paths and a message. reason, where an area has no paths for
+                        one of these: most_left (that), nothing_left (the mower gets to none of what's left). arm
+                        true: the next plans mower_logic asks for (within LEFTOVERS_ARMED s) are these, an area
+                        without paths gets none (mower_logic skips it): start mowing as ever and the mower only mows
+                        what was left. That job doesn't count as a mow (angle_increment, duration). armed: s it still is
   planner.simulate      the plan of planner.plan (its params: area_id or outline, settings...) driven by a simulated
                         mower (mowbite_planner.simulate: OpenMower's FTC controller and mower_logic, the drive,
                         xbot_positioning, each a bit off like on a real mower): {model (a preset: realistic, the
@@ -156,8 +156,8 @@ from xbot_mqtt.msg import MqttPublish, RpcError, RpcRequest, RpcResponse
 from xbot_mqtt.srv import RegisterMethodsSrv
 
 import mowbite_planner
-from mowbite_planner import (CoveragePlan, PlannerConfig, PlanningError, Pose2D, SegmentInfo, plan_coverage,
-                             quaternion_to_yaw, yaw_to_quaternion)
+from mowbite_planner import (CoveragePlan, NothingLeft, PlannerConfig, PlanningError, Pose2D, SegmentInfo,
+                             plan_coverage, quaternion_to_yaw, yaw_to_quaternion)
 from mowbite_planner import config as limits
 from mowbite_planner.planner import plan_footprint, set_workers
 from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
@@ -1013,16 +1013,20 @@ class MowbitePlannerRos1:
             left = sum(p.area for p in polygons(keep[-1].free_space.difference(mowed)) if p.area >= LEFT_PIECE)
             got = []
             if left > LEFT_MOST * keep[-1].free_space.area:
-                # (not that mow's leftovers: it never mowed this area, or hardly. Armed the area is mowed as ever)
-                out[i] = {'area_id': i, 'paths': [], 'left_m2': round(left, 3), 'message':
-                          'most of the area is left (%.1f of %.1f m2): a mow of its own, not leftovers' % (
+                # (not that mow's leftovers: it never mowed this area, or hardly, say it skipped it. Armed it gets no
+                # paths either, the leftovers' job mows leftovers only)
+                out[i] = {'area_id': i, 'paths': [], 'left_m2': round(left, 3), 'reason': 'most_left', 'message':
+                          'most of the area is left (%.1f of %.1f m2): left out, mow it on its own' % (
                               left, keep[-1].free_space.area)}
+                plans[i] = None
                 continue
             try:
                 result = self.rpc_plan({'area_id': i, 'poses': bool(params.get('poses'))}, got, mowed)
                 if got:
                     result['duration'] = self.duration(self.estimate(got[-1]))
-            except PlanningError as e:  # (nothing left the mower gets to)
+            except NothingLeft as e:
+                result = {'area_id': i, 'paths': [], 'reason': 'nothing_left', 'message': str(e)}
+            except PlanningError as e:
                 result = {'area_id': i, 'paths': [], 'message': str(e)}
             result['left_m2'] = round(left, 3)
             out[i], plans[i] = result, got[-1] if got else None
