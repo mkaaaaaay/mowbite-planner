@@ -4,8 +4,8 @@ A mowing planner for OpenMower that knows how big your mower is. It takes the pl
 (slic3r): OpenMower asks it for the route and mows it like always. The difference: it keeps the whole mower away from
 edges and obstacles, not just its middle.
 
-**Still experimental.** Tested on one mower (YardForce NX60i with RTK) in one garden. It mows, but expect rough edges
-and settings that still change.
+**Still experimental.** In use on three mowers so far, among them a YardForce NX60i and a John Deere Tango E5. It
+mows, but expect rough edges and settings that still change.
 
 ## What you get
 
@@ -48,8 +48,10 @@ yet. Everything is done in Dockge. More details: [`ros1/README.md`](ros1/README.
    front or back? Then also how wide it is right there: square corners would bump into everything on paper.
 5. **Look at the plan** on that page (or in the MowBite app) before the first mow, emergency stop at hand.
 
-**Updating:** open the planner's stack in Dockge and press **Update**. Do the same after an OpenMower update. Now and
-then free the space old versions take: `docker image prune -f && docker builder prune -f`.
+**Updating:** the [MowBite Updater](https://github.com/mkaaaaaay/mowbite-updater) (part of MowBite, under Settings,
+Updates) shows when there's a new planner or OpenMower was updated, and builds it again with a tap on **Update**.
+Without it: open the planner's stack in Dockge and press **Update**, also after an OpenMower update, and now and then
+free the space old versions take: `docker image prune -f && docker builder prune -f`.
 
 **Back to OpenMower's planner:** on the settings page set "Planner" to `slic3r`. For good: take `OM_PLANNER` out of
 OpenMower's `.env`, restart OpenMower, then stop the planner's stack.
