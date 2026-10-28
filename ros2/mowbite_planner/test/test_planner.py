@@ -1011,7 +1011,9 @@ def test_footprint_out_by(monkeypatch):
         [prepared.context.contains(Point(p)) for p in zip(x, y)], bool))
     old = Footprint(space, BODY, 0.05).out_by(turns)
     assert [d for d, _ in old] == pytest.approx([d for d, _ in got], abs=1e-3)
-    assert [at for _, at in old if at is not None] == pytest.approx([at for _, at in got if at is not None], abs=1e-3)
+    # (x and y one by one: approx takes no points in a list, before pytest 9.2 it compared them exactly)
+    assert [c for _, at in old if at is not None for c in at] == pytest.approx(
+        [c for _, at in got if at is not None for c in at], abs=1e-3)
     monkeypatch.setattr(footprint, 'contains_points', None)
     plain = [d for d, _ in Footprint(space, BODY, 0.05).out_by(turns)]
     assert plain[0] == want[0] and 0.01 < plain[1] < got[1][0] and plain[2:] == pytest.approx(want[2:], abs=1.5e-3)
