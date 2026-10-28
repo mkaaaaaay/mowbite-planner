@@ -1,0 +1,29 @@
+name: codeql
+
+# CodeQL's security checks: the planner, the ROS 1 node and its settings page, these workflows. Mondays too, for new
+# checks. The results under Security, Code scanning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    # (code scanning is free for public repositories only)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: python, javascript-typescript, actions
+      - uses: github/codeql-action/analyze@v4
