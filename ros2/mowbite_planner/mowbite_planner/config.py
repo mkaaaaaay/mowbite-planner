@@ -67,8 +67,12 @@ MAX_BODY = 5.0
 # segments of a rounded corner of the body (robot_front_width, robot_rear_width): a quarter circle
 BODY_ROUND_SEGS = 6
 # m, where the only turn between two lanes is on the spot (or a drive), they end this much earlier at a time for a
-# rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow
+# rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow: EARLIER_LEFT, a few cm2
+# (ROUND_LEFT) where it would else loop out round into the next lane (about 2 m; mkay 29.10.: fewer loops, less
+# driving, hardly more left), not where it would turn on the spot; EARLIER_LEFT also what a lane or way starting
+# or ending elsewhere for the body may leave
 ROUND_STEP = 0.05
+ROUND_LEFT = 5e-3
 EARLIER_LEFT = 1e-3
 # m, with the body checked: where the path goes another way at a place and leaves LOOP_LEFT m or more of a loop out
 # there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in

@@ -11,8 +11,8 @@ from shapely.ops import clip_by_rect, nearest_points
 
 from .config import (EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_ROUND,
                      LOOP_ROUND_GAP, LOOP_ROUND_REACH, LOOP_ROUND_TRIES, LOOP_TRIES, ORDER_BUDGET, PERIMETER,
-                     ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, Lane,
-                     PathSegment, PlannerConfig)
+                     ROUND_LEFT, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY,
+                     Lane, PathSegment, PlannerConfig)
 from .footprint import SPIN, TURN_STEP, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
@@ -1349,9 +1349,10 @@ class _Route:
         m of it to spare): a rounded turn level with the end of the shorter of the two, the longer one ending (or
         starting) earlier, then both, ROUND_STEP at a time up to turn_radius more: a U-turn (at a slant where they end
         at one), a bulb, a detour between lanes far apart. The first that fits, where the turn or what's mowed already
-        (the loops next to them) mows what they leave (but EARLIER_LEFT): the lane just mowed is shortened then. Else a
-        loop into the next lane (Dubins' shortest way that fits). None where none fits. half: only the half circle
-        tighter than turn_radius (see half_circle, the rest is tried by then). reach: as for turn_space."""
+        (the loops next to them) mows what they leave (but EARLIER_LEFT, ROUND_LEFT where it would else loop): the lane
+        just mowed is shortened then. Else a loop into the next lane (Dubins' shortest way that fits). None where none
+        fits. half: only the half circle tighter than turn_radius (see half_circle, the rest is tried by then). reach: as
+        for turn_space."""
         last = self.segments[-1] if self.segments else None
         if last is None or last.kind != LANE or last.maneuver or len(last.poses) < 2:
             return None
@@ -1378,7 +1379,13 @@ class _Route:
                         return m
             return None
 
-        mowed = []
+        mowed, loop = [], []
+
+        def looped() -> Optional[Maneuver]:
+            # the loop into the next lane where nothing else fits, worked out once
+            if not loop:
+                loop.append(shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns and not half else None)
+            return loop[0]
 
         def unmowed(region):
             # what of region isn't mowed already (but by the lane just mowed): the path near where the two lanes end
@@ -1411,7 +1418,8 @@ class _Route:
             if left:
                 there = subtract(union(left), [self.blade([p for piece in turn.pieces for p in piece.poses]),
                                                self.blade([first, exit_pose])])
-                if there.area > EARLIER_LEFT and unmowed(there).area > EARLIER_LEFT:
+                if there.area > EARLIER_LEFT and unmowed(there).area > EARLIER_LEFT and (
+                        looped() is None or there.area > ROUND_LEFT and unmowed(there).area > ROUND_LEFT):
                     break  # (further in it leaves more)
             if de > 1e-9:
                 last.poses[:] = [p for p in last.poses
@@ -1420,7 +1428,7 @@ class _Route:
                 self.pos, self.heading = (exit_pose.x, exit_pose.y), h
                 self.lanes[-1] = (self.lanes[-1][0], (exit_pose.x, exit_pose.y))
             return turn, entry
-        turn = shortest(end, a, True) if 'bulb' in self.cfg.allowed_turns and not half else None
+        turn = looped()
         return None if turn is None else (turn, a)
 
     def blade(self, *runs: Sequence[Pose2D], whole: bool = False):

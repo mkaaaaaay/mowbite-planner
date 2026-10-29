@@ -2995,6 +2995,24 @@ def test_earlier_only_where_mowed():
     assert turn.name == 'u_turn' and entry[0] < 9.2 - 0.05
 
 
+def test_earlier_in_place_of_loops(monkeypatch):
+    """Lanes ending a few cm earlier for a U-turn leave ROUND_LEFT unmowed in place of a loop into the next lane, not
+    in place of turning on the spot: fewer loops and a shorter way, hardly less mowed; with turn_on_spot the same plan
+    as leaving EARLIER_LEFT."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3, spin_margin=0.0))
+    spot = dataclasses.replace(cfg, turn_on_spot=True)
+    plans = {}
+    for left in (config.ROUND_LEFT, config.EARLIER_LEFT):
+        monkeypatch.setattr('mowbite_planner.route.ROUND_LEFT', left)
+        plans[left] = [plan_coverage(GARDEN, [TREE, BED], c, start=(1, 1, 0.0), end=(1, 1)) for c in (cfg, spot)]
+    (plan, on_spot), (strict, strict_spot) = plans[config.ROUND_LEFT], plans[config.EARLIER_LEFT]
+    check_invariants(plan, cfg, [TREE, BED])
+    assert plan.stats['turns_bulb'] < strict.stats['turns_bulb'] and plan.stats['turns_pivot'] == 0
+    assert plan.stats['path_length'] < strict.stats['path_length']
+    assert coverage(plan, cfg) > coverage(strict, cfg) - 1e-4
+    assert on_spot.poses == strict_spot.poses and on_spot.stats['turns_pivot'] > 0
+
+
 
 def test_drive_into_lane_where_mowed():
     """With min_turn_radius a drive arriving the other way round where a lane starts at the wall ends on a way into
