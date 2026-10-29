@@ -1536,6 +1536,19 @@ def test_body_fit_place_where_it_sticks_out_most():
     assert fit['poses'][0] == [6.0, 9.85, round(corner.yaw, 3), d, 1] and d == round(math.hypot(0.14, 0.2) - 0.15, 3)
 
 
+def test_body_ends_by_an_edge_all_along():
+    """A lane along an edge, the turn at its end towards it: its arc doesn't fit anywhere along the lane, pulling the
+    lane back makes no room for it. A long lane keeps its length (before: pulled back to its middle, 4 m of 8 unmowed),
+    the turn finds another way; a short one is pulled back as before, so is one with room for the arc further in."""
+    room = Polygon(rect(0, 0, 10, 10))
+    transit, fp = TransitPlanner(room, 0.05), Footprint(room, BODY)
+    route = _Route(PlannerConfig(**dict(MOWER, **NX60I)), transit, transit, None, None, None, fp)
+    assert route.body_ends((1.0, 0.4), (9.0, 0.4), 0.0, 0.0, -1.0) == ((1.0, 0.4), (9.0, 0.4))
+    assert route.body_ends((1.0, 0.4), (2.0, 0.4), 0.0, 0.0, -1.0) == ((1.0, 0.4), (1.5, 0.4))
+    a, b = route.body_ends((1.0, 0.4), (9.9, 0.4), 0.0, 0.0, 1.0)  # (to the left: the arc fits short of the end)
+    assert a == (1.0, 0.4) and 9.0 < b[0] < 9.9
+
+
 def test_plan_starts_where_the_mower_gets_on(monkeypatch):
     """The dock by a corner of the garden: the outer loop doesn't start just before the corner (the body not fitting
     FIT_START after it, the path would start later, after the corner, mower_logic driving there and turning on the spot

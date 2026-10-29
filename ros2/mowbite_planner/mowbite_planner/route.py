@@ -1497,7 +1497,10 @@ class _Route:
                 [Pose2D(p.x, p.y, p.yaw + math.pi) for p in sample_arc(x, y, yaw + math.pi, r, -arrive * quarter,
                                                                          self.step)], True)
 
-        def edge(inside: float, outside: float) -> float:
+        def pose_fits(t: float) -> bool:
+            return self.footprint.fits_pose(a[0] + t * ux, a[1] + t * uy, yaw)
+
+        def edge(inside: float, outside: float, fits=fits) -> float:
             # where between a point that fits and one that doesn't it stops fitting, the side that fits
             while abs(outside - inside) > BODY_STEP:
                 t = 0.5 * (inside + outside)
@@ -1507,14 +1510,19 @@ class _Route:
         t0, t1 = 0.0, length
         if fits(t0) and fits(t1):
             return a, b
-        # the body and a turn reach no further than this past the lane's end
+        # the body and a turn reach no further than this past the lane's end: where the turn's arc doesn't fit that far
+        # in either, pulling the lane back further makes no room for it (an edge all along the lane, the turn towards
+        # it), a lane longer than twice that goes on as far as the body fits and the turn finds another way (a shorter
+        # one is pulled back to where it fits, or left out: no turn that doesn't fit for a bit of lane)
         mid = 0.5 * length
         near = min(mid, 2.0 * (self.footprint.reach + self.cfg.turn_radius))
-        if not fits(mid):
+        if not (pose_fits(mid) if near < mid else fits(mid)):
             t0 = t1 = mid
         else:
-            t0 = t0 if fits(t0) else edge(near if fits(near) else mid, t0)
-            t1 = t1 if fits(t1) else edge(length - near if fits(length - near) else mid, t1)
+            t0 = t0 if fits(t0) else edge(near, t0) if fits(near) else \
+                t0 if pose_fits(t0) else edge(mid, t0, pose_fits)
+            t1 = t1 if fits(t1) else edge(length - near, t1) if fits(length - near) else \
+                t1 if pose_fits(t1) else edge(mid, t1, pose_fits)
         self._count('lanes_body')
         if t1 - t0 < max(self.cfg.min_lane_length, 1e-6):
             return None
