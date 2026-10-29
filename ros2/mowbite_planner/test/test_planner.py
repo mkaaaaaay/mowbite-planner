@@ -1451,28 +1451,40 @@ def test_body_fits_through_narrow_gaps():
     assert sum(m for x, y, m in fit['places'] if gap.contains(Point(x, y))) > 0.5
 
 
-def test_body_drives_through_the_area():
-    """Where a drive finds no way through the transit space (to a lane's end a little out of it) it goes through the
-    mowing area (_Route.go_to), with the body checked up to body_tolerance further out: no finding of check_plan, the
-    body keeps the margins there (also against the real edges worked out here on their own). A pose 1 cm further out
-    is one. (Drives keeping 5 cm off the edges: farther off they find a way.)"""
+def test_body_drives_through_the_area(monkeypatch):
+    """Where a drive finds no way through the transit space (to a lane's end a little out of it, here by the right
+    edge) it goes through the mowing area (_Route.go_to), with the body checked up to body_tolerance further out: no
+    finding of check_plan, the body keeps the margins there (also against the real edges worked out here on their own).
+    A drive's pose 1 cm further out than the space the mower may drive in is one. (Drives keeping 5 cm off the edges:
+    farther off they find a way.)"""
     trees = [circle(4, 4, 0.4), circle(8, 4.3, 0.5)]
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=3, lane_overlap_passes=2,
                                transit_clearance=0.05))
+    through = []
+    drive_to = _Route.drive_to
+
+    def drive_to_noted(self, target, heading, head=None, space=None, start=None):
+        poses = drive_to(self, target, heading, head, space, start)
+        if poses is not None and space is self.area and self.area is not self.transit:
+            through.append(target)
+        return poses
+
+    monkeypatch.setattr(_Route, 'drive_to', drive_to_noted)
     plan = plan_coverage(rect(0, 0, 12, 8), trees, cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, trees)
-    transit_space = plan.transit_space.buffer(2e-3)
-    out = [i for s in plan.segments if s.kind == TRANSIT for i in range(s.start, s.end + 1)
-           if not transit_space.covers(Point(plan.poses[i].x, plan.poses[i].y))]
-    assert out
+    assert through
     report = check_plan(plan)
     assert report['body_out'] == [] and not any('poses outside' in h for h in report['hard'])
     assert outside_room(plan, recorded_room(cfg, [rect(0, 0, 12, 8)], trees, [cfg.obstacle_margin] * 2)) == []
-    p = plan.poses[out[0]]
+    # (of the poses within the drives, not their ends, the one closest to that space's edge, moved 1 cm past it)
+    near = [(plan.robot_space.boundary.distance(Point(plan.poses[i].x, plan.poses[i].y)), i)
+            for s in plan.segments if s.kind == TRANSIT for i in range(s.start + 1, s.end)]
+    i = min((d, i) for d, i in near if d > 1e-6)[1]
+    p = plan.poses[i]
     q = nearest_points(plan.robot_space.boundary, Point(p.x, p.y))[0]
     d = math.hypot(q.x - p.x, q.y - p.y)
     poses = list(plan.poses)
-    poses[out[0]] = p._replace(x=q.x + 0.01 * (q.x - p.x) / d, y=q.y + 0.01 * (q.y - p.y) / d)
+    poses[i] = p._replace(x=q.x + 0.01 * (q.x - p.x) / d, y=q.y + 0.01 * (q.y - p.y) / d)
     report = check_plan(dataclasses.replace(plan, poses=poses))
     assert '1 poses outside the space the mower may drive in' in report['hard']
 
