@@ -25,7 +25,7 @@ from .export import plan_pieces
 from .footprint import Footprint
 from .geometry import union
 from .mathutil import Pose2D
-from .planner import swept_area
+from .sweep import swept_area
 from .report import drive_time, left_of
 
 # Move Base Flex's controller loop (move_base_legacy_relay sets move_base's defaults at OpenMower's start): the first

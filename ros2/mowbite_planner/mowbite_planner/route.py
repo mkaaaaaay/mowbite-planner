@@ -6,19 +6,21 @@ import math
 import random
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import LineString, MultiLineString, Point, Polygon
-from shapely.ops import clip_by_rect, nearest_points
+from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import nearest_points
 
 from .config import (EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_IN, LOOP_JOIN, LOOP_ROUND,
                      LOOP_ROUND_GAP, LOOP_ROUND_REACH, LOOP_ROUND_TRIES, LOOP_TRIES, ORDER_BUDGET, PERIMETER,
-                     ROUND_LEFT, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY,
-                     Lane, PathSegment, PlannerConfig)
-from .footprint import SPIN, TURN_STEP, Footprint
+                     ROUND_LEFT, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, TURN, TURN_REACH, XY, Lane,
+                     PathSegment, PlannerConfig)
+from .drive import Drive, _spins
+from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
-from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, connect, drive_polyline, dubins, join,
+from .maneuvers import (CORNER_ANGLE, Fits, Maneuver, closest_on_polyline, drive_polyline, dubins, join,
                         omega, path_length, plan_turn, same_position, sample_arc, sample_straight, turn_radii)
 from .mathutil import Pose2D, angle_diff, normalize_angle
+from .sweep import blade
 from .transit import TransitPlanner
 
 try:  # shapely 2 tests many points at once
@@ -236,46 +238,9 @@ class _Route:
                 return way
         space = space or self.transit
         pos, facing = start or (self.pos, self.heading)
-        r = self.cfg.turn_radius
-
-        def drive(b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
-            return connect(pos, facing, b, h, r, self.step, space.is_free, space.careful_path, self.body,
-                           self.cfg.min_turn_radius)
-
-        best = drive(target, heading)
-        if best is not None and self.cfg.turn_on_spot:
-            # (on the spot where it leaves and arrives where the arcs there make it cross its own way, or turn it round
-            # more than half a turn all together where on the spot they turn it a quarter turn less: no pirouettes)
-            crosses = len(best) > 3 and not LineString([(p.x, p.y) for p in best]).is_simple
-            if crosses or _arcs(best) > math.pi:
-                spot = connect(pos, None, target, None, r, self.step, space.is_free, space.careful_path, self.body,
-                               self.cfg.min_turn_radius)
-                if spot is not None and (crosses or _arcs(spot) < _arcs(best) - 0.5 * math.pi):
-                    best = spot
-            return best
-        if best is None or heading is None or r <= 1e-3:
-            return best
-        best_spins = _spins(best, facing, heading)
-        if not best_spins:
-            return best
-        nx, ny = -math.sin(heading), math.cos(heading)
-        back = normalize_angle(heading + math.pi)
-        for d in (2.0 * r, r):
-            for side in (1.0, -1.0):
-                x = (target[0] + side * d * nx, target[1] + side * d * ny)
-                if not space.is_free([x]):
-                    continue
-                turn = plan_turn(Pose2D(x[0], x[1], back), target, r, self.step, space.is_free, None,
-                                 tuple(t for t in self.cfg.allowed_turns if t in ('u_turn', 'bulb')), self.body,
-                                 self.cfg.min_turn_radius)
-                way = drive(x, back) if turn is not None else None
-                if way is None:
-                    continue
-                poses = join(way, turn.pieces[0].poses)
-                spins = _spins(poses, facing, heading)
-                if spins < best_spins or spins == best_spins and path_length(poses) < path_length(best):
-                    best, best_spins = poses, spins
-        if head is not None and self.cfg.min_turn_radius > 0 and angle_diff(best[-1].yaw, heading) > SPIN_LIMIT:
+        best = Drive(space, self.footprint, self.cfg).way(pos, facing, target, heading)
+        if best is not None and not self.cfg.turn_on_spot and heading is not None and self.cfg.turn_radius > 1e-3 and \
+                head is not None and self.cfg.min_turn_radius > 0 and angle_diff(best[-1].yaw, heading) > SPIN_LIMIT:
             return self.into_lane(best, target, heading, head, space) or best
         return best
 
@@ -1432,17 +1397,8 @@ class _Route:
         return None if turn is None else (turn, a)
 
     def blade(self, *runs: Sequence[Pose2D], whole: bool = False):
-        """Where the blade mows driving poses (each run of them). whole: the whole path (quicker in pieces, see
-        swept_area)."""
-        half, ahead, off = 0.5 * self.cfg.mower_width, self.cfg.blade_ahead, self.cfg.blade_offset
-        lines = [[(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
-                   p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in poses] for poses in runs]
-        if whole:
-            # (straight runs of poses one straight line each first, where the pieces are cut)
-            return union(LineString(piece).buffer(half, 4) for line in lines
-                         for piece in _pieces(list(LineString(line).simplify(0.0).coords), SWEPT_PIECE, 2.0 * half))
-        return (LineString(lines[0]) if len(lines) == 1 else MultiLineString(lines)).buffer(half, 4) if lines else \
-            Polygon()
+        """Where the blade mows driving poses (see sweep.blade)."""
+        return blade(self.cfg, *runs, whole=whole)
 
     def mowed(self, ends: List[Tuple[float, float, float, float]], segments: List[PathSegment]):
         """What the blade mowed driving segments, of their poses near the lines in ends (x0, y0, x1, y1)."""
@@ -1555,75 +1511,8 @@ class _Route:
         self._count('bends')
 
 
-def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY]):
-    """Where a body of these corners (counter-clockwise round its centre, see PlannerConfig.body_outline) was while the
-    centre drove along each of the rings the way its points go: along every edge from where it was at the edge's start
-    to where it was at its end (_rows), so past a corner and on the outside of a bend the front reaches out, and at
-    every point turning on the spot from the heading of the edge before to the next one's (TURN_STEP apart)."""
-    parts, rows = [], _rows(corners)
-
-    def body(x: float, y: float, h: float, points: Sequence[XY]) -> Polygon:
-        c, s = math.cos(h), math.sin(h)
-        return Polygon([(x + c * dx - s * dy, y + s * dx + c * dy) for dx, dy in points])
-
-    for ring in rings:
-        heads = []  # every edge's heading and end
-        for (ax, ay), (bx, by) in zip(ring, list(ring[1:]) + list(ring[:1])):
-            length = math.hypot(bx - ax, by - ay)
-            if length > 1e-9:
-                heads.append((math.atan2(by - ay, bx - ax), bx, by))
-                parts += [body(bx, by, heads[-1][0], [(dx - length * back, dy) for dx, dy, back in row])
-                          for row in rows]
-        for (h, x, y), (h1, _, _) in zip(heads, heads[1:] + heads[:1]):
-            turn = normalize_angle(h1 - h)
-            n = int(math.ceil(abs(turn) / TURN_STEP))
-            parts += [body(x, y, h + turn * k / n, corners) for k in range(1, n)]
-    return union(parts)
-
-
-def _rows(corners: Sequence[XY]) -> List[List[Tuple[float, float, int]]]:
-    """The body of these corners (counter-clockwise) in pieces every line along its heading crosses once (itself where
-    it is like that, else cut along the heading where its edges turn from going left to going right or back), each as
-    its corners (x, y, 1 on its rear side; the leftmost and rightmost on both sides): driving straight ahead it swept
-    the polygon of a piece's corners where it got to, those on the rear side as far back as it drove."""
-    ys = [y for _, y in corners]
-    goes = [(b > a, b) for a, b in zip(ys, ys[1:] + ys[:1]) if b != a]  # (to the left, to where)
-    turns = sorted({y for (left, y), (on, _) in zip(goes, goes[1:] + goes[:1]) if left != on})
-    pieces = [list(corners)]
-    if len(turns) > 2:
-        x0, _, x1, _ = Polygon(corners).bounds
-        pieces = [ring for a, b in zip(turns, turns[1:])
-                  for _, ring in rings(clip_by_rect(Polygon(corners), x0 - 1.0, a, x1 + 1.0, b))]
-    rows = []
-    for piece in pieces:
-        row: List[Tuple[float, float, int]] = []
-        for i, (x, y) in enumerate(piece):
-            into, out = y - piece[i - 1][1], piece[(i + 1) % len(piece)][1] - y
-            if into == out == 0:  # (in the middle of an edge along it)
-                continue
-            if into >= 0 and out >= 0 or into <= 0 and out <= 0:
-                row.append((x, y, int(into <= 0 and out <= 0)))
-            else:
-                row += [(x, y, 0), (x, y, 1)] if into > 0 else [(x, y, 1), (x, y, 0)]
-        rows.append(row)
-    return rows
-
-
 def _length(pts: Sequence[XY]) -> float:
     return sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(pts, pts[1:]))
-
-
-def _spins(poses: Sequence[Pose2D], heading_in: Optional[float], heading_out: Optional[float]) -> int:
-    """How often the mower turns on the spot by more than SPIN_LIMIT driving poses, coming in facing heading_in and
-    going on facing heading_out."""
-    yaws = ([heading_in] if heading_in is not None else []) + [p.yaw for p in poses] + \
-        ([heading_out] if heading_out is not None else [])
-    return sum(1 for a, b in zip(yaws, yaws[1:]) if angle_diff(a, b) > SPIN_LIMIT)
-
-
-def _arcs(poses: Sequence[Pose2D]) -> float:
-    """rad the way turns on its arcs all together (not on the spot)."""
-    return sum(angle_diff(a.yaw, b.yaw) for a, b in zip(poses, poses[1:]) if not same_position(a, b))
 
 
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
@@ -1741,16 +1630,3 @@ def _first_direction(loop: List[XY]) -> Optional[XY]:
         if d > 1e-7:
             return dx / d, dy / d
     return None
-
-
-def _pieces(pts: List[XY], n: int, cut: float) -> List[List[XY]]:
-    """pts in pieces of at least n points, cut in the middle of a straight piece at least `cut` long."""
-    out, cur = [], [pts[0]]
-    for p, q in zip(pts, pts[1:]):
-        if len(cur) >= n and math.hypot(q[0] - p[0], q[1] - p[1]) >= cut:
-            m = (0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]))
-            out.append(cur + [m])
-            cur = [m]
-        cur.append(q)
-    out.append(cur)
-    return out

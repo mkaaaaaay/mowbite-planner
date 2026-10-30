@@ -20,7 +20,7 @@ from shapely.prepared import prep
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from mowbite_planner import (PlannerConfig, PlanningError, Pose2D, bodyfit, config, footprint,  # noqa: E402
-                             normalize_angle, plan_coverage, planner, quaternion_to_yaw, swept_area, transit,
+                             normalize_angle, plan_coverage, planner, quaternion_to_yaw, space, swept_area, transit,
                              yaw_to_quaternion)
 from mowbite_planner.maneuvers import (CORNER_ANGLE, MAX_ARC_STEP, bulb_turn, connect, drive_polyline,  # noqa: E402
                                        dubins, join, omega, path_length, plan_turn, same_position, sample_arc,
@@ -30,9 +30,12 @@ from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH,
                                      FIT_START, FIT_TRIES, TURN_AHEAD)
 from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT,  # noqa: E402
                                     TURN, ZERO_TURN, Lane, PathSegment)
-from mowbite_planner.lanes import _lane_cost, angle_in_range, longest_edge_angle, scan_lanes, split_cells  # noqa: E402
+from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
+from mowbite_planner.drive import _arcs, _spins  # noqa: E402
+from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
-from mowbite_planner.route import _Route, _arcs, _rows, _spins, best_order  # noqa: E402
+from mowbite_planner.route import _Route, best_order  # noqa: E402
+from mowbite_planner.space import _rows  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.geometry import polygons, union  # noqa: E402
 from mowbite_planner.report import LEFT_SHOWN, check_plan, drive_time, track_mowed  # noqa: E402
@@ -1340,7 +1343,7 @@ def test_driven_sweeps_the_outline(corners, pieces):
     leftmost or rightmost)."""
     corners = PlannerConfig(robot_outline=corners).body_outline
     ring = [(0.0, 0.0), (1.0, 0.0), (1.4, 0.7), (0.2, 0.5)]
-    swept = planner._driven([ring], corners)
+    swept = space._driven([ring], corners)
     bodies = []
     for i, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1])):
         h, n = math.atan2(b[1] - a[1], b[0] - a[0]), int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.001))
@@ -1948,7 +1951,7 @@ def test_workers_plan_the_same():
         together = plan_coverage(*args, start=(5, 1, 0.0))
     finally:
         planner.set_workers(0)
-    assert planner._edge_slot_count(args[0], args[1], args[2], (), (), (), ()) == 1
+    assert space._edge_slot_count(args[0], args[1], args[2], (), (), (), ()) == 1
     assert [(p.x, p.y, p.yaw) for p in together.poses] == [(p.x, p.y, p.yaw) for p in alone.poses]
     assert together.stats['edge_slots'] == alone.stats['edge_slots']
 
@@ -2736,8 +2739,8 @@ def test_body_space_kept(monkeypatch):
     assert config._BODY_SPACE.last[2].spin_margin == 0.0 and kept[2].spin_margin == cfg.spin_margin == 0.05
     assert config._BODY_SPACE.last[1].equals(kept[1]) and len(config._BODY_SPACES) == spaces
     done, worked_out = [], []
-    driven = planner._driven
-    monkeypatch.setattr(planner, '_driven', lambda *args: worked_out.append(args) or driven(*args))
+    driven = space._driven
+    monkeypatch.setattr(space, '_driven', lambda *args: worked_out.append(args) or driven(*args))
 
     def plan():
         done.append((plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0)).poses, config._BODY_SPACE.last))

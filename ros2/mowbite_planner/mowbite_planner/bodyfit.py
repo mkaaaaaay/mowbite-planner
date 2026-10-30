@@ -5,25 +5,46 @@ import bisect
 import dataclasses
 import hashlib
 import math
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Sequence, Set, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 from shapely.prepared import prep
 
 from .config import (_FITTED, _KEPT_LOCK, EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, SMOOTH_RADII, TRANSIT,
-                     TURN, XY, Lane, PathSegment, SegmentInfo, _keep)
-from .footprint import SPIN
+                     TURN, XY, Lane, PathSegment, PlannerConfig, SegmentInfo, _keep)
+from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, polygons, subtract, union
 from .maneuvers import CORNER_ANGLE, dubins, join, path_length, same_position, sample_arc, sample_straight
 from .mathutil import Pose2D, angle_diff, normalize_angle
-from .route import _Route
 from .transit import TransitPlanner
 
 try:  # (the leftovers' passes: shapely 2 brings it)
     import numpy
 except ImportError:
     numpy = None
+
+
+class BodyRoute(Protocol):
+    """What the body's repairs use of a route (route._Route has it)."""
+    cfg: PlannerConfig
+    footprint: Footprint
+    step: float  # cfg.waypoint_spacing
+    transit: TransitPlanner  # drives, through the drivable areas too
+    area: TransitPlanner  # the mowing area
+    field: Any  # headland_turns: the lanes' field, else None
+    rounded: Set[XY]  # headland_corners 'rounded': the arcs into the field (_round_corners adds them)
+    sharp: Set[XY]  # headland_corners 'sharp': the drives along the headland
+
+    def body(self, poses: Sequence[Pose2D]) -> bool: ...
+
+    def clear(self, pts: Sequence[XY]) -> bool: ...
+
+    def blade(self, *runs: Sequence[Pose2D], whole: bool = False) -> Any: ...
+
+    def drive_to(self, target: XY, heading: Optional[float], head: Optional[XY] = None,
+                 space: Optional[TransitPlanner] = None, start: Optional[Tuple[XY, Optional[float]]] = None
+                 ) -> Optional[List[Pose2D]]: ...
 
 
 # m, with the body checked: where the path still turns on the spot a pose this much before the point, facing the way
@@ -114,7 +135,7 @@ FIT_KEEP = 1000
 FIELD_ARC = 0.12
 
 
-def _fit_body(route: '_Route', poses: List[Pose2D],
+def _fit_body(route: BodyRoute, poses: List[Pose2D],
               infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """Where the body still sticks out (at a pose, or turning on the spot there), the path from a pose before it to one
     after it (FIT_REACH before and after at most) another way that fits: straight (turning on the spot at both ends),
@@ -763,7 +784,7 @@ def _lanes_field(passes: List[Tuple[float, List[List[Lane]]]], trim: float, half
     return union(parts)
 
 
-def _field_turns(route: '_Route', poses: List[Pose2D],
+def _field_turns(route: BodyRoute, poses: List[Pose2D],
                  infos: List[SegmentInfo]) -> Tuple[List[List[float]], int, float]:
     """[x, y] of every place where a drive turns in the lanes' field (headland_turns): the first pose there whose
     heading changes, those less than a metre apart one place. Not on the arcs rounding a corner out of it into it: how
@@ -828,7 +849,7 @@ def _assemble(segments: List[PathSegment]) -> Tuple[List[Pose2D], List[SegmentIn
     return poses, infos
 
 
-def _round_corners(route: '_Route', poses: List[Pose2D],
+def _round_corners(route: BodyRoute, poses: List[Pose2D],
                    infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
     """Where a drive or a way of _fit_body (TRANSIT) bends at a pose by more than CORNER_ANGLE (turns on the spot there
     from footprint.SPIN on), an arc in its place, of SMOOTH_RADII of turn_radius (tighter than min_turn_radius too): the
@@ -989,14 +1010,14 @@ def _round_corners(route: '_Route', poses: List[Pose2D],
     return out, kept
 
 
-def _unmowed(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo], free):
+def _unmowed(route: BodyRoute, poses: List[Pose2D], infos: List[SegmentInfo], free):
     """What the path leaves unmowed of free (the blade's way along it, section by section)."""
     starts = [k for k, info in enumerate(infos) if k == 0 or info.section != infos[k - 1].section]
     bounds = [infos[k].start for k in starts] + [len(poses)]
     return subtract(free, [route.blade(*[poses[a:b] for a, b in zip(bounds, bounds[1:]) if b - a > 1], whole=True)])
 
 
-def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
+def _mop_up(route: BodyRoute, poses: List[Pose2D], infos: List[SegmentInfo],
             free) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """mop_up: of what the path leaves unmowed of free the pieces of MOP_MIN at least (the biggest MOP_MAX), each with a
     pass of MOP_PASS where the body fits that mows the most of it (MOP_GAIN of MOP_MIN at least); from the path's end a
@@ -1077,7 +1098,7 @@ def _mop_up(route: '_Route', poses: List[Pose2D], infos: List[SegmentInfo],
     return out, new, {'pieces': done, 'area': round(area, 3)}
 
 
-def _leftover_passes(route: '_Route', piece) -> List[Tuple[float, List[List[Pose2D]]]]:
+def _leftover_passes(route: BodyRoute, piece) -> List[Tuple[float, List[List[Pose2D]]]]:
     """The passes over a piece a mow left, [(m2 they mow of it, [the poses one way along, the other way where that fits
     too])], one after the other: the next of what the ones before leave (see LEFT_MAX). None without numpy."""
     if numpy is None:
@@ -1150,7 +1171,7 @@ def _leftover_passes(route: '_Route', piece) -> List[Tuple[float, List[List[Pose
     return out
 
 
-def _leftovers(route: '_Route', free, mowed, start: XY) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
+def _leftovers(route: BodyRoute, free, mowed, start: XY) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """What a mow really left: of free without mowed (where the blade went, see report.track_mowed) the pieces of
     MOP_MIN at least, each with its passes (_leftover_passes). The path is those passes, the one nearest start (the
     dock) first, then the nearest next each time with a drive to it (through the transit space, the body checked); a
@@ -1198,7 +1219,7 @@ def _leftovers(route: '_Route', free, mowed, start: XY) -> Tuple[List[Pose2D], L
                       'area': round(area, 3)}
 
 
-def _turn_at(route: '_Route', poses: List[Pose2D],
+def _turn_at(route: BodyRoute, poses: List[Pose2D],
              infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
     """Where the path turns on the spot (the heading jumping by more than footprint.SPIN) and the way in
     is longer than twice TURN_AHEAD, a pose TURN_AHEAD before the point on it, facing the way it came (where the body

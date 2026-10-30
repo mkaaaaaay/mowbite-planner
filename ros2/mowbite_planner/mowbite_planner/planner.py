@@ -26,7 +26,6 @@ in route.py, the path made to fit the body in bodyfit.py; this module puts them 
 
 import bisect
 import dataclasses
-import hashlib
 import math
 import multiprocessing
 import threading
@@ -35,37 +34,26 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from shapely import wkb
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import nearest_points
 from shapely.prepared import prep
 
 from .bodyfit import (_assemble, _field_turns, _fit_body, _lanes_field, _leftovers, _loop_ends, _mop_up,
                       _round_corners, _turn_at, _unmowed)
-from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, LOOP_GAIN,
-                     LOOP_LEFT, LOOP_ON, MAX_BLADE_OFFSET, MAX_ROWS, ON_EDGE, PERIMETER, SPACING_CANDIDATES,
-                     SWEPT_PIECE, TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, NothingLeft,
-                     PlannerConfig, PlanningError, SegmentInfo, _keep)
-from .footprint import Footprint
-from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
+from .config import (LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, LOOP_GAIN, LOOP_LEFT, LOOP_ON, MAX_ROWS, PERIMETER,
+                     SPACING_CANDIDATES, TRANSIT, TURN, TURN_REACH, XY, ZERO_TURN, CoveragePlan, Lane, NothingLeft,
+                     PlannerConfig, PlanningError)
+from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import bend_lanes, lane_angle, scan_lanes, split_cells, zone_angles
 from .maneuvers import path_length
-from .mathutil import Pose2D
-from .route import _driven, _pieces, _Route, _smooth_spins
+from .route import _Route, _smooth_spins
+from .space import _check_coordinates, _edge_slot_count, build_space, margins_of
+from .sweep import plan_footprint, swept_area  # noqa: F401 - (plan_footprint: the nodes import it from here)
 from .transit import TransitPlanner
 
 # a plan this big is a mistake (a lane spacing in mm, a waypoint every mm), not a lawn: about 200 km of path
 MAX_POSES = 2000000
-# m, coordinates further out are a mistake (or the wrong frame), not a lawn
-MAX_COORDINATE = 1e7
 # m2, a narrower spacing has to leave this much less unmowed to be taken
 LEFT_GAIN = 0.05
-# m, how far apart _edge_gaps closes a slot by the edge straight across
-EDGE_STEP = 0.03
-# m2, with the body checked (edges recorded) an obstacle of which less than this is left once the body's band round its
-# line is taken off (smaller than the body is wide: it can't have been driven round with the body in it) was drawn: its
-# line is its real edge, the body keeps its margin off all of it (_body_space)
-DRAWN = 1e-4
 
 
 # entry point -----------------------------------------------------------------------------------------------
@@ -73,15 +61,6 @@ DRAWN = 1e-4
 
 def _point(p: Optional[Sequence[float]]) -> Optional[XY]:
     return (float(p[0]), float(p[1])) if p is not None and len(p) >= 2 else None
-
-
-def _check_coordinates(what: str, points: Sequence[Sequence[float]]) -> None:
-    """Refuses points that are no numbers or lie absurdly far out (GEOS can take forever on those)."""
-    for p in points:
-        # false for nan too
-        if not all(abs(c) <= MAX_COORDINATE for c in p[:2]):
-            raise PlanningError(f'{what} has a point that is no number or more than {MAX_COORDINATE:.0f} m from '
-                                f'the map origin: {list(p[:2])}')
 
 
 # set_workers: processes of their own plan (an area's plans round its slots by the edge at once, the plans of callers on
@@ -139,18 +118,6 @@ def _result(future: 'Future', args: tuple, kw: Dict[str, Any]) -> Tuple[Coverage
             global _POOL
             _POOL = None
         return _planned(args, kw)
-
-
-def _edge_slot_count(boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, margins, reach_over) -> int:
-    """How many slots by the edge _plan_coverage closes (see _edge_gaps), worked out the same way before planning."""
-    if not cfg.body:
-        return 0
-    area = clean_polygon(boundary)
-    away_from = [clean_polygon(w) for w in list(obstacles) + list(keep_out)]
-    margin_of = [cfg.obstacle_margin if m is None else m for m in margins]
-    margin_of += [cfg.obstacle_margin] * (len(obstacles) + len(keep_out) - len(margin_of))
-    return sum(1 for g in _edge_gaps(area, list(drivable) + list(reach_over), away_from, margin_of, cfg)
-               if g.intersects(area))
 
 
 def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
@@ -327,68 +294,15 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if cfg.body and cfg.turn_radius == 0:  # (see turn_radius)
         cfg = dataclasses.replace(cfg, turn_radius=ZERO_TURN, turn_on_spot=True, lane_order='snake',
                                   turn_radius_auto=False)
-    _check_coordinates('the boundary', boundary)
-    for o in obstacles:
-        _check_coordinates('an obstacle', o)
-    for d in drivable:
-        _check_coordinates('a drivable area', d)
-    for k in keep_out:
-        _check_coordinates('a keep out area', k)
-    for r in reach_over:
-        _check_coordinates('an area to reach over into', r)
-    if len(margins) > len(obstacles) + len(keep_out):
-        raise PlanningError(f'{len(margins)} margins for {len(obstacles) + len(keep_out)} obstacles and areas to keep '
-                            'out of')
-    margin_of = [cfg.obstacle_margin if m is None else m for m in margins]
-    margin_of += [cfg.obstacle_margin] * (len(obstacles) + len(keep_out) - len(margin_of))
-    for m in margin_of:
-        if isinstance(m, bool) or not isinstance(m, (int, float)) or not 0.0 <= m <= MAX_BLADE_OFFSET:
-            raise PlanningError(f'a margin must be a number 0..{MAX_BLADE_OFFSET}, got {m!r}')
+    margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
+    space, footprint = build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of, cfg, edge_slots)
+    area, free, robot_space, blade_space = space.area, space.free, space.robot_space, space.blade_space
+    drive_space, transit_space, slots = space.drive_space, space.transit_space, space.slots
     half = 0.5 * cfg.mower_width
-    # the blade's first loop, the mower's centre is `off` further in (blade_offset, the loops go round with the
-    # blade on their outer side)
-    first = cfg.blade_loop_offset
-    off = abs(cfg.blade_offset)
-    centre = first + off
+    first, off = space.first, space.off
     spacing = cfg.lane_spacing
     concentric = cfg.fill_pattern == 'concentric'
-
-    area = clean_polygon(boundary)
-    if area.is_empty:
-        raise PlanningError('the boundary needs at least 3 points that enclose an area')
-    # with the body checked the loops keep it an obstacle's margin (an area's to keep out of) off its real edge: the
-    # obstacle that much bigger where that's further than they keep off the outline
-    away_from = [clean_polygon(w) for w in list(obstacles) + list(keep_out)]
-    keep = [m + cfg.simplify_tolerance + cfg.wall_half for m in margin_of]
-    grown = [w.buffer(k - centre, QUAD_SEGS) if cfg.body and k > centre + 1e-9 else w for w, k in zip(away_from, keep)]
-    # (and the gaps between two too narrow for the body, see _gaps, or between one and the edge, see _edge_gaps)
-    gaps = [g for g in _gaps(away_from, margin_of, [max(k, centre) for k in keep], cfg) if g.intersects(area)] \
-        if cfg.body else []
-    slots = [g for g in _edge_gaps(area, list(drivable) + list(reach_over), away_from, margin_of, cfg)
-             if g.intersects(area)] if cfg.body and edge_slots else []
-    blocked = union(grown[:len(obstacles)] + gaps + slots)
-    free = polygonal(area.difference(blocked)) if not blocked.is_empty else area
-    if cfg.simplify_tolerance > 0 and not free.is_empty:
-        simple = free.simplify(cfg.simplify_tolerance, preserve_topology=True)
-        # simplifying a very jagged outline can make it cross itself, then it stays as it is
-        if simple.is_valid:
-            free = polygonal(simple)
-    if free.is_empty:
-        raise PlanningError('the obstacles cover the whole area')
-    # with the body checked the loops go round an area to keep out of like round an obstacle (see edges)
-    if cfg.body and keep_out:
-        free = polygonal(free.difference(union(grown[len(obstacles):])))
-    # slivers smaller than the blade (where a noisy outline crosses itself) aren't parts of their own
-    free = polygonal(union(p for p in polygons(free) if p.area >= half * half))
-    if free.is_empty:
-        raise PlanningError('the areas to keep out of cover the whole area')
-    body_space, footprint = _body_space([boundary] + list(drivable) + list(reach_over),
-                                        list(obstacles) + list(keep_out), margin_of, cfg) if cfg.body else (None, None)
-    robot_space = inset(free, centre)
-    if robot_space.is_empty:
-        raise PlanningError(f'the area is too narrow for a first loop {centre} m inside the outline')
-    blade_space = robot_space if off == 0 else inset(free, first)
     if cfg.waypoint_spacing > 0:
         # every square metre takes about 1 / lane spacing metres of path
         estimate = free.area / spacing / cfg.waypoint_spacing
@@ -521,13 +435,6 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     took('remaining')
     angle = lane_angle(area, free, cfg, lane_region, remaining, robot_space)
 
-    # recorded edges are where the centre drove, give or take body_tolerance: with the body checked the centre may go
-    # that far past the first loop as well (rounding a corner, a turn, a loop out), the body keeping the margins. The
-    # loops and lanes still keep to robot_space
-    drive_space = robot_space
-    if cfg.body and cfg.body_tolerance > 0:
-        drive_space = polygonal(robot_space.buffer(cfg.body_tolerance, QUAD_SEGS))
-
     # turns and loops stay inside the mowing area, so do the bends of lanes around obstacles
     edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
     area_space = TransitPlanner(drive_space, cfg.transit_clearance, **edges)
@@ -592,16 +499,6 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if start_xy is None:
         corner = list(polygons(area))[0].exterior.coords[0]
         start_xy = (corner[0], corner[1])
-    transit_space = robot_space if cfg.body else drive_space
-    extra_space = union(clean_polygon(d) for d in drivable)
-    if not extra_space.is_empty:
-        # drivable areas are recorded like outlines, the mower's centre may go anywhere in them, but not
-        # closer to an obstacle (or an area to keep out of) than in the mowing area
-        away = union(grown)
-        keep_off = away.buffer(max(centre, half), QUAD_SEGS) if not away.is_empty else None
-        if keep_off is not None:
-            extra_space = extra_space.difference(keep_off)
-        transit_space = polygonal(union([transit_space, extra_space]))
     transit = area_space if transit_space is drive_space else TransitPlanner(transit_space, cfg.transit_clearance,
                                                                              **edges)
     route = _Route(cfg, transit, area_space, start_xy, start_heading, end_xy, footprint)
@@ -851,145 +748,6 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     return CoveragePlan(
         poses=poses, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=route.loops,
         lanes=route.lanes, stats=stats, warnings=route.warnings, area=area, free_space=free,
-        robot_space=drive_space, lane_region=lane_region, remaining=remaining,
-        angles=[a for a, _ in passes] or [angle], transit_space=transit_space, body_space=body_space, config=cfg,
-        section_starts=section_starts, levels=levels, narrow=narrow, cells=passes, origins=route.origins)
-
-
-def _gaps(shapes: List[object], margin_of: List[float], off: List[float], cfg: PlannerConfig) -> List[Polygon]:
-    """The gaps between two obstacles or areas to keep out of where the body, facing straight across, has less than
-    body_tolerance to spare with each one's margin kept (their real edges robot_width / 2 inside the lines, which lie
-    about body_tolerance off where the mower was; hard: the lines): the hull round the parts of either closer than that
-    to the other, less both. Not where the centre keeps off already (off: how far from each one's line). The loops go
-    round both there, nothing drives in where the body would get through facing straight across at best."""
-    gaps = []
-    for i, a in enumerate(shapes):
-        for j in range(i + 1, len(shapes)):
-            # (hard edges: the real edges are the lines, the body's whole width between them)
-            b, width = shapes[j], margin_of[i] + margin_of[j] + cfg.body_tolerance + 2.0 * cfg.wall_half
-            if not a.is_empty and not b.is_empty and off[i] + off[j] <= a.distance(b) < width:
-                near = union([a.intersection(b.buffer(width, QUAD_SEGS)), b.intersection(a.buffer(width, QUAD_SEGS))])
-                gaps += [p for p in polygons(near.convex_hull.difference(union([a, b])))
-                         if p.distance(a) < ON_EDGE and p.distance(b) < ON_EDGE]
-    return gaps
-
-
-def _edge_gaps(area, drivable: Sequence[Sequence[Sequence[float]]], shapes: List[object], margin_of: List[float],
-               cfg: PlannerConfig) -> List[Polygon]:
-    """The slots between an obstacle or area to keep out of and the edge (where no area the mower may drive through
-    lies beyond it: the edge's real edge robot_width / 2 out from its line, hard: the line) where the body, facing
-    straight across, has less than body_tolerance to spare with the margins kept, like _gaps: all of the slot,
-    straight across from the one to the other, as far as it stays narrower than that by half the body's width more
-    (beside a closed bit it's a dead end the mower can't turn in). The loops go round the obstacle there as round one
-    on the edge: a bed moved a little off the edge doesn't take the outermost loop through a slot by it. Also where it
-    comes closer to the edge than the loops' centres keep off both (no way between them then): the wedges either side
-    of where it does are such slots, the loops would run into them."""
-    reach = union([area] + [clean_polygon(d) for d in drivable])
-    beyond = reach.buffer(1.0, QUAD_SEGS).difference(reach)
-    ys = [y for _, y in cfg.body_outline]
-    gaps = []
-    for a, m in zip(shapes, margin_of):
-        width = m + cfg.edge_margin + cfg.body_tolerance + 2.0 * cfg.wall_half
-        if a.is_empty or not a.distance(beyond) < width:
-            continue
-        across = width + 0.5 * (max(ys) - min(ys))
-        bridges = []
-        for p in polygons(a):
-            n = max(8, int(p.exterior.length / EDGE_STEP))
-            for k in range(n):
-                q = p.exterior.interpolate(k * p.exterior.length / n)
-                if q.distance(beyond) < across:
-                    bridges.append(LineString([q, nearest_points(q, beyond)[1]]).buffer(EDGE_STEP, QUAD_SEGS))
-        gaps += [g for g in polygons(union(bridges).difference(union([a, beyond])))
-                 if g.distance(a) < ON_EDGE and g.distance(beyond) < ON_EDGE]
-    return gaps
-
-
-def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
-                margin_of: List[float], cfg: PlannerConfig) -> Tuple[object, Footprint]:
-    """Where the body may be, and its Footprint there: where the edges really are, where the body was while its centre
-    drove them (the outline and the drivable areas, the obstacles and areas to keep out of, each the way its points go),
-    into an obstacle or an area to keep out of only along its own edge (hard edges: the lines themselves; one too small
-    to have been driven round, of which that leaves less than DRAWN, its line), edge_margin and each one's margin off
-    that. The last ones worked out are kept (_BODY_SPACES), the last one of this thread with
-    its Footprint (_BODY_SPACE), the plan gets a copy."""
-    outlines, away_from = ([[(float(p[0]), float(p[1])) for p in ring] for ring in rings]
-                          for rings in (outlines, away_from))
-    hard = cfg.edges == 'hard'
-    key = (outlines, away_from, tuple(margin_of), cfg.edge_margin, cfg.body_outline, hard)
-    found = getattr(_BODY_SPACE, 'last', None)
-    if found is None or found[0] != (key, cfg.spin_margin):
-        shared = hashlib.sha1(repr(key).encode()).hexdigest()
-        with _KEPT_LOCK:
-            space = _BODY_SPACES.get(shared)
-        if space is None:
-            outer = union([clean_polygon(o) for o in outlines] +
-                          ([] if hard else [_driven(outlines, cfg.body_outline)]))
-            band = None if hard else _driven(away_from, cfg.body_outline)
-            inner = []
-            for w in away_from:
-                w = clean_polygon(w)
-                rest = w if band is None else w.difference(band)
-                inner.append(rest if rest.area >= DRAWN else w)
-            space = subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb
-            _keep(_BODY_SPACES, shared, space)
-        space = wkb.loads(space)
-        found = _BODY_SPACE.last = ((key, cfg.spin_margin), space, Footprint(space, cfg.body_outline, cfg.spin_margin))
-    return wkb.loads(found[1].wkb), found[2]
-
-
-
-def plan_footprint(plan: CoveragePlan) -> Optional[Footprint]:
-    cfg = plan.config
-    if cfg is None or not cfg.body or plan.body_space is None:
-        return None
-    return Footprint(plan.body_space, cfg.body_outline, cfg.spin_margin)
-
-
-def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
-             footprint: Footprint) -> List[Dict[str, Any]]:
-    """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
-    'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
-    (footprint.OnTurn)."""
-    kind_at: Dict[int, str] = {}
-    on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
-    for seg in segments:
-        kind = {TURN: 'turn', TRANSIT: 'transit', PERIMETER: 'loop'}.get(seg.kind, 'loop' if seg.maneuver == 'ring'
-                                                                         else 'lane_end')
-        for i in range(seg.start, seg.end + 1):
-            kind_at[i] = kind
-        on_turn[seg.start + 1:seg.end + 1] = [seg.kind == TURN] * (seg.end - seg.start)
-    out = []
-    for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
-        part = poses[a:b]
-        for i in footprint.bad_poses(part, on_turn[a:b]):
-            p = part[i]
-            out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
-                        'kind': 'spin' if footprint.spins(part, i) else kind_at.get(a + i, 'transit')})
-    return out
-
-
-def blade_points(plan: CoveragePlan, start: int, end: int) -> List[XY]:
-    """Where the blade's centre is at poses start..end: blade_offset to the left of each, blade_ahead ahead."""
-    off = plan.config.blade_offset if plan.config else 0.0
-    ahead = plan.config.blade_ahead if plan.config else 0.0
-    return [(p.x + ahead * math.cos(p.yaw) - off * math.sin(p.yaw),
-             p.y + ahead * math.sin(p.yaw) + off * math.cos(p.yaw)) for p in plan.poses[start:end + 1]]
-
-
-def swept_area(plan: CoveragePlan, mower_width: float, simplify: float = 0.0):
-    """What the blade covers along the whole path (a disk of mower_width), for checks and plots. simplify: the
-    blade's way that much simpler first (quicker, for comparing plans)."""
-    ends = list(plan.section_starts[1:]) + [len(plan.poses)]
-    lines = [LineString(blade_points(plan, a, b - 1)) for a, b in zip(plan.section_starts, ends) if b - a >= 2]
-    if simplify > 0:
-        lines = [line.simplify(simplify) for line in lines]
-    if not lines:
-        return Polygon()
-    # (GEOS takes a lot longer for one long way crossing itself all over than for pieces of it and their union. Cut
-    # in the middle of a piece at least the width long, the two ends' round caps lie in the strip of the other half:
-    # the union is the same area)
-    return union(LineString(piece).buffer(0.5 * mower_width, 4) for line in lines
-                 for piece in _pieces(list(line.coords), SWEPT_PIECE, mower_width))
-
-
+        robot_space=drive_space, lane_region=lane_region, remaining=remaining, angles=[a for a, _ in passes] or [angle],
+        transit_space=transit_space, body_space=space.body_space, config=cfg, section_starts=section_starts,
+        levels=levels, narrow=narrow, cells=passes, origins=route.origins)
