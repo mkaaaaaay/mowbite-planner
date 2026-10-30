@@ -16,7 +16,7 @@ from .mathutil import angle_diff, normalize_angle
 
 try:  # shapely 2 tests points without making a geometry of each and bodies all at once, much quicker
     import numpy
-    from shapely import (contains_xy, convex_hull, covers, distance, get_coordinates, multipoints, points, polygons,
+    from shapely import (contains_xy, convex_hull, covers, distance, get_coordinates, linestrings, points, polygons,
                          segmentize)
     contains_points = None
 except ImportError:  # shapely 1.7 (ROS Noetic)
@@ -43,6 +43,9 @@ OUT_ARC = 0.01
 OUT_NEAR = 0.15
 # fits_turn's answers kept (the same turn again, to the bit: the same answer), cleared at this many
 TURNS_KEPT = 100000
+# fit's and fits_pose's answers kept for poses the same way (most poses are asked about again and again: the ways
+# tried round a place share most of them), cleared at this many
+POSES_KEPT = 100000
 # poses_fit and all_fit: every SCOUT-th pose (of those not turning on the spot) looked at first, one of them out and
 # the whole is: most ways that don't fit are found so with a part of the work, the answer the same
 SCOUT = 4
@@ -135,8 +138,11 @@ class Footprint:
         self.spin_margin = spin_margin
         self.turning = Footprint(space.buffer(-spin_margin, QUAD_SEGS), self.corners, back=SPIN_BACK) \
             if spin_margin > 0 else self
+        self._xy = numpy.array(self.corners).T if contains_xy is not None or contains_points is not None else None
         self._edge = None  # (space's boundary, see out_by)
         self._turns_kept: dict = {}
+        self._fit_kept: dict = {}
+        self._pose_kept: dict = {}
 
     def body(self, x: float, y: float, yaw: float) -> Polygon:
         c, s = math.cos(yaw), math.sin(yaw)
@@ -159,7 +165,7 @@ class Footprint:
             return [(x - k * dx + math.cos(h) * fx - math.sin(h) * fy, y - k * dy + math.sin(h) * fx + math.cos(h) * fy)
                     for h in yaws for k in (0, 1) for fx, fy in self.corners]
         h = numpy.array(yaws, float)[:, None]
-        (fx, fy), c, s = numpy.array(self.corners).T, numpy.cos(h), numpy.sin(h)
+        (fx, fy), c, s = self._xy, numpy.cos(h), numpy.sin(h)
         corners = numpy.stack([x + c * fx - s * fy, y + s * fx + c * fy], -1)
         return numpy.concatenate([corners, corners - (dx, dy)], 1).reshape(-1, 2)
 
@@ -169,14 +175,19 @@ class Footprint:
         n = 4 * len(self.corners)  # (a turn's: facing a and b, at (x, y) and back)
         if contains_xy is None:
             return [MultiPoint(corners[n * k:n * k + n]).convex_hull for k in range(len(turns))]
-        return list(convex_hull(multipoints(corners.reshape(len(turns), n, 2))))
+        # (GEOS takes the points of a line in the same order as those of a multipoint, the same hull, much quicker)
+        return list(convex_hull(linestrings(corners.reshape(len(turns), n, 2))))
 
     def _turned(self, x: float, y: float, turns: Sequence, dx: float, dy: float) -> bool:
         """Whether the body fits turning from a to b of each (a, b) of turns, anywhere from (x, y) to (dx, dy) back:
-        the hulls of it facing a and b at both ends."""
-        hulls = self._hulls(x, y, turns, dx, dy)
-        return bool(covers(self.space, hulls).all()) if contains_xy is not None else \
-            all(self._space.covers(hull) for hull in hulls)
+        the hulls of it facing a and b at both ends. (With shapely 2 the first turn's on its own first: where the body
+        sticks out turning, mostly already there.)"""
+        if contains_xy is None:
+            return all(self._space.covers(hull) for hull in self._hulls(x, y, turns, dx, dy))
+        corners = self._corners_at(x, y, [h for turn in turns for h in turn], dx, dy)
+        corners = corners.reshape(len(turns), 4 * len(self.corners), 2)
+        return all(bool(covers(self.space, convex_hull(linestrings(part))).all()) for part in (corners[:1], corners[1:])
+                   if len(part))
 
     def _safe_at(self, x: float, y: float) -> bool:
         return self._safe is not None and self._safe.has(x, y)
@@ -188,35 +199,56 @@ class Footprint:
         return self._halves.has(x + c * front, y + s * front) and self._halves.has(x + c * rear, y + s * rear)
 
     def fits_pose(self, x: float, y: float, yaw: float) -> bool:
-        return self._safe_at(x, y) or self._halves_at(x, y, yaw) or self._space.covers(self.body(x, y, yaw))
+        key = (x, y, yaw)
+        got = self._pose_kept.get(key)
+        if got is None:
+            if len(self._pose_kept) >= POSES_KEPT:
+                self._pose_kept.clear()
+            got = self._pose_kept[key] = self._safe_at(x, y) or self._halves_at(x, y, yaw) or \
+                self._space.covers(self.body(x, y, yaw))
+        return got
 
     def fit(self, poses: Sequence, on_turn: OnTurn = False) -> List[bool]:
         """fits_pose for each of the poses (with .x, .y, .yaw), on a turn between lanes (on_turn) spin_margin further
         off the edges. With shapely 2 the bodies of those not in a zone all at once (with shapely 1.7 the points in the
         zones, where numpy is there)."""
-        turn = self._on_turn(poses, on_turn)
-        if any(turn) and self.turning is not self:
-            on = iter(self.turning.fit([p for p, t in zip(poses, turn) if t]))
-            rest = iter(self.fit([p for p, t in zip(poses, turn) if not t]))
-            return [next(on) if t else next(rest) for t in turn]
+        if on_turn is not False:
+            turn = self._on_turn(poses, on_turn)
+            if any(turn) and self.turning is not self:
+                on = iter(self.turning.fit([p for p, t in zip(poses, turn) if t]))
+                rest = iter(self.fit([p for p, t in zip(poses, turn) if not t]))
+                return [next(on) if t else next(rest) for t in turn]
+        keys, kept = [(p.x, p.y, p.yaw) for p in poses], self._fit_kept
+        fit = list(map(kept.get, keys))
+        if None in fit:
+            new = list(dict.fromkeys(k for k, f in zip(keys, fit) if f is None))
+            got = dict(zip(new, self._fit(new)))
+            if len(kept) + len(got) > POSES_KEPT:
+                kept.clear()
+            kept.update(got)
+            fit = [got[k] if f is None else f for k, f in zip(keys, fit)]
+        return fit
+
+    def _fit(self, poses: List[Tuple[float, float, float]]) -> List[bool]:
+        # (fit of each (x, y, yaw), none twice)
         if contains_xy is not None:
-            fit = [self._safe_at(p.x, p.y) or self._halves_at(p.x, p.y, p.yaw) for p in poses]
+            fit = [self._safe_at(x, y) or self._halves_at(x, y, yaw) for x, y, yaw in poses]
             rest = [p for p, f in zip(poses, fit) if not f]
             if rest:
-                x, y, yaw = (column[:, None] for column in numpy.array([(p.x, p.y, p.yaw) for p in rest]).T)
-                (dx, dy), c, s = numpy.array(self.corners).T, numpy.cos(yaw), numpy.sin(yaw)
+                x, y, yaw = (column[:, None] for column in numpy.array(rest).T)
+                (dx, dy), c, s = self._xy, numpy.cos(yaw), numpy.sin(yaw)
                 corners = numpy.stack([x + c * dx - s * dy, y + s * dx + c * dy], -1)
                 ok = iter(covers(self.space, polygons(corners)).tolist())  # (prep() above prepared space)
                 fit = [f or next(ok) for f in fit]
             return fit
-        if contains_points is None or not poses:
-            return [self.fits_pose(p.x, p.y, p.yaw) for p in poses]
-        x, y, yaw = numpy.array([(p.x, p.y, p.yaw) for p in poses]).T
+        if contains_points is None:
+            return [self.fits_pose(*p) for p in poses]
+        x, y, yaw = numpy.array(poses).T
         fit = self._safe.inside(x, y) if self._safe is not None else numpy.zeros(len(x), bool)
         if self._halves is not None:
             (front, rear), c, s = self._middles, numpy.cos(yaw), numpy.sin(yaw)
             fit |= self._halves.inside(x + c * front, y + s * front) & self._halves.inside(x + c * rear, y + s * rear)
-        return [f or self._space.covers(self.body(p.x, p.y, p.yaw)) for f, p in zip(fit.tolist(), poses)]
+        return [f or self._space.covers(self.body(*p)) for f, p in zip(fit.tolist(), poses)]
 
     def fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
         """Turning on the spot here from yaw0 to yaw1, the shorter way round (body poses TURN_STEP apart), both ways
@@ -294,7 +326,7 @@ class Footprint:
             # (the ends of the edges the points lie on, whose: the bodies not turning all at once)
             still = [k for k, turning in enumerate(spin) if not turning]
             x, y, h = numpy.array([(turns[k][1].x, turns[k][1].y, turns[k][1].yaw) for k in still]).reshape(-1, 3).T
-            (fx, fy), cos, sin = numpy.array(self.corners).T, numpy.cos(h)[:, None], numpy.sin(h)[:, None]
+            (fx, fy), cos, sin = self._xy, numpy.cos(h)[:, None], numpy.sin(h)[:, None]
             c = numpy.stack([x[:, None] + cos * fx - sin * fy, y[:, None] + sin * fx + cos * fy], -1)
             m = len(self.corners)
             ends, owner = [(c.reshape(-1, 2), numpy.roll(c, -1, 1).reshape(-1, 2))], [numpy.repeat(still, m)]
@@ -309,10 +341,17 @@ class Footprint:
                     ends.append((c[:-2 * m], c[2 * m:]))
                 owner += [numpy.full(len(e[0]), k) for e in ends[len(owner):]]
             a, b = (numpy.concatenate([e[i] for e in ends]).reshape(-1, 2) for i in (0, 1))
+            owner = numpy.concatenate(owner).astype(int)
+            if around is not None and numpy.isfinite(a).all() and numpy.isfinite(b).all():
+                # (the edges all further than r from there left out first: none of their points would be kept)
+                u, w = b - a, numpy.array(around[:2], float) - a
+                t = numpy.clip((u * w).sum(1) / numpy.maximum((u * u).sum(1), 1e-300), 0.0, 1.0)
+                keep = numpy.hypot(*(w - t[:, None] * u).T) <= around[2] + 1e-9
+                a, b, owner = a[keep], b[keep], owner[keep]
             n = numpy.maximum(1, numpy.ceil(numpy.hypot(*(b - a).T) / step)).astype(int)
             j = numpy.repeat(numpy.arange(len(a)), n)
             xy = a[j] + ((numpy.arange(n.sum()) - numpy.repeat(numpy.cumsum(n) - n, n)) / n[j])[:, None] * (b - a)[j]
-            owner = numpy.concatenate(owner).astype(int)[j]
+            owner = owner[j]
             if around is not None:
                 near = numpy.hypot(xy[:, 0] - around[0], xy[:, 1] - around[1]) <= around[2]
                 xy, owner = xy[near], owner[near]
@@ -344,9 +383,16 @@ class Footprint:
                     p.x, p.y, list(zip(t, t[1:])), fp.back * math.cos(before.yaw), fp.back * math.sin(before.yaw))]) \
                     if turning else self.body(p.x, p.y, p.yaw)
                 for piece in pieces(shape.difference(fp.space)):
-                    for q in [polylabel(piece, OUT_STEP)] + [Point(xy) for xy in piece.exterior.coords]:
-                        if fp.space.distance(q) > got[k][0]:
-                            got[k] = (round(fp.space.distance(q), 3), (q.x, q.y))
+                    if contains_xy is None:
+                        for q in [polylabel(piece, OUT_STEP)] + [Point(xy) for xy in piece.exterior.coords]:
+                            if fp.space.distance(q) > got[k][0]:
+                                got[k] = (round(fp.space.distance(q), 3), (q.x, q.y))
+                        continue
+                    xy = numpy.concatenate([get_coordinates(polylabel(piece, OUT_STEP)),
+                                            get_coordinates(piece.exterior)])
+                    for d, q in zip(distance(fp.space, points(xy)).tolist(), xy.tolist()):  # (all at once, the same)
+                        if d > got[k][0]:
+                            got[k] = (round(d, 3), (q[0], q[1]))
         return got
 
     def poses_fit(self, poses: Sequence, on_turn: OnTurn = False) -> bool:
@@ -359,7 +405,10 @@ class Footprint:
         return next(self._bad(poses, True, turn), None) is None
 
     def all_fit(self, poses: Sequence) -> bool:
-        """all(fit(poses)), every SCOUT-th looked at first."""
-        if len(poses) > 2 * SCOUT and not all(self.fit(poses[SCOUT // 2::SCOUT])):
-            return False
-        return all(self.fit(poses))
+        """all(fit(poses)), every SCOUT-th looked at first (not kept: these are seldom asked about again)."""
+        poses = [(p.x, p.y, p.yaw) for p in poses]
+        if len(poses) > 2 * SCOUT:
+            if not all(self._fit(poses[SCOUT // 2::SCOUT])):
+                return False
+            poses = [p for k, p in enumerate(poses) if k % SCOUT != SCOUT // 2]
+        return all(self._fit(poses)) if poses else True
