@@ -11,12 +11,13 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 from shapely.prepared import prep
 
-from .config import (_FITTED, _KEPT_LOCK, EARLIER_LEFT, FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, SMOOTH_RADII, TRANSIT,
-                     TURN, XY, Lane, PathSegment, PlannerConfig, SegmentInfo, _keep)
+from .config import (_FITTED, _KEPT_LOCK, FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, SMOOTH_RADII, TRANSIT, TURN, XY,
+                     Lane, PathSegment, PlannerConfig, SegmentInfo, _keep)
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, polygons, subtract, union
 from .maneuvers import CORNER_ANGLE, dubins, join, path_length, same_position, sample_arc, sample_straight
 from .mathutil import Pose2D, angle_diff, normalize_angle
+from .objective import EARLIER_LEFT
 from .transit import TransitPlanner
 
 try:  # (the leftovers' passes: shapely 2 brings it)
@@ -26,7 +27,7 @@ except ImportError:
 
 
 class BodyRoute(Protocol):
-    """What the body's repairs use of a route (route._Route has it)."""
+    """What the body's repairs use of a route (rings_old._Route has it)."""
     cfg: PlannerConfig
     footprint: Footprint
     step: float  # cfg.waypoint_spacing

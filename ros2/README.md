@@ -12,7 +12,7 @@ It doesn't need OpenMower or the MowBite app, but it fits OpenMower: besides its
 | Package | What's in it |
 | --- | --- |
 | `mowbite_planner_interfaces` | `PlanCoverage.srv`, OpenMower's `PlanPath.srv` and `Path.msg` (ament_cmake, a `.srv` needs it) |
-| `mowbite_planner` | the planner (`planner.py` with `config.py`, `lanes.py`, `route.py`, `bodyfit.py`, `maneuvers.py`, `transit.py`, `footprint.py`; only shapely), the node, the MQTT service, `tools/plot_coverage.py`, tests |
+| `mowbite_planner` | the planner (`planner.py` with `config.py`, `objective.py`, `rings_old.py`, `lanes.py`, `swaths.py`, `connect.py`, `order.py`, `assemble.py`, `bodyfit.py`, `maneuvers.py`, `transit.py`, `footprint.py`; only shapely), the node, the MQTT service, `tools/plot_coverage.py`, tests |
 
 The planner itself imports nothing from ROS, so it runs and plots on any PC with shapely.
 

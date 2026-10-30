@@ -67,13 +67,8 @@ MAX_BODY = 5.0
 # segments of a rounded corner of the body (robot_front_width, robot_rear_width): a quarter circle
 BODY_ROUND_SEGS = 6
 # m, where the only turn between two lanes is on the spot (or a drive), they end this much earlier at a time for a
-# rounded one (_Route.round_earlier), m2 of what they leave its blade may not mow: EARLIER_LEFT, a few cm2
-# (ROUND_LEFT) where it would else loop out round into the next lane (about 2 m; mkay 29.10.: fewer loops, less
-# driving, hardly more left), not where it would turn on the spot; EARLIER_LEFT also what a lane or way starting
-# or ending elsewhere for the body may leave
+# rounded one (connect.round_earlier), what they may leave unmowed for it: objective's EARLIER_LEFT, ROUND_LEFT
 ROUND_STEP = 0.05
-ROUND_LEFT = 5e-3
-EARLIER_LEFT = 1e-3
 # m, with the body checked: where the path goes another way at a place and leaves LOOP_LEFT m or more of a loop out
 # there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in
 # instead: a step of LOOP_IN[0] at a time, LOOP_IN[1] at most (the next loop mows what's further in), getting there and
@@ -107,8 +102,6 @@ LOOP_ON = 0.5
 # front swinging out FIT_EASE_OFF m at most)
 FIT_EASE = 1.5
 FIT_EASE_OFF = 0.01
-# m, lane_overlap_limit: how much further out than the lanes reach a turn between them may get (a sampled arc)
-TURN_REACH = 0.02
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
@@ -177,7 +170,7 @@ class PlannerConfig:
     # where none fits the drives turn on the spot instead (with the body checked a drive's corner gets a tighter arc
     # where that fits, see _round_corners), a turn between lanes is rounded as wide as fits (at a slant where the lanes
     # end at one, the lanes ending a little earlier for it where that's what it takes, else a loop into the next lane,
-    # see _Route.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
+    # see connect.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
     # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane). 0 with the body
     # checked: on the spot at the lanes' ends, lane after lane (turn_on_spot, lane_order snake), every other curve
     # ZERO_TURN wide (all on the spot, a long front by the edges wouldn't fit: whole loops left out)
@@ -230,9 +223,7 @@ class PlannerConfig:
     transit_clearance: float = 0.15
     simplify_tolerance: float = 0.01  # m, the outline and obstacles are simplified this much first
     min_lane_length: float = 0.10  # m, shorter pieces of a lane are left out
-    # m, a row split by an obstacle with at most this much between its pieces (a tree, a bed) becomes one lane
-    # that bends around it, if the bend stays within bend_max_offset of the row's line: fewer cells, the
-    # zigzag goes on past the obstacle. 0: the row is split
+    # taken and checked, but change nothing since planner 2 (rows split by an obstacle are cells of their own)
     bend_max_gap: float = 0.0
     bend_max_offset: float = 0.5  # m
     # m, drives between the parts of the plan keep this far off the edges (a wall, a bed) where that doesn't
@@ -242,11 +233,7 @@ class PlannerConfig:
     transit_edge_cost: float = 2.0
     # lanes reach this many perimeter loops further out (OpenMower's outline_overlap_count)
     lane_overlap_passes: int = 0
-    # the mower gets no further out on the lanes than they reach. The turns between them stay in there, or where
-    # turning on the spot would take it (_Route.in_reach): a rounded one where it fits, with the lanes ending earlier
-    # where the loops mowed, else on the spot; one that takes its room only where neither fits. And a lane starts
-    # blade_ahead later where the loops mowed that (_Route.start_in_reach). Off: the turns take the room there is in
-    # the headland
+    # taken and checked, but changes nothing since planner 2 (the turns take the room there is in the headland)
     lane_overlap_limit: bool = False
     # leave parts out (OpenMower's skip_area_outline, skip_obstacle_outlines, skip_fill), the rest is
     # planned as if they were there
