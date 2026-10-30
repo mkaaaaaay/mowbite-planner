@@ -1,0 +1,12 @@
+torture/0@rect
+torture/1@rect
+torture/2@rect
+torture/3@rect
+torture/0@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=0.0
+torture/0@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=0.645772
+torture/0@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=0.785398
+torture/0@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=1.570796
+torture/0@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=2.216568
+torture/1@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=0.0
+torture/2@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1+angle=0.645772
+torture/3@rect+mower_width=0.22+lane_spacing_mode=fixed+overlap=0+perimeter_passes=2+obstacle_passes=1
