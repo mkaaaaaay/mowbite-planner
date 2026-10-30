@@ -7,7 +7,8 @@ FROM ${OPENMOWER_IMAGE}
 
 USER root
 # shapely 2 (the newest for Python 3.8, its own GEOS), numpy comes with the image
-RUN python3 -m pip install --no-cache-dir shapely==2.0.7
+# paho-mqtt: the MowBite Updater's hold (mowbite/hold) on the mower's broker, 2.1.0 still for Python 3.8
+RUN python3 -m pip install --no-cache-dir shapely==2.0.7 paho-mqtt==2.1.0
 COPY ros1/mowbite_planner_ros1 /opt/mowbite/ros1/mowbite_planner_ros1
 COPY ros2/mowbite_planner/mowbite_planner /opt/mowbite/ros2/mowbite_planner
 COPY sim/mowbite_sim /opt/mowbite/sim/mowbite_sim

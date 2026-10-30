@@ -240,6 +240,8 @@ def planner():
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups'), ignore_errors=True)
     node_module.PLAN_AHEAD_DELAY = 1e6
+    # no mowbite/hold read (no broker here: it would hold leftovers_auto's mower in), test_hold does that itself
+    node_module.HOLD = False
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
     node_module.TRACK_WAIT = 0.0
     return node_module.MowbitePlannerRos1()
@@ -1901,3 +1903,98 @@ def test_progress_of_a_failed_planning(planner, monkeypatch):
     assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'no lanes fit'
     last = progress_messages()[-1]
     assert last['running'] is False and last['error'] == 'no lanes fit' and last['stage'] != 'done'
+
+
+class HoldClient:
+    """paho-mqtt's client as HoldReader uses it, its callbacks called by the test."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return lambda *a: self.calls.append((name,) + a)
+
+
+def code(failure=False):
+    return types.SimpleNamespace(is_failure=failure)
+
+
+def test_hold():
+    """mowbite/hold: held while the MowBite Updater's hold is still to end, at most 30 minutes away (a later one is
+    none of its own); held too when it can't tell: not connected, no answer yet after subscribing, a payload it can't
+    read. None, an empty one or one that ended: not held."""
+    client = HoldClient()
+    hold = node_module.HoldReader(client)
+    assert ('connect_async', '127.0.0.1', 1883) in client.calls and ('loop_start',) in client.calls
+    now = time.time()
+    assert hold.held(now) == 'not connected yet'
+    hold.on_connect(client, None, {}, code(True))
+    assert hold.held(now).startswith('connection refused')
+    hold.on_connect(client, None, {}, code())
+    assert client.calls[-1] == ('subscribe', 'mowbite/hold', 1)
+    assert hold.held(now) == 'not subscribed yet'
+    hold.on_subscribe(client, None, 1, [code(True)])
+    assert hold.held(now).startswith('subscription refused')
+    hold.on_subscribe(client, None, 1, [code()])
+    # the retained hold comes right after the subscription: none within HOLD_SETTLE s, there is none
+    now = time.time()
+    assert hold.held(now) == 'no answer from the broker yet'
+    assert hold.held(now + node_module.HOLD_SETTLE) == ''
+
+    def payload(data):
+        hold.on_message(client, None, types.SimpleNamespace(payload=data.encode()))
+        return hold.held(now)
+
+    assert payload('{"until": %d}' % (now + 600)).startswith('held by the MowBite Updater until ')
+    assert payload('{"until": %.1f}' % (now + 1799)) != ''
+    assert payload('{"until": %d}' % (now - 1)) == ''  # ended
+    assert payload('{"until": %d}' % (now + 1801)) == ''  # too far off
+    assert payload('') == ''  # taken away
+    for broken in ('{"until": "%d"}' % (now + 600), '{"until": true}', '{"to": 1}', '[1]', 'off', '{"until": NaN}',
+                   '\xff'):
+        assert payload(broken).startswith('unreadable mowbite/hold'), broken
+    payload('{"until": %d}' % (now + 600))
+    hold.on_disconnect(client, None, {}, code(True))
+    assert hold.held(now) == 'no connection to 127.0.0.1:1883'
+    # connected again: what it had before doesn't count, the retained hold comes again
+    hold.on_connect(client, None, {}, code())
+    hold.on_subscribe(client, None, 2, [code()])
+    assert hold.held(time.time() + node_module.HOLD_SETTLE) == ''
+
+
+def test_hold_without_paho(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'paho', None)
+    rospy.log.clear()
+    assert node_module.HoldReader().held() == 'no paho-mqtt'
+    assert any(level == 'error' and 'paho-mqtt' in line for level, line in rospy.log)
+
+
+def test_leftovers_auto_held(planner, monkeypatch):
+    """leftovers_auto sends the mower out only once the MowBite Updater's hold ended, not at all while it lasts
+    longer than the leftovers stay armed."""
+    monkeypatch.setattr(node_module, 'READY_POLL', 0.01)
+    rospy.messages['/mower_logic/current_state'] = node_module.HighLevelStatus(state_name='IDLE', is_charging=True)
+    client = HoldClient()
+    planner.hold = node_module.HoldReader(client)
+    planner.hold.on_connect(client, None, {}, code())
+    planner.hold.on_subscribe(client, None, 1, [code()])
+    planner.hold.subscribed -= node_module.HOLD_SETTLE
+
+    def run(hold_s, armed_s):
+        planner.hold.on_message(client, None, types.SimpleNamespace(
+            payload=json.dumps({'until': time.time() + hold_s}).encode()))
+        armed = {'until': time.time() + armed_s, 'served': False,
+                 'plans': {'a': types.SimpleNamespace(stats={'leftovers': {'area': 1.0}})}}
+        monkeypatch.setattr(planner, 'rpc_leftovers', lambda params: setattr(planner, 'armed', armed))
+        rospy.log.clear()
+        rospy.published.clear()
+        planner.leftovers_after('job')
+        return [m.data for topic, m in rospy.published if topic == '/xbot/action']
+
+    assert run(0.3, 5.0) == ['mower_logic:idle/start_mowing']
+    assert any('not sent out for the leftovers yet, held: held by the MowBite Updater' in line
+               for _, line in rospy.log)
+    assert run(600.0, 0.3) == []
+    assert any('not sent out for the leftovers, held (held by the MowBite Updater' in line for _, line in rospy.log)
+    assert run(-1.0, 5.0) == ['mower_logic:idle/start_mowing']
+    assert not any('held' in line for _, line in rospy.log)

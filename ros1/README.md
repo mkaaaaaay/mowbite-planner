@@ -124,7 +124,8 @@ A few worth knowing:
   2: with 0 or 1 about half of the turns are on the spot then.
 - `leftovers_auto`: after every finished mow the planner looks at what it left (like `planner.leftovers`). If the
   passes over that mow 0.3 m² or more, it sends the mower out again once it's idle in the dock. Not in an emergency
-  and, with OpenMower's `rain_mode` on, not in the rain. Once per mow.
+  and, with OpenMower's `rain_mode` on, not in the rain. Once per mow. Not while the MowBite Updater holds the starts
+  (`mowbite/hold` on the mower's own MQTT broker), nor when the planner can't reach that broker.
 - Body: `robot_width`, `robot_front`, `robot_rear` (m from the middle of the drive wheels) or `robot_outline`
   (`[[x, y], ...]`, x ahead, y left). Without them (or with only a part) the body isn't checked: every plan warns of
   it, in its `warnings` and the log. Blade: `blade_ahead`, `blade_offset`.

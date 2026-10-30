@@ -108,7 +108,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
 
 leftovers_auto: after every finished mow planner.leftovers by itself, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2
 at least the mower is sent out again for them (the start_mowing action), once it's idle in its dock with no emergency
-and no rain (rain only counts with /mower_logic/rain_mode on). Once a mow: the leftovers' job starts no other.
+and no rain (rain only counts with /mower_logic/rain_mode on). Once a mow: the leftovers' job starts no other. Not
+while the MowBite Updater holds the starts (mowbite/hold on the mower's own broker 127.0.0.1:1883, see HoldReader),
+nor when the node can't tell whether it does (the parameter hold false: never held).
 
 PLAN_AHEAD_DELAY s after the map or the settings last changed every active mowing area is planned ahead like
 planner.plan plans it, so the app's preview and the next mow find their plan at once.
@@ -254,6 +256,14 @@ ACTION_TOPIC = '/xbot/action'
 STATE_TOPIC = '/mower_logic/current_state'
 STATUS_TOPIC = '/ll/mower_status'
 READY_POLL = 2.0
+# leftovers_auto sends the mower out only while the MowBite Updater doesn't hold the starts (HoldReader, the parameter
+# hold): its hold on the mower's own broker (OpenMower's, never with a prefix there), the latest end it can be (later
+# is none of its own, like scheduler.sh's), s the retained hold may take to come after the subscription
+HOLD = True
+HOLD_BROKER = ('127.0.0.1', 1883)
+HOLD_TOPIC = 'mowbite/hold'
+HOLD_MAX = 1800.0
+HOLD_SETTLE = 2.0
 # s a finished mow's track is waited for before it's read: xbot_monitoring writes it every 30 s and the rest when the
 # job ends (mower_logic's next STATE event of another job or none: idle), then TRACK_SETTLE s for that to be on disk
 TRACK_WAIT = 900.0
@@ -558,6 +568,81 @@ class WebPage:
         self.send(req, 200, out.encode(), 'application/json')
 
 
+class HoldReader:
+    """The MowBite Updater's hold of the starts (HOLD_TOPIC, retained, {"until": unix s}, none or empty: no hold) while
+    it restarts OpenMower or the planner. held() says why the mower may not be sent out: a hold whose end is still to
+    come and at most HOLD_MAX s away, and when it can't tell (no paho-mqtt, no connection to the broker, subscribed
+    less than HOLD_SETTLE s ago, a payload it can't read). paho-mqtt connects again by itself."""
+
+    def __init__(self, client=None):
+        self.lock = threading.Lock()
+        self.why = 'not connected yet'  # held without a hold: why, '' when subscribed
+        self.subscribed = 0.0  # when the broker took the subscription
+        self.payload = None  # of the last message since, None: none
+        if client is None:
+            try:
+                import paho.mqtt.client as mqtt
+            except ImportError:
+                self.why = 'no paho-mqtt'
+                rospy.logerr('MowBite Planner: no paho-mqtt, leftovers_auto never sends the mower out')
+                return
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.client = client
+        client.on_connect = self.on_connect
+        client.on_disconnect = self.on_disconnect
+        client.on_subscribe = self.on_subscribe
+        client.on_message = self.on_message
+        client.reconnect_delay_set(1, 10)
+        client.connect_async(*HOLD_BROKER)
+        client.loop_start()
+
+    def on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code.is_failure:
+            with self.lock:
+                self.why = 'connection refused (%s)' % reason_code
+            return
+        with self.lock:
+            self.why = 'not subscribed yet'
+            self.payload = None
+        client.subscribe(HOLD_TOPIC, 1)
+
+    def on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        with self.lock:
+            self.why = 'no connection to %s:%d' % HOLD_BROKER
+
+    def on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        with self.lock:
+            if any(c.is_failure for c in reason_codes):
+                self.why = 'subscription refused (%s)' % ', '.join(str(c) for c in reason_codes)
+            else:
+                self.why, self.subscribed = '', time.time()
+
+    def on_message(self, client, userdata, msg):
+        with self.lock:
+            self.payload = bytes(msg.payload)
+
+    def held(self, now=None):
+        """Why the mower may not be sent out now, '' when it may."""
+        now = time.time() if now is None else now
+        with self.lock:
+            why, subscribed, payload = self.why, self.subscribed, self.payload
+        if why:
+            return why
+        if payload is None:
+            return 'no answer from the broker yet' if now < subscribed + HOLD_SETTLE else ''
+        if not payload:
+            return ''
+        try:
+            until = json.loads(payload.decode())['until']
+            if isinstance(until, bool) or not isinstance(until, (int, float)) or not math.isfinite(until):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):  # (UnicodeDecodeError is a ValueError)
+            return 'unreadable %s: %r' % (HOLD_TOPIC, payload[:100])
+        if now < until <= now + HOLD_MAX:
+            return 'held by the MowBite Updater until %s' % time.strftime('%H:%M:%S', time.localtime(until))
+        return ''
+
+
 class MowbitePlannerRos1:
     def __init__(self):
         # (after rospy.init_node: it sets up rosout's handlers anew)
@@ -632,6 +717,7 @@ class MowbitePlannerRos1:
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
         self.action = rospy.Publisher(ACTION_TOPIC, String, queue_size=1)
+        self.hold = HoldReader() if rospy.get_param('~hold', HOLD) else None
         self.classic_name = rospy.get_param('~classic_service', CLASSIC_SERVICE)
         self.classic = None
         self.classic_lock = threading.Lock()
@@ -1349,13 +1435,20 @@ class MowbitePlannerRos1:
             rospy.loginfo('MowBite Planner: %.2f m2 of leftovers to mow, under %.2f: the mower stays in', area,
                           LEFTOVERS_AUTO_MIN)
             return
+        held = ''
         while self.armed is armed and not armed['served'] and time.time() < armed['until']:
             if self.mower_ready():
-                self.action.publish(String(data=START_ACTION))
-                rospy.loginfo('MowBite Planner: the mower sent out for %.2f m2 of leftovers', area)
-                return
+                why = self.hold.held() if self.hold else ''
+                if not why:
+                    self.action.publish(String(data=START_ACTION))
+                    rospy.loginfo('MowBite Planner: the mower sent out for %.2f m2 of leftovers', area)
+                    return
+                if not held:
+                    rospy.loginfo('MowBite Planner: the mower not sent out for the leftovers yet, held: %s', why)
+                held = why
             time.sleep(READY_POLL)
-        rospy.loginfo('MowBite Planner: the mower not sent out for the leftovers, not ready while they were armed')
+        rospy.loginfo('MowBite Planner: the mower not sent out for the leftovers, %s while they were armed',
+                      'held (%s)' % held if held else 'not ready')
 
     @staticmethod
     def mower_ready():
