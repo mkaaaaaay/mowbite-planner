@@ -1,22 +1,70 @@
-"""The order things are mowed in: the cells of a set of lanes, the lanes of a cell."""
+"""The order things are mowed in: groups (cells) each done one of several ways, a generalised travelling salesman
+from a start to an end; exactly up to EXACT groups, else the cheapest next each time and moves of runs of them
+(best_order); the drives between guessed (Guess), what each guess costs in the ranking's seconds."""
 
 import math
-from typing import Iterator, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .config import ORDER_BUDGET, XY, Lane, PlannerConfig
-from .mathutil import angle_diff
+from .config import ORDER_BUDGET, XY, PlannerConfig
+from .mathutil import Pose2D, angle_diff
+from .objective import SPIN_MIN, Cost
+from .report import FTC_SPEEDS
+from .transit import TransitPlanner
 
-# a way a cell is mowed: its lanes in order, the first one's direction (1: +x), where it starts and ends
-Option = Tuple[List[Lane], int, XY, XY]
+# groups ordered exactly (dynamic programming over the subsets) up to this many
+EXACT = 8
+# a drive the transit space has no way for is guessed this many times as long as straight there
+NO_WAY = 3.0
+
+Link = Callable[[int, int, int, int], float]
+
+
+def plan_order(start: List[List[float]], link: Link, end: List[List[float]], improve: bool = True,
+               budget: int = ORDER_BUDGET) -> List[Tuple[int, int]]:
+    """[(group, way)] in order, from start[i][a] (beginning with group i done way a) by link(i, a, j, b) to end[i][a]
+    (finishing with it), the lowest total. improve False: the cheapest next each time (route_order nearest)."""
+    if improve and len(start) <= EXACT:
+        return exact_order(start, link, end)
+    # (the group that ends closest to the end last, from the start)
+    last = min(range(len(start)), key=lambda i: (min(end[i]), i)) if len(start) > 1 and any(map(any, end)) else None
+    return best_order(start, link, end, budget=budget if improve else 1, last=last)
+
+
+def exact_order(start: List[List[float]], link: Link, end: List[List[float]]) -> List[Tuple[int, int]]:
+    """The cheapest order of all, by dynamic programming over the groups mowed so far (2^n of them)."""
+    n = len(start)
+    if n == 0:
+        return []
+    states = [(i, a) for i in range(n) for a in range(len(start[i]))]
+    links = {(s, t): link(s[0], s[1], t[0], t[1]) for s in states for t in states if s[0] != t[0]}
+    best: Dict[Tuple[int, int, int], Tuple[float, Optional[Tuple[int, int, int]]]] = {
+        (1 << i, i, a): (start[i][a], None) for i, a in states}
+    for mask in range(1, 1 << n):
+        for i, a in states:
+            here = best.get((mask, i, a))
+            if here is None:
+                continue
+            for j, b in states:
+                if mask >> j & 1:
+                    continue
+                key, c = (mask | 1 << j, j, b), here[0] + links[(i, a), (j, b)]
+                if key not in best or c < best[key][0] - 1e-9:
+                    best[key] = (c, (mask, i, a))
+    full = (1 << n) - 1
+    key = min(((full, i, a) for i, a in states if (full, i, a) in best),
+              key=lambda k: (best[k][0] + end[k[1]][k[2]], k[1], k[2]))
+    out = []
+    while key is not None:
+        out.append((key[1], key[2]))
+        key = best[key][1]
+    return out[::-1]
 
 
 def best_order(start: List[List[float]], link, end: List[List[float]],
-               first: Optional[List[int]] = None, budget: int = ORDER_BUDGET) -> List[Tuple[int, int]]:
-    """The order of n items (cells), each done one of several ways (options), with the lowest total cost:
-    start[i][a] to begin with item i done way a, link(i, a, j, b) from i done way a to j done way b, end[i][a]
-    to finish with it. Starts from `first` (default: the cheapest next one each time), then moves runs of up to
-    three items elsewhere and reverses runs while that helps, at most `budget` orders tried. For every order
-    the best ways follow exactly (dynamic programming). Returns [(item, way)] in order."""
+               first: Optional[List[int]] = None, budget: int = ORDER_BUDGET,
+               last: Optional[int] = None) -> List[Tuple[int, int]]:
+    """Like plan_order: from `first` (default: the cheapest next each time, item last at the end), runs of up to three
+    moved and runs reversed while that helps, at most `budget` orders tried, the ways exactly (dynamic programming)."""
     n = len(start)
     if n == 0:
         return []
@@ -43,7 +91,7 @@ def best_order(start: List[List[float]], link, end: List[List[float]],
             ways.append(came[ways[-1]])
         return total, ways[::-1]
 
-    order = list(first) if first is not None else _greedy(start, links, k)
+    order = list(first) if first is not None else _greedy(start, links, k, last)
     best, ways = solve(order)
     tried = 1
     improved = True
@@ -77,9 +125,11 @@ def best_order(start: List[List[float]], link, end: List[List[float]],
     return list(zip(order, ways))
 
 
-def _greedy(start: List[List[float]], links, k: List[int]) -> List[int]:
-    """best_order's first order: the cheapest next one each time."""
-    left, first, way = set(range(len(start))), [], None
+def _greedy(start: List[List[float]], links, k: List[int], last: Optional[int] = None) -> List[int]:
+    """best_order's first order: the cheapest next one each time, last (an item) at the end."""
+    left, first, way = set(range(len(start))) - {last}, [], None
+    if not left:
+        return [last]
     while left:
         if not first:
             i = min(left, key=lambda i: (min(start[i]), i))
@@ -89,92 +139,45 @@ def _greedy(start: List[List[float]], links, k: List[int]) -> List[int]:
             i, way = min(((j, b) for j in left for b in range(k[j])), key=lambda jb: (links[p, jb[0]][way][jb[1]], jb))
         first.append(i)
         left.remove(i)
-    return first
+    return first + ([last] if last is not None else [])
 
 
-def visit_order(lanes: List[Lane], cfg: PlannerConfig) -> List[Lane]:
-    """The cell's lanes (one per row, in row order) in the order they're mowed."""
-    if cfg.lane_order != 'skip' or len(lanes) < 3:
-        return lanes
-    spacing = abs(lanes[1].y - lanes[0].y)
-    if spacing <= 0.0:
-        return lanes
-    # lanes k apart leave room for a U-turn of turn_radius. Every pass goes the same way, the turn from the end of one
-    # pass to the start of the next is a long U-turn along the headland (blade_offset: the centre lines are twice the
-    # offset closer every other turn)
-    k = max(1, int(math.ceil((2.0 * cfg.turn_radius + 2.0 * abs(cfg.blade_offset)) / spacing - 1e-9)))
-    n = len(lanes)
-    if n < 2 * k:
-        # too few lanes for that: from the middle, every step about half the cell wide (the smallest step as big as it
-        # gets: n // 2)
-        m = n // 2
-        order = [i for pair in zip(range(m, n), range(m)) for i in pair] + ([n - 1] if n % 2 else [])
-        return [lanes[i] for i in order]
-    return [lanes[i] for p in range(k) for i in range(p, n, k)]
+class Guess:
+    """About what a drive costs: the way through the transit space the drives take (straight where that's free, off the
+    edges with transit_edge_distance, that counted), on arcs of turn_radius where it turns, on the spot where it turns
+    round on a way too short for them."""
 
+    def __init__(self, transit: TransitPlanner, cfg: PlannerConfig) -> None:
+        self.transit, self.r = transit, max(cfg.turn_radius, 1e-3)
+        self.careful = cfg.transit_edge_distance > 0.0 and cfg.transit_edge_cost > 0.0
+        self.fast, self.slow = FTC_SPEEDS['speed_fast'], FTC_SPEEDS['speed_slow']
+        self.omega = math.radians(FTC_SPEEDS['speed_angular'])
+        self.ways: Dict[Tuple[float, float, float, float], Optional[List[XY]]] = {}
 
-def options(cell: List[Lane], angle: float, cfg: PlannerConfig) -> Iterator[Option]:
-    """The ways to mow a cell: from its first or last row, starting from either end."""
-    c, s = math.cos(angle), math.sin(angle)
-    for from_last in (False, True):
-        lanes = visit_order(cell[::-1] if from_last else cell, cfg)
-        for direction in (1, -1):
-            first, last = lanes[0], lanes[-1]
-            out = direction if len(lanes) % 2 else -direction
-            x0 = first.x0 if direction > 0 else first.x1
-            x1 = last.x1 if out > 0 else last.x0
-            yield lanes, direction, (x0 * c - first.y * s, x0 * s + first.y * c), \
-                (x1 * c - last.y * s, x1 * s + last.y * c)
+    def way(self, a: XY, b: XY) -> Optional[List[XY]]:
+        key = (round(a[0], 4), round(a[1], 4), round(b[0], 4), round(b[1], 4))
+        if key not in self.ways:
+            self.ways[key] = self.transit.careful_path(a, b) if self.careful else self.transit.path(a, b)
+        return self.ways[key]
 
-
-def distance(a: Optional[XY], b: XY) -> float:
-    return 0.0 if a is None else math.hypot(b[0] - a[0], b[1] - a[1])
-
-
-def turning(heading: Optional[float], angle: float, direction: int, r: float) -> float:
-    """About what turning round to a lane going direction costs: driving the turn's arc."""
-    return 0.0 if heading is None else r * angle_diff(angle if direction > 0 else angle + math.pi, heading)
-
-
-def final_cell(cells: List[List[Lane]], end: XY, angle: float, cfg: PlannerConfig) -> int:
-    """The cell that can end closest to end."""
-    return min(range(len(cells)), key=lambda i: min(distance(end, o[3]) for o in options(cells[i], angle, cfg)))
-
-
-def nearest_cell(cells: List[List[Lane]], pos: Optional[XY], heading: Optional[float], angle: float,
-                 cfg: PlannerConfig, end: Optional[XY] = None) -> Tuple[int, List[Lane], int]:
-    """The cell to mow next from pos (facing heading) and how: (index, lanes in order, first direction). end: the last
-    cell, ending as close to it as it can, getting to it second."""
-    best = None
-    for ci, cell in enumerate(cells):
-        for lanes, direction, entry, exit_ in options(cell, angle, cfg):
-            cost = distance(pos, entry) + turning(heading, angle, direction, cfg.turn_radius)
-            if end is not None:
-                cost += 1000.0 * distance(end, exit_)
-            if best is None or cost < best[0] - 1e-9:
-                best = (cost, ci, lanes, direction)
-    return best[1], best[2], best[3]
-
-
-def planned_cells(cells: List[List[Lane]], pos: Optional[XY], heading: Optional[float], end: Optional[XY],
-                  angle: float, cfg: PlannerConfig) -> List[Tuple[List[Lane], int]]:
-    """route_order 'optimized': the cells in the order best_order() finds, drives estimated as the straight distance
-    plus turning, with end the last one ending as close to it as it can: [(lanes in order, first direction)]."""
-    r = cfg.turn_radius
-    opts = [list(options(cell, angle, cfg)) for cell in cells]
-
-    def heading_of(direction: int) -> float:
-        return angle if direction > 0 else angle + math.pi
-
-    def out(o) -> float:  # the way the last lane goes
-        return heading_of(o[1] if len(o[0]) % 2 else -o[1])
-
-    start = [[distance(pos, o[2]) + (0.0 if heading is None else r * angle_diff(heading_of(o[1]), heading))
-              for o in os] for os in opts]
-    last = [[1000.0 * distance(end, o[3]) if end is not None else 0.0 for o in os] for os in opts]
-
-    def link(i: int, a: int, j: int, b: int) -> float:
-        p, q = opts[i][a], opts[j][b]
-        return math.hypot(q[2][0] - p[3][0], q[2][1] - p[3][1]) + r * angle_diff(heading_of(q[1]), out(p))
-
-    return [(opts[i][a][0], opts[i][a][1]) for i, a in best_order(start, link, last)]
+    def __call__(self, a: Pose2D, b: Pose2D, dock: bool = False, straight: bool = False) -> Cost:
+        """From a to b, facing their yaw there (None: any way); dock: a way to or from the dock; straight: straight
+        there, the way not looked for (quicker)."""
+        pts = [(a.x, a.y), (b.x, b.y)] if straight and not self.careful else self.way((a.x, a.y), (b.x, b.y))
+        stretch = 1.0 if pts is not None else NO_WAY
+        pts = pts or [(a.x, a.y), (b.x, b.y)]
+        legs = [(q[0] - p[0], q[1] - p[1]) for p, q in zip(pts, pts[1:]) if math.hypot(q[0] - p[0], q[1] - p[1]) > 1e-6]
+        if not legs:
+            turn = angle_diff(a.yaw, b.yaw) if a.yaw is not None and b.yaw is not None else 0.0
+            return Cost(spins=int(turn >= SPIN_MIN), time_s=turn / self.omega)
+        # (a way along the edges as dear as its cost there says, see TransitPlanner.cost)
+        length = stretch * (self.transit.cost(pts) if self.careful else sum(math.hypot(x, y) for x, y in legs))
+        yaws = [math.atan2(y, x) for x, y in legs]
+        ends = [angle_diff(a.yaw, yaws[0]) if a.yaw is not None else 0.0,
+                angle_diff(yaws[-1], b.yaw) if b.yaw is not None else 0.0]
+        bends = sum(angle_diff(p, q) for p, q in zip(yaws, yaws[1:]))
+        arc = min(length, self.r * (sum(ends) + bends))
+        # (turning round at an end of a way too short for its arc: on the spot)
+        spins = sum(1 for e in ends if e > 0.5 * math.pi and length < 2.0 * self.r)
+        t = (length - arc) / self.fast + arc / self.slow + spins * math.pi / self.omega
+        return Cost(spins=spins, time_s=t, transit_s=t, dock_s=t if dock else 0.0)

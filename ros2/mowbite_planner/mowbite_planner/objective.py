@@ -19,6 +19,8 @@ DOCK_EXTRA = 0.1
 TRANSIT_EXTRA = 0.05
 # m2, a narrower lane spacing (or the slots by the edge closed) has to leave this much less unmowed to be taken
 LEFT_GAIN = 0.05
+# s a m further from the end point weighs where the path is to end there (the dock): it ends as close to it as it gets
+END_S = 1000.0
 
 
 def allowed_left(spins: int = 0, loops: int = 0) -> float:
@@ -107,6 +109,8 @@ def _loops(poses: Sequence) -> int:
     turned = [0.0]
     for _, t in _steps(poses):
         turned.append(turned[-1] + t)
+    if sum(abs(b - a) for a, b in zip(turned, turned[1:])) < 2.0 * math.pi:
+        return 0  # (none turns that far all together)
     n, i = 0, 0
     while i < len(poses):
         j, hit = i, 0

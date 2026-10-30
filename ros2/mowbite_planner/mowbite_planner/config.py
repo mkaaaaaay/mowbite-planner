@@ -66,8 +66,8 @@ MAX_BLADE_OFFSET = 1.0
 MAX_BODY = 5.0
 # segments of a rounded corner of the body (robot_front_width, robot_rear_width): a quarter circle
 BODY_ROUND_SEGS = 6
-# m, where the only turn between two lanes is on the spot (or a drive), they end this much earlier at a time for a
-# rounded one (connect.round_earlier), what they may leave unmowed for it: objective's EARLIER_LEFT, ROUND_LEFT
+# m, where a turn between two lanes doesn't fit at their ends, they end this much earlier at a time for it (turns.py,
+# what that leaves counted by objective)
 ROUND_STEP = 0.05
 # m, with the body checked: where the path goes another way at a place and leaves LOOP_LEFT m or more of a loop out
 # there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in
@@ -168,15 +168,16 @@ class PlannerConfig:
     perimeter_offset: Optional[float] = None
     # m, radius of the turns between lanes, and no arc of a turn, a drive or a loop out is tighter (min_turn_radius):
     # where none fits the drives turn on the spot instead (with the body checked a drive's corner gets a tighter arc
-    # where that fits, see _round_corners), a turn between lanes is rounded as wide as fits (at a slant where the lanes
-    # end at one, the lanes ending a little earlier for it where that's what it takes, else a loop into the next lane,
-    # see connect.round_earlier), on the spot only where nothing does, a drive into a lane ending on a way into it where
-    # one fits (the lane starting later for it where that leaves nothing, see _Route.into_lane). 0 with the body
-    # checked: on the spot at the lanes' ends, lane after lane (turn_on_spot, lane_order snake), every other curve
-    # ZERO_TURN wide (all on the spot, a long front by the edges wouldn't fit: whole loops left out)
+    # where that fits, see _round_corners), a turn between lanes (turns.py) is a U-turn, at a slant where the lanes end
+    # at one, a bulb or a detour, tighter only where none of those fits where the lanes end (lane_order skip: nor with
+    # the lanes ending a little earlier), the lanes ending earlier where nothing fits, never a loop; a drive into a lane
+    # ends on a way into it where one fits (the lane starting later for it where that leaves nothing, see
+    # _Route.into_lane). 0 with the body checked: on the spot at the lanes' ends, lane after lane (turn_on_spot,
+    # lane_order snake), every other curve ZERO_TURN wide (all on the spot, a long front by the edges wouldn't fit:
+    # whole loops left out)
     turn_radius: float = 0.25
-    # the kinds of turns allowed, preferred first ('u_turn', 'bulb', 'detour', 'pivot'). Larger
-    # radii come first, the order counts between turns of the same radius
+    # the kinds of turns allowed between lanes ('u_turn', 'bulb', 'detour', 'pivot', see turns.py): pivot only with
+    # turn_on_spot or where it's the only one
     turn_types: Tuple[str, ...] = TURN_TYPES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
     # mowing areas of the map lying in the one planned (an area of its own with another angle or pattern): left out
@@ -188,16 +189,13 @@ class PlannerConfig:
     # next to them and back out), so no trips along a path from piece to piece. With fill_pattern concentric 'loops'
     # drives all the loops that way, a part of the area in one go
     narrow_parts: str = 'lanes'
-    # turning on the spot where the path would drive a loop (for lawns that take it). Off: where the path would turn on
-    # the spot by more than SPIN_LIMIT a loop out (an omega) in its place where it fits (_smooth_spins). On: no loop
-    # out, no bulb between lanes (on the spot where no U-turn fits, no loop into the next lane either), a drive
-    # arriving on the spot rather than into a lane round a loop or from beside it, or on arcs that cross its own way or
-    # turn it round more than half a turn. The body fits turning like everywhere
+    # turning on the spot where the path would go round (for lawns that take it). Off: between lanes only turns going
+    # forwards (bulbs too, see turns.py; where none fits a drive), the loops' sharp corners a loop out (an omega) where
+    # it fits (_smooth_spins). On: between lanes on the spot where that's worth it (objective: a turn on the spot costs
+    # as much either way), no bulb, no omega, a drive arriving on the spot rather than on arcs that cross its own way
+    # or turn it round more than half a turn. The body fits turning like everywhere
     turn_on_spot: bool = False
-    # the planner picks every turn's radius, turn_radius the least: a wider one where the lanes are further apart or
-    # there's room (WIDER_TURNS of turn_radius, the widest that fits), the lanes ending earlier for a turn of it where
-    # that leaves nothing unmowed, and one tighter than it (a half circle as wide as the lanes are apart) only where
-    # that doesn't fit either, before turning on the spot (off: that half circle before the lanes end earlier)
+    # taken and checked, but changes nothing since planner 2 (the catalogue of turns picks every turn's radius)
     turn_radius_auto: bool = False
     # zones with a lane direction of their own: where the obstacles cut the lanes into groups, a group mowed another way
     # where that takes a lot fewer lanes (see lanes.zone_angles), each zone after the rest, the nearest next. Not with

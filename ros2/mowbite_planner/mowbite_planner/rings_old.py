@@ -13,7 +13,7 @@ from shapely.ops import nearest_points
 from .bodyfit import _assemble, _fit_body, _loop_ends, _round_corners, _unmowed
 from .config import (FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_GAIN, LOOP_IN, LOOP_JOIN, LOOP_LEFT, LOOP_ON,
                      LOOP_ROUND, LOOP_ROUND_GAP, LOOP_ROUND_REACH, LOOP_ROUND_TRIES, LOOP_TRIES, MAX_ROWS, PERIMETER,
-                     ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, TURN, XY, Lane, PathSegment, PlannerConfig,
+                     ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, XY, Lane, PathSegment, PlannerConfig,
                      PlanningError)
 from .drive import Drive, _spins
 from .footprint import SPIN, Footprint
@@ -62,8 +62,7 @@ class _Route:
         self.body = footprint.poses_fit if footprint is not None else None
         # (a turn between lanes: spin_margin all along it too)
         self.turn_body = (lambda poses: footprint.poses_fit(poses, True)) if footprint is not None else None
-        # a turn between lanes rounded as wide as fits where it would turn on the spot (round_earlier): where an arc of
-        # one may be (only pivots allowed: on the spot)
+        # a turn between lanes may have arcs (turns.py, see min_turn_radius; only pivots allowed: on the spot)
         self.rounds = cfg.min_turn_radius > 0 and any(t in cfg.allowed_turns for t in ('u_turn', 'bulb', 'detour'))
         self.transit = transit  # shortest ways, through the drivable areas too
         self.area = area  # turns and loops stay inside the mowing area
@@ -175,10 +174,10 @@ class _Route:
     def into_lane(self, drive: List[Pose2D], a: XY, yaw: float, head: XY,
                   space: TransitPlanner) -> Optional[List[Pose2D]]:
         """In place of the drive's end turning on the spot into the lane from a (facing yaw, its straight piece ending
-        at head): Dubins' shortest way into it that fits in space, going round once at most on top of what it has to,
-        from a pose of the drive's last 4 turn_radius (one every turn_radius back, the latest first, its start too),
-        where none does into the lane ROUND_STEP further on at a up to 2 turn_radius, the first whose way or
-        what's mowed already (the loops) mows what it leaves of the lane (but EARLIER_LEFT). None where none fits."""
+        at head): Dubins' shortest way into it that fits in space, turning a quarter turn at most more than it has to
+        (no loop), from a pose of the drive's last 4 turn_radius (one every turn_radius back, the latest first, its
+        start too), where none does into the lane ROUND_STEP further on at a up to 2 turn_radius, the first whose way
+        or what's mowed already (the loops) mows what it leaves of the lane (but EARLIER_LEFT). None where none fits."""
         r = self.cfg.turn_radius
         starts, way = [], 0.0
         for k in range(len(drive) - 2, -1, -1):
@@ -190,7 +189,7 @@ class _Route:
         for i in range(int(max(0.0, rest) / ROUND_STEP + 1e-9) + 1):
             entry = Pose2D(a[0] + i * ROUND_STEP * math.cos(yaw), a[1] + i * ROUND_STEP * math.sin(yaw), yaw)
             for k in starts[:4]:
-                most = angle_diff(drive[k].yaw, yaw) + 2.0 * math.pi + 1e-6
+                most = angle_diff(drive[k].yaw, yaw) + 0.5 * math.pi + 1e-6
                 # (none turning a lot further, give or take how much dubins() rounds their ends)
                 for m in dubins(drive[k], entry, r, self.step, turning=most + 0.01):
                     poses = m.pieces[0].poses
@@ -367,7 +366,7 @@ class _Route:
         return union(self.blade(run) for run in runs if len(run) >= 2)
 
     def chunks(self, seg: PathSegment) -> List[Tuple[float, float, float, float]]:
-        """The box (x0, y0, x1, y1) round every MOWED_CHUNK poses of seg, worked out once (round_earlier forgets it
+        """The box (x0, y0, x1, y1) round every MOWED_CHUNK poses of seg, worked out once (end_lane forgets it
         where it shortens a lane)."""
         known = self._chunks.get(id(seg))
         if known is None:
@@ -941,10 +940,10 @@ def _length(pts: Sequence[XY]) -> float:
 
 
 def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
-    """Where the path turns on the spot by more than SPIN_LIMIT (a sharp corner of a loop, a drive arriving across
-    a lane, a pivot), an omega (maneuvers.omega) of turn_radius (down to SMOOTH_RADII of it) in its place if it fits in
-    the space of the segment (the drivable areas for drives, with headland_turns out of the lanes' field where the turn
-    is) and the body fits: the wheels keep rolling."""
+    """Where the loops (and the drives between them) turn on the spot by more than SPIN_LIMIT (a sharp corner), an
+    omega (maneuvers.omega) of turn_radius (down to SMOOTH_RADII of it) in its place if it fits in the space of the
+    segment (the drivable areas for drives, with headland_turns out of the lanes' field where the turn is) and the body
+    fits: the wheels keep rolling. Not on the lanes' turns and drives: no loops there."""
     inserts: Dict[Tuple[int, int], List[Pose2D]] = {}
     before: Optional[Pose2D] = None  # the last pose before the position the mower is at
     here: Optional[Tuple[Pose2D, int, int]] = None  # the pose it leaves this position with, where it is
@@ -962,7 +961,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
 
         if j == 0 and i > 0 and straight(i):  # where a lane starts: on the end of the segment before
             i, j = i - 1, len(route.segments[i - 1].poses)
-        if straight(i):  # (a lane keeps its heading)
+        if straight(i) or not route.segments[i].source.startswith('loop'):  # (a lane keeps its heading)
             return
         space = route.transit.is_free if route.segments[i].kind == TRANSIT else route.area.is_free
         clear = route.clear([(p.x, p.y)])  # (headland_turns: out of the lanes' field the loop stays out of it)
@@ -971,7 +970,7 @@ def _smooth_spins(route: '_Route', cfg: PlannerConfig) -> None:
             return space(pts) and (not clear or route.clear(pts))
 
         at = Pose2D(p.x, p.y, before.yaw)
-        body = route.turn_body if route.segments[i].kind == TURN else route.body  # (on a turn spin_margin too)
+        body = route.body
         for share in SMOOTH_RADII:
             r = share * cfg.turn_radius
             loop = omega(at, turn, r, route.step) if r >= max(1e-3, cfg.min_turn_radius - 1e-9) else None

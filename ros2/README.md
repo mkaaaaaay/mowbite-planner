@@ -12,7 +12,7 @@ It doesn't need OpenMower or the MowBite app, but it fits OpenMower: besides its
 | Package | What's in it |
 | --- | --- |
 | `mowbite_planner_interfaces` | `PlanCoverage.srv`, OpenMower's `PlanPath.srv` and `Path.msg` (ament_cmake, a `.srv` needs it) |
-| `mowbite_planner` | the planner (`planner.py` with `config.py`, `objective.py`, `rings_old.py`, `lanes.py`, `swaths.py`, `connect.py`, `order.py`, `assemble.py`, `bodyfit.py`, `maneuvers.py`, `transit.py`, `footprint.py`; only shapely), the node, the MQTT service, `tools/plot_coverage.py`, tests |
+| `mowbite_planner` | the planner (`planner.py` with `config.py`, `objective.py`, `rings_old.py`, `lanes.py`, `swaths.py`, `stripes.py`, `turns.py`, `order.py`, `assemble.py`, `complete.py`, `strokes.py`, `bodyfit.py`, `maneuvers.py`, `transit.py`, `footprint.py`; only shapely), the node, the MQTT service, `tools/plot_coverage.py`, tests |
 
 The planner itself imports nothing from ROS, so it runs and plots on any PC with shapely.
 
@@ -23,13 +23,17 @@ The planner itself imports nothing from ROS, so it runs and plots on any PC with
 2. **What's left** after the loops. A strip too narrow for lanes gets one more loop down its middle.
 3. **Lanes** across it, `mower_width × (1 − overlap)` apart, at the angle `angle_strategy` picks. `crosshatch` adds a
    second set across, `concentric` does loops all the way in.
-4. **Route.** Lanes split by obstacles become cells, each mowed as a snake, the next cell the closest one not mowed
-   yet. Drives take the shortest way, their centre 15 cm in from where it may go where that isn't a lot longer.
-   With a docking station the plan ends close to it.
+4. **Route.** Lanes split by obstacles become cells, each mowed as a snake or (`lane_order: skip`) in passes rows
+   apart, the cells in the order a search over their ways in and out finds (exact for up to 8, `route_order: nearest`
+   the closest next). Drives take the shortest way, their centre 15 cm in from where it may go where that isn't a lot
+   longer. With a docking station the plan ends close to it.
 
-Turns, gentlest first: U-turn (lanes two radii apart), bulb (a loop of more than half a circle, forwards only),
-smaller radii, detour along the edge, pivot on the spot. `lane_order: skip` mows every k-th lane first so every turn
-is a plain forward U-turn; that's the mode for controllers that can't back up.
+Turns where the lanes end, gentlest first: U-turn (lanes two radii apart, at a slant where they end at one), bulb
+(forwards round, lanes closer), detour along the edge; a tighter half circle (a hairpin) only where none of those fits;
+the lanes end earlier where nothing fits; pivot on the spot only with `turn_on_spot` (or where it's the only type
+allowed). No loops between lanes. `lane_order: skip` mows every k-th lane first so every turn is a plain forward U-turn,
+the lanes ending a little earlier for a wide turn rather than a hairpin (neighbour after neighbour where that costs
+less, as where the rows' ends lie far apart along an edge); that's the mode for controllers that can't back up.
 
 Parts with no way between them (a hedge across the lawn) are mowed one after the other as **sections**; the path
 jumps between them and getting there is up to whoever drives it.
@@ -90,9 +94,9 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `angle_min_deg`, `angle_max_deg` | `.nan` | keep the lanes in this range |
 | `angle_step_deg` | 5.0 | step `optimal` tries |
 | `turn_radius` | 0.25 | radius of the turns (m) |
-| `turn_radius_auto` | false | the planner picks each turn's radius, `turn_radius` at least: fewer turns tighter than it, wider ones where there's room |
-| `turn_types` | all | `[u_turn, bulb, detour, pivot]`, allowed ones, preferred first |
-| `turn_on_spot` | false | turn on the spot where it would drive a loop |
+| `turn_radius_auto` | false | taken, changes nothing since planner 2 (the turns' catalogue picks every radius) |
+| `turn_types` | all | `[u_turn, bulb, detour, pivot]`, the allowed ones |
+| `turn_on_spot` | false | turn on the spot between lanes where that's worth it (off: forward turns only) |
 | `lane_order` | `snake` | `snake` or `skip` (forward U-turns only) |
 | `route_order` | `nearest` | cells `nearest` first, or `optimized` (shortest drives) |
 | `narrow_parts` | `lanes` | strips narrower than a U-turn: `lanes` anyway, or `loops` |

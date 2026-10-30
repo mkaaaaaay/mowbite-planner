@@ -1,8 +1,8 @@
 """Coverage path for one mowing area, without any ROS: shapely in, a list of poses out (plan_coverage).
 
 The stages: the spaces from the map (space.py), the loops (rings_old.py) and the lanes (swaths.py), the path put
-together (assemble.py: order.py, connect.py, drive.py), the body's check as a safety net (bodyfit.py), counted by where
-what it changes comes from. The settings and what a plan is made of are in config.py.
+together (assemble.py: stripes.py, turns.py, order.py, drive.py), the body's check as a safety net (bodyfit.py), counted
+by where what it changes comes from. The settings and what a plan is made of are in config.py.
 """
 
 import dataclasses
@@ -338,8 +338,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     cfg = config or PlannerConfig()
     cfg.validate()
     if cfg.body and cfg.turn_radius == 0:  # (see turn_radius)
-        cfg = dataclasses.replace(cfg, turn_radius=ZERO_TURN, turn_on_spot=True, lane_order='snake',
-                                  turn_radius_auto=False)
+        cfg = dataclasses.replace(cfg, turn_radius=ZERO_TURN, turn_on_spot=True, lane_order='snake')
     margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
     space, footprint = build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of, cfg, edge_slots)
