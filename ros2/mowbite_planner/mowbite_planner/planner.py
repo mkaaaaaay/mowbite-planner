@@ -10,6 +10,7 @@ import math
 import multiprocessing
 import threading
 import time
+import types
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -18,16 +19,17 @@ from shapely.geometry import LineString, Polygon
 from shapely.prepared import prep
 
 from .assemble import mow_parts
-from .bodyfit import _assemble, _field_turns, _lanes_field, _leftovers, _mop_up, _round_corners, _turn_at
-from .config import (LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, PERIMETER, SPACING_CANDIDATES, TRANSIT, TURN, XY,
-                     ZERO_TURN, CoveragePlan, Lane, NothingLeft, PlannerConfig, PlanningError)
-from .geometry import polygonal, polygons, rings, subtract
+from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
+from .complete import complete, leftovers
+from .config import (_BODY_SPACE, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, PERIMETER, SPACING_CANDIDATES, TRANSIT,
+                     TURN, XY, ZERO_TURN, CoveragePlan, Lane, NothingLeft, PlannerConfig, PlanningError)
+from .geometry import clean_polygon, polygonal, polygons, rings, subtract
 from .lanes import lane_angle
 from .maneuvers import path_length
 from .objective import LEFT_GAIN
 from .rings_old import Rings, _Route, _smooth_spins, fit_rings, narrow_left, ring_levels
 from .space import _check_coordinates, _edge_slot_count, build_space, margins_of
-from .sweep import plan_footprint, swept_area  # noqa: F401 - (plan_footprint: the nodes import it from here)
+from .sweep import plan_footprint, swept_area
 from .swaths import lane_sets
 from .transit import TransitPlanner
 
@@ -119,7 +121,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
         plan = area.plan(cfg)
     else:
         plan = _auto(area, cfg)
-    return area.as_drawn(plan)
+    return area.as_drawn(plan if mowed is not None else _completed(area, plan))
 
 
 class _Area:
@@ -274,6 +276,31 @@ def _strip_between_lanes(piece, angles: Sequence[float]) -> bool:
     return False
 
 
+def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
+    """mop_up on the plan picked: what it leaves of the lawn as drawn mowed where that's worth it (complete.py)."""
+    cfg = plan.config
+    if not cfg.mop_up or plan.body_space is None or not plan.poses:
+        return plan
+    t0 = time.perf_counter()
+    found = getattr(_BODY_SPACE, 'last', None)  # (the Footprint planned with, its turns worked out already)
+    fp = found[2] if found is not None and found[2].spin_margin == cfg.spin_margin and \
+        found[2].corners == tuple(cfg.body_outline) and found[1].wkb == plan.body_space.wkb else plan_footprint(plan)
+    edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
+    transit = TransitPlanner(plan.transit_space, cfg.transit_clearance, **edges)
+    lawn = subtract(clean_polygon(area.boundary),
+                    [clean_polygon(o) for o in list(area.obstacles) + list(area.keep_out)])
+    field = polygonal(_lanes_field(plan.cells, 2.0 * cfg.turn_radius, 0.5 * cfg.lane_spacing).intersection(
+        plan.remaining)) if cfg.headland_turns and plan.cells else None
+    poses, segments, done = complete(cfg, fp, transit, plan.robot_space, plan.transit_space, lawn, plan.poses,
+                                     plan.segments, field, _point(area.end))
+    poses, segments = _turn_at(types.SimpleNamespace(body=fp.poses_fit), poses, segments)
+    took = time.perf_counter() - t0
+    stats = dict(plan.stats, mop_up=done, planning_time=plan.stats['planning_time'] + took,
+                 timings=dict(plan.stats['timings'], mop_up=round(took, 4)), **_lengths(poses, segments))
+    return dataclasses.replace(plan, poses=poses, segments=segments, stats=stats, section_starts=[
+        s.start for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section])
+
+
 class _Timer:
     def __init__(self, t0: float) -> None:
         self.t0, self.lap, self.timings = t0, t0, {}
@@ -301,8 +328,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     obstacles (see edges). reach_over: areas next to this one the mower drives on otherwise (navigation areas): with the
     body checked it may reach over the edge into them, the path keeps out of them (a slot by the edge they lie beyond is
     none, see _edge_gaps). margins: the obstacle_margin of each obstacle, then of each area to keep out of (None, or
-    none given: the setting). mowed (a geometry, where the blade went on a mow): no loops and lanes, only passes over
-    what that left (bodyfit._leftovers), the one nearest start first; stats['leftovers'] says how much. edge_slots: the
+    none given: the setting). mowed (a geometry, where the blade went on a mow): no loops and lanes, only moves over
+    what that left (complete.leftovers), the one nearest start first; stats['leftovers'] says how much. edge_slots: the
     slots by the edge too narrow for the body closed (see _edge_gaps, plan_coverage tries both). Raises PlanningError
     when there's nothing to plan, or a setting or point is out of range (every coordinate within MAX_COORDINATE of the
     origin).
@@ -324,8 +351,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                                 f'and waypoint_spacing {cfg.waypoint_spacing} m are too small for '
                                 f'{space.free.area:.0f} m2')
     timer.took('area')
-    rings_of = ring_levels(space, cfg)
-    timer.took('perimeter')
+    rings_of = ring_levels(space, cfg, timer.took)
+    timer.took('remaining')
     angle = lane_angle(space.area, space.free, cfg, rings_of.lane_region, rings_of.remaining, space.robot_space)
     passes, zones = [], []
     if cfg.fill_pattern != 'concentric' and not cfg.skip_lanes and not rings_of.lane_region.is_empty:
@@ -344,7 +371,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
                                           for ci, cell in enumerate(cells) for lane in cell})
-    poses, segments, done = _finish(route, cfg, space.free, footprint, mowed, start_xy, timer)
+    poses, segments, done = _finish(route, cfg, space, footprint, mowed, start_xy, timer)
     return CoveragePlan(
         poses=poses, segments=segments, angle=angle, lane_spacing=cfg.lane_spacing, perimeter_loops=route.loops,
         lanes=route.lanes, stats=_stats(route, cfg, space, segments, poses, passes, zones, rings_of, done, timer),
@@ -386,30 +413,29 @@ def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, st
     return route, start_xy
 
 
-def _finish(route: _Route, cfg: PlannerConfig, free, footprint, mowed, start_xy: XY,
+def _finish(route: _Route, cfg: PlannerConfig, space, footprint, mowed, start_xy: XY,
             timer: _Timer) -> Tuple[list, list, Dict[str, Any]]:
-    """The route's path with its turns on the spot rounded off, the body's safety net, mop_up, what a mow left (mowed),
-    the turns on the spot marked: (poses, segments, {'fitted', 'mop', 'leftover', 'turning', 'parts'})."""
+    """The route's path with its turns on the spot rounded off, the body's safety net, what a mow left (mowed), the
+    turns on the spot marked: (poses, segments, {'fitted', 'leftover', 'turning', 'parts'}). mop_up comes later, on
+    the plan picked (_completed)."""
     if not cfg.turn_on_spot:
         _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
     if footprint is not None and poses:
         poses, segments = _round_corners(route, poses, segments)
     timer.took('route')
-    done: Dict[str, Any] = {'fitted': None, 'mop': None, 'leftover': None, 'turning': ([], 0, 0.0),
+    done: Dict[str, Any] = {'fitted': None, 'leftover': None, 'turning': ([], 0, 0.0),
                             'parts': len({s.section for s in segments})}
     if footprint is not None and cfg.body_fit and poses:
-        poses, segments, done['fitted'] = _net(route, (poses, segments), free)
+        poses, segments, done['fitted'] = _net(route, (poses, segments), space.free)
         timer.took('body')
-    if cfg.mop_up and footprint is not None and poses:
-        poses, segments, done['mop'] = _mop_up(route, poses, segments, free)
-        timer.took('mop_up')
     if mowed is not None:
-        # what a mow left: passes over that alone, the one nearest the start (the dock) first
+        # what a mow left: moves over that alone, the one nearest the start (the dock) first
         if footprint is None:
             raise PlanningError('what a mow left is only planned with the body set (robot_width, robot_front, '
                                 'robot_rear)')
-        poses, segments, done['leftover'] = _leftovers(route, free, mowed, start_xy)
+        poses, segments, done['leftover'] = leftovers(cfg, footprint, route.transit, space, mowed, start_xy,
+                                                      route.end)
         if not poses:
             raise NothingLeft(f'nothing left to mow where the mower gets to ({done["leftover"]["left_m2"]:.2f} m2 '
                               'left)')
@@ -483,25 +509,26 @@ def _warn(route: _Route, cfg: PlannerConfig, done: Dict[str, Any]) -> None:
                               'jumps from one to the next')
 
 
-def _stats(route: _Route, cfg: PlannerConfig, space, segments, poses, passes, zones, rings_of: Rings,
-           done: Dict[str, Any], timer: _Timer) -> Dict[str, Any]:
+def _lengths(poses, segments) -> Dict[str, Any]:
+    """The path's stats that change with it: its sections, m of each kind and all together, the poses."""
     lengths: Dict[str, float] = {PERIMETER: 0.0, LANE: 0.0, TURN: 0.0, TRANSIT: 0.0}
     for seg in segments:
         lengths[seg.kind] += path_length(poses[seg.start:seg.end + 1])
+    return {'sections': len([i for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section]),
+            'path_length': sum(lengths.values()), 'perimeter_length': lengths[PERIMETER], 'lane_length': lengths[LANE],
+            'turn_length': lengths[TURN], 'transit_length': lengths[TRANSIT], 'poses': len(poses)}
+
+
+def _stats(route: _Route, cfg: PlannerConfig, space, segments, poses, passes, zones, rings_of: Rings,
+           done: Dict[str, Any], timer: _Timer) -> Dict[str, Any]:
     stats: Dict[str, Any] = {
-        'mop_up': done['mop'],
+        'mop_up': None,
         'leftovers': done['leftover'],
-        'sections': len([i for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section]),
-        'path_length': sum(lengths.values()),
-        'perimeter_length': lengths[PERIMETER],
-        'lane_length': lengths[LANE],
-        'turn_length': lengths[TURN],
-        'transit_length': lengths[TRANSIT],
+        **_lengths(poses, segments),
         'perimeter_loops': len({s.source for s in segments if s.kind == PERIMETER}),
         'loops': len(route.loops),
         'lanes': len(route.lanes),
         'cells': sum(len(cells) for _, cells in passes),
-        'poses': len(poses),
         'area': space.free.area,
         'edge_slots': len(space.slots),
         'planning_time': time.perf_counter() - timer.t0,

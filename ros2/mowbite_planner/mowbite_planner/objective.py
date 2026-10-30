@@ -1,7 +1,11 @@
 """mkay's ranking as one table of rates: what a choice may cost in one rank for a gain in another."""
 
+import bisect
 import dataclasses
-from typing import Optional
+import math
+from typing import List, Optional, Sequence
+
+from .report import drive_time
 
 # below this two options leave the same unmowed (m2, the noise of working out areas)
 AREA_EPS = 5e-4
@@ -64,3 +68,71 @@ def better(a: Cost, b: Cost) -> Optional[bool]:
     if abs(sa - sb) > 1e-9:
         return sa < sb
     return None if extra <= AREA_EPS else a is less
+
+
+# a stretch of path about as the ranking counts it (tools/metrics.py): turning on the spot is turning SPIN_MIN at least
+# with less than SPIN_R m of driving a rad, a loop a full turn within LOOP_REACH m, a hard angle more than KINK_ANGLE
+# within KINK_LEN m of driving (KINK_APART m apart, turning on the spot aside)
+SPIN_R, SPIN_MIN = 0.05, math.radians(15.0)
+LOOP_REACH = 0.6
+KINK_ANGLE, KINK_LEN, KINK_APART = math.radians(45.0), 0.15, 0.5
+
+
+def counted(poses: Sequence, transit_s: float = 0.0) -> Cost:
+    """What driving poses (with .x, .y, .yaw) costs (left_m2 0), transit_s of it on drives mowing nothing."""
+    return Cost(loops=_loops(poses), spins=_spins(poses), kinks=_kinks(poses), time_s=drive_time(poses)['s'],
+                transit_s=transit_s)
+
+
+def _steps(poses: Sequence):
+    for a, b in zip(poses, poses[1:]):
+        yield math.hypot(b.x - a.x, b.y - a.y), math.remainder(b.yaw - a.yaw, 2.0 * math.pi)
+
+
+def _on_spot(d: float, t: float) -> bool:
+    return abs(t) > 1e-9 and (d < 1e-6 or d / abs(t) < SPIN_R)
+
+
+def _spins(poses: Sequence) -> int:
+    n, run = 0, 0.0
+    for d, t in _steps(poses):
+        if _on_spot(d, t):
+            run += abs(t)
+        else:
+            n, run = n + (run >= SPIN_MIN), 0.0
+    return n + (run >= SPIN_MIN)
+
+
+def _loops(poses: Sequence) -> int:
+    turned = [0.0]
+    for _, t in _steps(poses):
+        turned.append(turned[-1] + t)
+    n, i = 0, 0
+    while i < len(poses):
+        j, hit = i, 0
+        while j + 1 < len(poses) and math.hypot(poses[j + 1].x - poses[i].x, poses[j + 1].y - poses[i].y) <= LOOP_REACH:
+            j += 1
+            if abs(turned[j] - turned[i]) >= 2.0 * math.pi:
+                hit = j
+                break
+        n, i = (n + 1, hit + 1) if hit else (n, i + 1)
+    return n
+
+
+def _kinks(poses: Sequence) -> int:
+    n, last, run, prev = 0, -math.inf, 0.0, None
+    at: List[float] = []  # (m driven to each step of the stretch and its heading, unwrapped)
+    heading: List[float] = []
+    for (d, t), a, b in zip(_steps(poses), poses, poses[1:]):
+        if d < 1e-9 or _on_spot(d, t):
+            at, heading, prev = [], [], None
+            continue
+        h = math.atan2(b.y - a.y, b.x - a.x)
+        run += d
+        heading.append(h if prev is None else heading[-1] + math.remainder(h - prev, 2.0 * math.pi))
+        at.append(run)
+        prev = h
+        k = bisect.bisect_left(at, run - KINK_LEN)
+        if max(heading[k:]) - min(heading[k:]) > KINK_ANGLE and run - last > KINK_APART:
+            n, last = n + 1, run
+    return n

@@ -279,9 +279,9 @@ class PlannerConfig:
     # that fits, leaving a little of a loop or lane out where it has to (_fit_body, stats['body_fit']). False: the path
     # as planned
     body_fit: bool = True
-    # with the body checked, at the path's end a round over what it leaves unmowed where the blade gets to (the
-    # biggest pieces, a short pass over each, then back to where the path ended, see _mop_up). Off: the path ends
-    mop_up: bool = False
+    # with the body checked, what the path leaves unmowed mowed where the body fits and the ranking says it's worth it:
+    # short moves over it as detours from the loops and drives, the rest one after the other at the end (complete.py)
+    mop_up: bool = True
     # m, how far the blade's centre sits to the left of the mower's centre (negative: right). The loops go
     # round with the blade on their outer side, so it mows up to perimeter_offset while the body stays further
     # in, the lanes move so the blade's lines stay a lane spacing apart

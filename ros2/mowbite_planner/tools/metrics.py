@@ -195,6 +195,7 @@ BANDS = {'tango': 0.50}  # m, by mower (long nose), else BAND
 IDLE_CELL, IDLE_STEP, IDLE_NEW = 0.05, 0.2, 0.10
 BODY_PLAN, BODY_DEEP, BODY_CONTACT = 0.01, 0.05, 0.02
 TURN_DEG, TURN_WIN = math.radians(90.0), 0.3  # m each way (U-turns and corners, not the rings round trees)
+EPS = 1e-9
 OUT_TOL, DUP = 0.02, 1e-7
 BODY_KEYS = ('mower_width', 'blade_offset', 'blade_ahead', 'robot_width', 'robot_front', 'robot_rear',
              'robot_outline', 'edge_margin', 'obstacle_margin', 'spin_margin')
@@ -317,12 +318,14 @@ def _turning(poses) -> List[bool]:
         s.append(s[-1] + math.hypot(b.x - a.x, b.y - a.y))
         h.append(h[-1] + math.remainder(b.yaw - a.yaw, 2 * math.pi))
     s, h = np.array(s), np.array(h)
-    lo = np.searchsorted(s, s - TURN_WIN, 'left')
-    hi = np.searchsorted(s, s + TURN_WIN, 'right') - 1
+    # (the bounds take EPS more: summed up along the way a corner of exactly 90 deg or a pose exactly TURN_WIN off comes
+    # out a hair over or under, by what's before them in the path)
+    lo = np.searchsorted(s, s - TURN_WIN - EPS, 'left')
+    hi = np.searchsorted(s, s + TURN_WIN + EPS, 'right') - 1
     out = []
     for i in range(len(poses)):
         part = h[lo[i]:hi[i] + 1]
-        out.append(bool(len(part) and part.max() - part.min() >= TURN_DEG))
+        out.append(bool(len(part) and part.max() - part.min() >= TURN_DEG - EPS))
     return out
 
 

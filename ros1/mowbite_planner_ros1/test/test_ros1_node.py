@@ -1503,10 +1503,12 @@ def test_leftovers(planner):
     event('JOB_COMPLETE')
     assert any('the leftovers are mowed' in line for _, line in rospy.log)
     assert len(poses(planner.handle(request()))) == whole and rpc('planner.settings')[0]['angle_steps'] == steps
-    # all mowed: nothing to do, armed the area gets no paths
+    # all mowed (a track to and fro across all of it, a point every 0.5 m): nothing to do, armed the area gets no paths
+    xs = [0.5 * i for i in range(-1, 42)]
+    zigzag = [[x, -0.1 + 0.1 * k] for k in range(103) for x in (xs if k % 2 == 0 else xs[::-1])]
     with open(os.path.join(folder, '1791377700_all.jsonl'), 'w') as f:
         f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
-        f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses']]}) + '\n')
+        f.write(json.dumps({'type': 'append_points', 'points': zigzag}) + '\n')
     result, _ = rpc('planner.leftovers', {'job_id': 'all', 'arm': True})
     assert result['areas']['a']['paths'] == [] and 'nothing left' in result['areas']['a']['message']
     assert result['areas']['a']['reason'] == 'nothing_left'

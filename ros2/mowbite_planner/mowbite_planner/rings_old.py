@@ -5,7 +5,7 @@ import bisect
 import dataclasses
 import math
 import random
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
@@ -1087,10 +1087,10 @@ class Rings:
                 if self.driven(k, kind)] + [ring for geom in self.middles + [narrow] for _, ring in rings(geom)]
 
 
-def ring_levels(space, cfg: PlannerConfig) -> Rings:
+def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]] = None) -> Rings:
     """The loops: level 0 runs perimeter_offset inside the edges, concentric goes on until nothing is left (the last
     bit, narrower than a lane spacing, gets one more loop halfway in), narrow_parts 'loops' on into the parts narrower
-    than a U-turn. Where the lanes go and what's left for them."""
+    than a U-turn. Where the lanes go and what's left for them. took('perimeter') once the loops' levels are done."""
     free, robot_space, blade_space, first, off = space.free, space.robot_space, space.blade_space, space.first, \
         space.off
     half, spacing = 0.5 * cfg.mower_width, cfg.lane_spacing
@@ -1148,6 +1148,8 @@ def ring_levels(space, cfg: PlannerConfig) -> Rings:
             drive_levels[k] = polygonal(inside.buffer(1.0, QUAD_SEGS).difference(union(strips)))
             before = blobs
     perimeter_levels = drive_levels[:most]
+    if took is not None:
+        took('perimeter')
     rings_of = Rings(levels, drive_levels, len(perimeter_levels), [], Polygon(), Polygon(), Polygon(), concentric,
                      count, islands, loop_spacing)
 

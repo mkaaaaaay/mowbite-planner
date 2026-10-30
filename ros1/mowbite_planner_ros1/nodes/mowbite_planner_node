@@ -234,7 +234,7 @@ LEFTOVERS_ARMED = 900.0
 # s it lasts once mower_logic got one of them, for a job that never finishes (JOB_COMPLETE ends it, a new map or
 # settings too)
 LEFTOVERS_JOB = 6 * 3600.0
-# m2, an unmowed piece planner.leftovers counts (bodyfit's MOP_MIN)
+# m2, an unmowed piece planner.leftovers counts (complete.LEAST_MOWED)
 LEFT_PIECE = 0.02
 # leftovers_auto: m2 the passes mow at least for the mower to go out again (under it the drive there isn't worth it),
 # the action that starts it like the app's button, what tells whether it's ready, s between two looks at that

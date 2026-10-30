@@ -74,8 +74,9 @@
     edges: recorded
     # where the body would still stick out, the path goes another way there that fits (false: as planned)
     body_fit: true
-    # a round at the end over the biggest pieces left unmowed where the blade gets to (with the body set)
-    mop_up: false
+    # what the path leaves unmowed mowed where the body fits and it's worth it: short moves on detours and at the end
+    # (with the body set)
+    mop_up: true
     # how far the body keeps off the outline's and the obstacles' real edges [m], everywhere
     edge_margin: 0.05
     obstacle_margin: 0.10

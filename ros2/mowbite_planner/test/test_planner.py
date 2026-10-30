@@ -32,6 +32,7 @@ from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RA
                                     TURN, ZERO_TURN, Lane, PathSegment)
 from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
 from mowbite_planner.drive import _arcs, _spins  # noqa: E402
+from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.assemble import _drive_lanes  # noqa: E402
@@ -106,7 +107,7 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
         assert angle_diff(travel, a.yaw) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:
-        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'mop_up'):
+        if s.kind == LANE and s.maneuver not in ('ring', 'bend', 'mop_up', 'leftover'):
             yaws = {poses[i].yaw for i in range(s.start, s.end)}
             assert len(yaws) == 1
             yaw = yaws.pop()
@@ -1360,7 +1361,7 @@ def test_body_fits_at_any_angle(deg):
     front swinging out, they get off it before the corner and back on after it (turning at a kink of more than SPIN
     the body keeps spin_margin further in, like on the spot)."""
     obstacles = [TREE, BED]
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=math.radians(deg)))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=math.radians(deg), mop_up=False))  # (the net on its own)
     plan = plan_coverage(GARDEN, obstacles, cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, obstacles)
     # without it: what sticks out are loops, spins and drives, the turns and lane ends fit on their own
@@ -2229,25 +2230,29 @@ def test_leftovers():
 
 
 def test_mop_up():
-    """mop_up: at the end a round over the biggest pieces left unmowed where the blade gets to (a pass over each, the
-    body fitting, turning where they meet too), back to where the path ended: less left unmowed, nothing sticking out,
-    no jump. stats['mop_up'] says how many and how much; off, the plan as without. A piece no way back fits from (by a
-    corner) it leaves out: the plan ends where it would without."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
-    corner = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, mop_up=True), start=(1, 1, 0.0), end=(1, 1))
-    assert corner.stats['mop_up']['pieces'] == 0 and corner.poses == plan_coverage(
-        GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1)).poses
+    """mop_up (on by default): what the path leaves unmowed mowed by moves the body fits, as detours from the loops and
+    drives back to where they left and from the end on (complete.py): less left unmowed than off, nothing sticking out,
+    no jump, the lanes and their turns where they were. stats['mop_up'] says how many and how much; off, None."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.5))
-    plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
-    mop = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, mop_up=True), start=(1, 1, 0.0), end=(1, 1))
+    plain = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, mop_up=False), start=(1, 1, 0.0), end=(1, 1))
+    mop = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(mop, mop.config, [TREE, BED])
     report = check_plan(mop)
     assert report['body_out'] == [] and mop.stats['body_fit']['jumps'] == [] and len(mop.section_starts) == 1
     assert mop.stats['mop_up']['pieces'] > 0 and mop.stats['mop_up']['area'] > 0.0 and plain.stats['mop_up'] is None
     assert report['left_m2'] < check_plan(plain)['left_m2'] - 0.5 * mop.stats['mop_up']['area']
-    passes = [s for s in mop.segments if s.maneuver == 'mop_up' and s.kind == LANE]
-    assert len(passes) == mop.stats['mop_up']['pieces'] and mop.poses[:len(plain.poses) - 1] == plain.poses[:-1]
-    assert math.hypot(mop.poses[-1].x - plain.poses[-1].x, mop.poses[-1].y - plain.poses[-1].y) < 0.05
+    kinds = {s.kind for s in mop.segments if s.maneuver == 'mop_up'}
+    assert TRANSIT in kinds and kinds - {TRANSIT} and kinds <= {PERIMETER, LANE, TRANSIT}
+    # (the margins and spin_margin also against the real edges worked out here on their own)
+    assert outside_room(mop, recorded_room(cfg, [GARDEN], [TREE, BED], [cfg.obstacle_margin] * 2), spin=0.05) == []
+    # (a move put in where OpenMower's path is an outline one is of that kind: no more paths than without)
+    assert len(plan_pieces(mop)) == len(plan_pieces(plain))
+
+    def lanes(plan):  # (where they are: a pose's heading is the way the mower leaves it, onto a detour too)
+        return [[(p.x, p.y) for p in plan.poses[s.start:s.end + 1]] for s in plan.segments
+                if s.kind in (LANE, TURN) and s.maneuver != 'mop_up']
+
+    assert lanes(mop) == lanes(plain)
 
 
 def test_margins_kept():
@@ -2264,7 +2269,8 @@ def test_margins_kept():
     corners, fp = MultiPoint(lawn).buffer(1.0), plan_footprint(plan)
     line = Polygon(lawn).buffer(0.5 * cfg.robot_width - cfg.edge_margin + 1e-3, join_style=2)
     assert all(line.covers(fp.body(p.x, p.y, p.yaw)) for p in plan.poses if not corners.contains(Point(p.x, p.y)))
-    loops = [p for s in plan.segments if s.kind == PERIMETER for p in plan.poses[s.start:s.end + 1]]
+    loops = [p for s in plan.segments if s.kind == PERIMETER and s.maneuver != 'mop_up'
+             for p in plan.poses[s.start:s.end + 1]]
     for ring, margin in ((lawn, cfg.edge_margin), (bed, cfg.obstacle_margin), (keep, cfg.obstacle_margin)):
         near = min(Polygon(ring).exterior.distance(Point(p.x, p.y)) for p in loops)
         assert near == pytest.approx(margin + cfg.simplify_tolerance, abs=0.01)
@@ -2281,7 +2287,8 @@ def test_margin_of_an_obstacle():
     plan = plan_coverage(rect(0, 0, 10, 6), [a, b], cfg, start=(1, 1, 0.0), keep_out=[keep], margins=[0.3, None, 0.2])
     check_invariants(plan, cfg, [a, b])
     assert check_plan(plan)['body_out'] == []
-    loops = [p for s in plan.segments if s.kind == PERIMETER for p in plan.poses[s.start:s.end + 1]]
+    loops = [p for s in plan.segments if s.kind == PERIMETER and s.maneuver != 'mop_up'
+             for p in plan.poses[s.start:s.end + 1]]
     near = [min(Polygon(o).exterior.distance(Point(p.x, p.y)) for p in loops) for o in (a, b, keep)]
     assert near == pytest.approx([0.3, cfg.obstacle_margin, 0.2], abs=0.01)
     room = recorded_room(cfg, [rect(0, 0, 10, 6)], [a, b, keep], [0.3, cfg.obstacle_margin, 0.2])
@@ -2335,7 +2342,7 @@ def test_headland_turns():
     arcs, into the field (FIELD_ARC at most) only where none fits out of it, those counted on their own, not as turning
     in it."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
-    plain = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    plain = plan_coverage(GARDEN, [TREE, BED], dataclasses.replace(cfg, mop_up=False), start=(1, 1, 0.0), end=(1, 1))
     clean = dataclasses.replace(cfg, headland_turns=True, headland_corners='sharp')
     plan = plan_coverage(GARDEN, [TREE, BED], clean, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, clean, [TREE, BED])
@@ -2572,7 +2579,8 @@ def test_narrow_parts_loops():
     # (the lanes' plan mows a little more on its drives, their corners rounded)
     assert coverage(loops, cfg) > max(0.885, coverage(lanes, cfg) - 0.01)
     assert loops.stats['path_length'] < 0.85 * lanes.stats['path_length']
-    drives = [s for s in loops.segments if s.kind == TRANSIT and s.maneuver != 'body']  # (not the ways in place)
+    drives = [s for s in loops.segments if s.kind == TRANSIT and s.maneuver not in ('body', 'mop_up')]  # (not the
+    # ways in place, nor mop_up's)
     assert sum(path_length(loops.poses[s.start:s.end + 1]) for s in drives) < 2.0 and loops.stats['lanes'] == 0
     # a wide area keeps its lanes
     wide = plan_coverage(rect(0, 0, 10, 6), [], cfg)

@@ -107,7 +107,7 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `obstacle_margin` | 0.10 | gap to obstacles (m) |
 | `spin_margin` | 0.05 | extra gap turning on the spot and in the turns between lanes (m) |
 | `body_fit` | true | where the body would stick out, go another way (or leave the bit out) |
-| `mop_up` | false | extra round at the end over the biggest unmowed bits |
+| `mop_up` | true | mow what the path leaves where the body fits: short detours, the rest at the end |
 | `blade_ahead`, `blade_offset` | 0.0 | where the blade sits relative to the mower's centre (m) |
 | `bend_max_gap`, `bend_max_offset` | 0.0, 0.5 | let lanes bend round small obstacles up to this gap (m) |
 | `transit_edge_distance`, `transit_edge_cost` | 0.0, 2.0 | make drives keep further off the edges where cheap |
