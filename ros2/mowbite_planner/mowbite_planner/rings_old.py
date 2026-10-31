@@ -3,9 +3,10 @@ own loops win, and the route the path is put together on (_Route: where it is, i
 
 import bisect
 import dataclasses
+import itertools
 import math
 import random
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
@@ -13,14 +14,14 @@ from shapely.ops import nearest_points
 from .bodyfit import _assemble, _fit_body, _loop_ends, _round_corners, _unmowed
 from .config import (FIT_EASE, FIT_EASE_OFF, LANE, LOOP_EASE, LOOP_GAIN, LOOP_IN, LOOP_JOIN, LOOP_LEFT, LOOP_ON,
                      LOOP_ROUND, LOOP_ROUND_GAP, LOOP_ROUND_REACH, LOOP_ROUND_TRIES, LOOP_TRIES, MAX_ROWS, PERIMETER,
-                     ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, XY, Lane, PathSegment, PlannerConfig,
+                     ROUND_BATCH, ROUND_STEP, SMOOTH_RADII, SPIN_LIMIT, TRANSIT, XY, Lane, PathSegment, PlannerConfig,
                      PlanningError)
 from .drive import Drive, _spins
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .lanes import _ring_list, _Scanner
-from .maneuvers import (CORNER_ANGLE, Fits, closest_on_polyline, drive_polyline, dubins, join, omega, path_length,
-                        same_position, sample_straight)
+from .maneuvers import (CORNER_ANGLE, Fits, closest_on_polyline, drive_polyline, dubins, dubins_lead, join, omega,
+                        path_length, same_position, sample_straight)
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .objective import EARLIER_LEFT
 from .sweep import blade
@@ -765,18 +766,18 @@ class _Route:
                           if fit[j0] and at[i0] - at[j0] <= LOOP_ROUND_REACH
                           for j1 in range(i1 + 1, n - 1) if fit[j1] and at[j1] - at[i1] <= LOOP_ROUND_REACH and
                           not any(j0 < k <= j1 for k in spins))
-            got, tries = None, 0
-            for _, j0, j1 in ends:
-                turn = sum(angle_diff(poses[k].yaw, poses[k + 1].yaw) for k in range(j0, j1))
-                for r in LOOP_ROUND:
-                    tries += 1
-                    m = dubins(poses[j0], poses[j1], r, self.step, loops=False, turning=turn + 0.5 * math.pi)[:1]
-                    way = join(*(piece.poses for piece in m[0].pieces)) if m else None
-                    if way and fp.all_fit(way) and self.area.is_free([(p.x, p.y) for p in way]):
-                        got = j0, j1, way
-                        break
-                if got is not None or tries >= LOOP_ROUND_TRIES:
+            got, batch, size = None, [], 1
+            # (the tries in their order a batch at a time, twice as many each time: the first that fits, as one at a
+            # time)
+            for item in itertools.chain(_round_tries(poses, ends), [None]):
+                if item is not None:
+                    batch.append(item)
+                    if len(batch) < size:
+                        continue
+                got = self._rounded(poses, batch)
+                if got is not None:
                     break
+                batch, size = [], min(2 * size, ROUND_BATCH)
             if got is None:
                 continue
             j0, j1, way = got
@@ -784,6 +785,25 @@ class _Route:
             done = j1 + 1
             self._count('loops_rounded')
         return out + poses[done:] if done else poses
+
+    def _rounded(self, poses: List[Pose2D], tries: List[Tuple[int, int, float, float]]
+                 ) -> Optional[Tuple[int, int, List[Pose2D]]]:
+        """Of loop_round's tries (j0, j1, radius, turning at most) the first whose Dubins' way from pose j0 to pose j1
+        the body fits in the area: (j0, j1, the way), else None. The poses inside the ways' first arcs all at once first
+        (most that don't fit stick out right where they leave the loop), the whole ways of the others after."""
+        fp = self.footprint
+        leads = [dubins_lead(poses[j0], poses[j1], r, self.step, turning) for j0, j1, r, turning in tries]
+        ways = []
+        for (j0, j1, r, turning), lead, fits in zip(tries, leads, fp.all_fit_each([lead or [] for lead in leads])):
+            if lead is not None and fits:
+                m = dubins(poses[j0], poses[j1], r, self.step, loops=False, turning=turning)[:1]
+                way = join(*(piece.poses for piece in m[0].pieces)) if m else None
+                if way:
+                    ways.append((j0, j1, way))
+        for (j0, j1, way), fits in zip(ways, fp.all_fit_each([way for _, _, way in ways])):
+            if fits and self.area.is_free([(p.x, p.y) for p in way]):
+                return j0, j1, way
+        return None
 
     def perimeter(self, levels: List[object], base_holes: List[List[XY]], last: bool = False,
                   finish: bool = False) -> None:
@@ -1254,3 +1274,16 @@ def fit_rings(route: _Route, planned, free) -> Tuple[Any, Tuple[List[Pose2D], Li
         else:
             route.loops_back(before)
     return planned, (poses, segments, fitted)
+
+
+def _round_tries(poses: List[Pose2D], ends) -> Iterator[Tuple[int, int, float, float]]:
+    """loop_round's tries in their order: (j0, j1, radius, turning at most) of a Dubins' way from pose j0 to pose j1,
+    each pair's LOOP_ROUND radii, the widest first, LOOP_ROUND_TRIES at most (but a pair's radii all)."""
+    tries = 0
+    for _, j0, j1 in ends:
+        turn = sum(angle_diff(poses[k].yaw, poses[k + 1].yaw) for k in range(j0, j1))
+        for r in LOOP_ROUND:
+            tries += 1
+            yield j0, j1, r, turn + 0.5 * math.pi
+        if tries >= LOOP_ROUND_TRIES:
+            return

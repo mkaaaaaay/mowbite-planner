@@ -8,9 +8,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy
 import shapely
 
-from .config import XY, PlannerConfig
+from .config import TRACK_TURN, XY, PlannerConfig
 from .drive import Drive
-from .footprint import SPIN, Footprint
+from .footprint import SPIN, Footprint, swung
 from .geometry import QUAD_SEGS, polygons
 from .maneuvers import join, same_position, sample_straight
 from .mathutil import Pose2D, angle_diff, normalize_angle
@@ -58,6 +58,7 @@ class Kit:
     free_zone: object  # the transit space, prepared
     turn_zone: object  # where the body turns round whatever way it faces, spin_margin kept (prepared)
     drives: List[int]  # drives left to work out in this plan
+    track: Footprint  # the moves' body, turned TRACK_TURN either way (the drives to them and back: fp)
     field: object = None  # headland_turns: the lanes' field (a hair smaller, prepared), drives turn out of it
 
     @classmethod
@@ -68,7 +69,8 @@ class Kit:
         inner = field.buffer(-SLACK, 1) if field is not None and not field.is_empty else None
         for z in zones + ([inner] if inner is not None else []):
             shapely.prepare(z)
-        return cls(cfg, fp, transit, *zones, [drives], inner)
+        track = Footprint(fp.space, swung(fp.corners, TRACK_TURN), fp.spin_margin)
+        return cls(cfg, fp, transit, *zones, [drives], track, inner)
 
     def turns_in_field(self, poses: Sequence[Pose2D]) -> bool:
         """Whether the heading changes from one of poses to the next in the field (headland_turns)."""
@@ -139,13 +141,13 @@ class Kit:
         return shapely.contains_xy(self.roam if drive else self.mow, xy[:, 0], xy[:, 1])
 
     def allowed(self, poses: Sequence[Pose2D]) -> bool:
-        return bool(self.inside(poses).all()) and self.fp.poses_fit(poses)
+        return bool(self.inside(poses).all()) and self.track.poses_fit(poses)
 
     def fit_along(self, poses: Sequence[Pose2D]) -> numpy.ndarray:
-        """For poses not turning: whether the centre may be there mowing and the body fits."""
+        """For poses not turning: whether the centre may be there mowing and the moves' body fits."""
         ok = self.inside(poses)
         if ok.any():
-            ok[ok] = numpy.array(self.fp.fit([p for p, o in zip(poses, ok) if o]), bool)
+            ok[ok] = numpy.array(self.track.fit([p for p, o in zip(poses, ok) if o]), bool)
         return ok
 
 
@@ -314,8 +316,8 @@ def _onto(kit: Kit, chord: List[Pose2D], k0: int, k1: int, sign: float) -> Tuple
                                    if leg is not None and (free or sign < 0)):
             if unfree and fallback[0] is not None:
                 break
-            if abs(turns[i]) > SPIN and not (kit.fp.fits_turn(at.x, at.y, hs[i], yaw) if sign < 0 else
-                                             kit.fp.fits_turn(at.x, at.y, yaw, hs[i])):
+            if abs(turns[i]) > SPIN and not (kit.track.fits_turn(at.x, at.y, hs[i], yaw) if sign < 0 else
+                                             kit.track.fits_turn(at.x, at.y, yaw, hs[i])):
                 continue
             if not unfree:
                 return got[i][0], s
@@ -332,8 +334,15 @@ def _seeds(kit: Kit, rest: Rest, pts: numpy.ndarray) -> List[Pose2D]:
     h, t, a = (g.ravel() for g in numpy.meshgrid(yaws, numpy.arange(len(targets)), ACROSS, indexing='ij'))
     c, s, d = numpy.cos(h), numpy.sin(h), 0.5 * SEED_LEN
     bx, by = targets[t, 0] - a * kit.half * s, targets[t, 1] + a * kit.half * c
-    gain = rest.counts(numpy.stack([bx - d * c, by - d * s, bx + d * c, by + d * s], 1),
-                       pts[::max(1, len(pts) // SAMPLE)])
+    lines, sample = numpy.stack([bx - d * c, by - d * s, bx + d * c, by + d * s], 1), pts[::max(1, len(pts) // SAMPLE)]
+    # (each target's lines against the points that may lie under them only: the same counts, quicker)
+    reach = math.hypot(max(map(abs, ACROSS)) * kit.half, d) + rest.half + 1e-6
+    gain = numpy.zeros(len(lines), int)
+    for k, (x, y) in enumerate(targets):
+        mine = numpy.nonzero(t == k)[0]
+        near = sample[numpy.hypot(sample[:, 0] - x, sample[:, 1] - y) <= reach]
+        if len(near):
+            gain[mine] = rest.counts(lines[mine], near)
     ahead, off = kit.cfg.blade_ahead, kit.cfg.blade_offset
     cx, cy = bx - ahead * c + off * s, by - ahead * s - off * c
     order = [int(i) for i in numpy.argsort(-gain, kind='stable') if gain[i] > 0]

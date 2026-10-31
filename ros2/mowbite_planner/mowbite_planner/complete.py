@@ -138,6 +138,9 @@ class Placer:
         self.detours: List[Detour] = []
         self.chain: Optional[Detour] = None
         self.failed: Dict[str, int] = {}
+        # (what _priced and _link work out again and again: the path's windows' costs, the straight ways)
+        self.windows: Dict[Tuple[int, int], Cost] = {}
+        self.lines: Dict[tuple, Optional[Tuple[List[Pose2D], float]]] = {}
 
     def _fail(self, why: str) -> None:
         self.failed[why] = self.failed.get(why, 0) + 1
@@ -145,14 +148,23 @@ class Placer:
     def _link(self, before: Sequence[Pose2D], b: XY, yaw: Optional[float], drives: bool) -> Optional[List[Pose2D]]:
         """From before's last to b (facing yaw): the cheaper of straight on (turning on the spot) and drive.py's way
         (drives), the body checked from before on."""
-        kit, ways = self.kit, []
-        for way in [kit.line(before[-1], b, yaw)] + ([kit.drive(before[-1], b, yaw)] if drives else []):
-            if way is not None and kit.inside(way, True).all():
-                joined = _joined(_plain(before), _plain(way))[0]
-                if kit.fp.poses_fit(joined) and not kit.turns_in_field(joined[len(before) - 1:]):
-                    ways.append(way)
-        return min(ways, key=lambda w: seconds(_counted(kit.fp, _joined(_plain(before), _plain(w))[0]))) if ways \
-            else None
+        kit = self.kit
+        key = (tuple(before), b, yaw)
+        if key not in self.lines:
+            self.lines[key] = self._linked(before, kit.line(before[-1], b, yaw))
+        ways = [w for w in [self.lines[key]] + ([self._linked(before, kit.drive(before[-1], b, yaw))] if drives else [])
+                if w is not None]
+        return min(ways, key=lambda w: w[1])[0] if ways else None
+
+    def _linked(self, before: Sequence[Pose2D], way: Optional[List[Pose2D]]) -> Optional[Tuple[List[Pose2D], float]]:
+        """(way, what it costs on from before) where it's allowed and the body fits from before on, else None."""
+        kit = self.kit
+        if way is None or not kit.inside(way, True).all():
+            return None
+        joined = _joined(_plain(before), _plain(way))[0]
+        if not kit.fp.poses_fit(joined) or kit.turns_in_field(joined[len(before) - 1:]):
+            return None
+        return way, seconds(_counted(kit.fp, joined))
 
     def _around(self, i: int, n: int) -> Tuple[int, int]:
         lo, hi = self.section[i]
@@ -165,7 +177,9 @@ class Placer:
         new = _joined(_plain(P[lo:i + 1]), *[_plain(p) for _, p in parts], _plain(P[i + 1:hi + 1]))[0]
         drives = sum(drive_time(p)['s'] for k, p in parts if k == TRANSIT)
         lines = numpy.concatenate([m.lines for m in moves])
-        return Detour(i, parts, list(moves), _minus(_counted(fp, new, drives), _counted(fp, P[lo:hi + 1])),
+        if (lo, hi) not in self.windows:
+            self.windows[lo, hi] = _counted(fp, P[lo:hi + 1])
+        return Detour(i, parts, list(moves), _minus(_counted(fp, new, drives), self.windows[lo, hi]),
                       self.rest.gain(lines))
 
     def _out(self, i: int, prior: Optional[Detour], m: Move, drives: bool) -> Optional[Detour]:

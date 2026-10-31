@@ -72,20 +72,22 @@ def centre_line(lane: Lane, direction: int, angle: float, cfg: PlannerConfig, ar
 
 
 def body_ends(fp: Footprint, cfg: PlannerConfig, s: Swath, arrive: float, leave: float,
-              count: Callable[[str], None]) -> Optional[Swath]:
+              count: Callable[[str], None], known: Optional[Dict[Tuple[float, float], bool]] = None) -> Optional[Swath]:
     """s pulled back at its ends until the body fits there, and on the quarter arcs of turn_radius the turns arrive and
     leave on: arrive, leave 1 from or to the left, -1 the right, 0 no turn. None if less than min_lane_length is
-    left."""
+    left. known: what's worked out for s already (of other turns: the first half depends on arrive alone, the second on
+    leave)."""
     a, b, yaw = s.a, s.b, s.yaw
     length = math.hypot(b[0] - a[0], b[1] - a[1])
     ux, uy = math.cos(yaw), math.sin(yaw)
     r, quarter = cfg.turn_radius, 0.5 * math.pi
-    known: Dict[float, bool] = {}
+    known = {} if known is None else known
 
     def fits(t: float) -> bool:
-        if t not in known:
-            known[t] = fits_at(t)
-        return known[t]
+        key = (t, leave if t > 0.5 * length else arrive)
+        if key not in known:
+            known[key] = fits_at(t)
+        return known[key]
 
     def fits_at(t: float) -> bool:
         x, y = a[0] + t * ux, a[1] + t * uy

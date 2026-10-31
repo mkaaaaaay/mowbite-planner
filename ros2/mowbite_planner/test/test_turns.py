@@ -15,7 +15,7 @@ from mowbite_planner.config import Lane, PlannerConfig  # noqa: E402
 from mowbite_planner.footprint import Footprint  # noqa: E402
 from mowbite_planner.mathutil import Pose2D, angle_diff  # noqa: E402
 from mowbite_planner.objective import counted  # noqa: E402
-from mowbite_planner.order import EXACT, best_order, exact_order, plan_order  # noqa: E402
+from mowbite_planner.order import EXACT, Guess, best_order, exact_order, plan_order  # noqa: E402
 from mowbite_planner.stripes import Cells, Run  # noqa: E402
 from mowbite_planner.transit import TransitPlanner  # noqa: E402
 from mowbite_planner.turns import Catalog, _as_driven  # noqa: E402
@@ -151,3 +151,15 @@ def test_exact_order_is_the_cheapest(seed):
     assert plan_order(start, link, end) == got  # (up to EXACT groups exactly)
     assert total(best_order(start, link, end)) >= brute - 1e-9
     assert n <= EXACT
+
+
+def test_turning_round_where_no_arc_fits_is_on_the_spot():
+    """A drive arriving at a lane the other way round where it starts at the edge (no room behind it for an arc that
+    turns it round) or leaving facing the edge: the guess turns on the spot there (the order takes the lane's other
+    end, test_simulate's first lane)."""
+    guess = Guess(TransitPlanner(FIELD, 0.0), PlannerConfig())
+    far = Pose2D(5.0, 3.0, math.pi)
+    assert guess(far, Pose2D(0.1, 3.0, 0.0)).spins == 1
+    assert guess(far, Pose2D(1.0, 3.0, 0.0)).spins == 0
+    assert guess(Pose2D(0.1, 3.0, math.pi), Pose2D(5.0, 3.0, 0.0)).spins == 1
+    assert guess(Pose2D(1.0, 3.0, math.pi), Pose2D(5.0, 3.0, 0.0)).spins == 0

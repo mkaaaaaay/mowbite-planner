@@ -38,16 +38,18 @@ class Run:
 
 
 def run_of(lane: Lane, direction: int, angle: float, cfg: PlannerConfig, area: TransitPlanner,
-           fp: Optional[Footprint], arrive: float = 0.0, leave: float = 0.0) -> Tuple[Optional[Run], str]:
+           fp: Optional[Footprint], arrive: float = 0.0, leave: float = 0.0,
+           known: Optional[Dict[Tuple[float, float], bool]] = None) -> Tuple[Optional[Run], str]:
     """lane driven +x (direction 1) or -x as the centre drives it, its ends pulled back for the body and the turns' arcs
-    (swaths), the longest stretch the body fits at every pose: (that or None, why not: a count's key)."""
+    (swaths), the longest stretch the body fits at every pose: (that or None, why not: a count's key). known: see
+    body_ends (the same lane and direction)."""
     said: List[str] = []
     s = centre_line(lane, direction, angle, cfg, area, said.append)
     if s is None:
         return None, 'lanes_shortened'
     clipped = bool(said)
     if fp is not None:
-        s = body_ends(fp, cfg, s, arrive, leave, said.append)
+        s = body_ends(fp, cfg, s, arrive, leave, said.append, known)
     if s is None:
         return None, 'lanes_body'
     run = Run(s.a, s.b, s.yaw, 'lanes_body' in said, clipped)
@@ -244,11 +246,13 @@ def lane_poses(run: Run, cut_start: float, cut_end: float, step: float) -> List[
 def kept_runs(cfg: PlannerConfig, angle: float, area: TransitPlanner, fp: Optional[Footprint]) -> Runs:
     """run_of for every lane, direction and side of the turns, worked out once."""
     known: Dict[Tuple[int, int, float, float], Tuple[Optional[Run], str]] = {}
+    ends: Dict[Tuple[int, int], Dict[Tuple[float, float], bool]] = {}  # (body_ends' of each lane and direction)
 
     def runs(lane: Lane, direction: int, arrive: float, leave: float) -> Tuple[Optional[Run], str]:
         key = (id(lane), direction, arrive, leave)
         if key not in known:
-            known[key] = run_of(lane, direction, angle, cfg, area, fp, arrive, leave)
+            known[key] = run_of(lane, direction, angle, cfg, area, fp, arrive, leave,
+                                ends.setdefault((id(lane), direction), {}))
         return known[key]
 
     return runs

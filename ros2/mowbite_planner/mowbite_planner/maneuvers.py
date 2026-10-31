@@ -94,9 +94,10 @@ def sample_arc(x: float, y: float, heading: float, radius: float, turn: float, s
         n = max(n, abs(turn) * radius / step)
     n = max(1, int(math.ceil(n - 1e-9)))
     out = []
+    sr, sin, cos = side * radius, math.sin, math.cos  # (the same sums, quicker)
     for i in range(n + 1):
         h = heading + turn * i / n
-        out.append(Pose2D(cx + side * radius * math.sin(h), cy - side * radius * math.cos(h), normalize_angle(h)))
+        out.append(Pose2D(cx + sr * sin(h), cy - sr * cos(h), normalize_angle(h)))
     return out
 
 
@@ -108,10 +109,12 @@ def extend(out: List[Pose2D], poses: Sequence[Pose2D]) -> List[Pose2D]:
     """Appends poses to out (in place). Of two poses on the same position only the later one stays: it has
     the heading the mower leaves with."""
     for p in poses:
-        if out and same_position(out[-1], p):
-            out[-1] = p
-        else:
-            out.append(p)
+        if out:  # (same_position, written out: a lot of poses come through here)
+            q = out[-1]
+            if abs(q[0] - p[0]) < SAME_POSITION and abs(q[1] - p[1]) < SAME_POSITION:
+                out[-1] = p
+                continue
+        out.append(p)
     return out
 
 
@@ -330,6 +333,47 @@ def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool 
     same way round or not) and three arcs (the middle one the other way round), shortest first. 'u_turn' where they
     turn half round at most (a U-turn, at a slant where the lanes end at one), 'bulb' where they loop. loops False:
     only the U-turn, both arcs towards entry. turning: none whose arcs turn by more than that (rad) all together."""
+    out = []
+    for way in _dubins_ways(exit_pose, entry, r, loops, turning):
+        poses = [exit_pose]
+        for arc, length in way:
+            p = poses[-1]
+            if abs(arc) > _EPS:
+                extend(poses, sample_arc(p.x, p.y, p.yaw, r, arc, step))
+            elif length > _EPS:
+                extend(poses, sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw), p.y + length * math.sin(p.yaw),
+                                              p.yaw, step))
+        end = poses[-1]
+        if len(poses) < 2 or math.hypot(end.x - entry.x, end.y - entry.y) > 1e-3 or \
+                abs(normalize_angle(end.yaw - entry.yaw)) > 1e-3:
+            continue  # (where rounding makes a way miss)
+        poses[0], poses[-1] = exit_pose, entry
+        if sum(abs(arc) for arc, _ in way) <= math.pi + 1e-6:
+            out.append(Maneuver('u_turn', r, [Piece(poses)]))
+        elif loops:
+            out.append(Maneuver('bulb', r, [Piece(poses)]))
+    return sorted(out, key=lambda m: path_length(m.pieces[0].poses))
+
+
+def dubins_lead(exit_pose: Pose2D, entry: Pose2D, r: float, step: float,
+                turning: float = math.inf) -> Optional[List[Pose2D]]:
+    """The poses inside the first arc (or straight) of dubins()'s way with loops False (there's one at most), all of
+    them poses of that way too; None where there's none (an empty list where the piece has none inside)."""
+    for way in _dubins_ways(exit_pose, entry, r, False, turning):
+        p = exit_pose
+        for arc, length in way:
+            if abs(arc) > _EPS:
+                return sample_arc(p.x, p.y, p.yaw, r, arc, step)[1:-1]
+            if length > _EPS:
+                return sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw), p.y + length * math.sin(p.yaw), p.yaw,
+                                       step)[1:-1]
+        return []
+    return None
+
+
+def _dubins_ways(exit_pose: Pose2D, entry: Pose2D, r: float, loops: bool,
+                 turning: float) -> List[List[Tuple[float, float]]]:
+    """dubins()'s ways as (arc or 0, straight or 0) one after the other, those turning by more than turning left out."""
 
     def centre(p: Pose2D, s: float) -> XY:
         return p.x - s * r * math.sin(p.yaw), p.y + s * r * math.cos(p.yaw)
@@ -365,28 +409,7 @@ def dubins(exit_pose: Pose2D, entry: Pose2D, r: float, step: float, loops: bool 
                 h2 = math.atan2(s1 * (c3[0] - c2[0]), -s1 * (c3[1] - c2[1]))
                 ways.append([(turn(exit_pose.yaw, h1, s1), 0.0), (turn(h1, h2, -s1), 0.0),
                              (turn(h2, entry.yaw, s1), 0.0)])
-    out = []
-    for way in ways:
-        if sum(abs(arc) for arc, _ in way) > turning:
-            continue
-        poses = [exit_pose]
-        for arc, length in way:
-            p = poses[-1]
-            if abs(arc) > _EPS:
-                extend(poses, sample_arc(p.x, p.y, p.yaw, r, arc, step))
-            elif length > _EPS:
-                extend(poses, sample_straight(p.x, p.y, p.x + length * math.cos(p.yaw), p.y + length * math.sin(p.yaw),
-                                              p.yaw, step))
-        end = poses[-1]
-        if len(poses) < 2 or math.hypot(end.x - entry.x, end.y - entry.y) > 1e-3 or \
-                abs(normalize_angle(end.yaw - entry.yaw)) > 1e-3:
-            continue  # (where rounding makes a way miss)
-        poses[0], poses[-1] = exit_pose, entry
-        if sum(abs(arc) for arc, _ in way) <= math.pi + 1e-6:
-            out.append(Maneuver('u_turn', r, [Piece(poses)]))
-        elif loops:
-            out.append(Maneuver('bulb', r, [Piece(poses)]))
-    return sorted(out, key=lambda m: path_length(m.pieces[0].poses))
+    return [way for way in ways if sum(abs(arc) for arc, _ in way) <= turning]
 
 
 def max_heading_jump(poses: Sequence[Pose2D]) -> float:

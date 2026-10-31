@@ -145,7 +145,7 @@ def _greedy(start: List[List[float]], links, k: List[int], last: Optional[int] =
 class Guess:
     """About what a drive costs: the way through the transit space the drives take (straight where that's free, off the
     edges with transit_edge_distance, that counted), on arcs of turn_radius where it turns, on the spot where it turns
-    round on a way too short for them."""
+    round on a way too short for them or where no arc turning it round fits at that end."""
 
     def __init__(self, transit: TransitPlanner, cfg: PlannerConfig) -> None:
         self.transit, self.r = transit, max(cfg.turn_radius, 1e-3)
@@ -153,12 +153,24 @@ class Guess:
         self.fast, self.slow = FTC_SPEEDS['speed_fast'], FTC_SPEEDS['speed_slow']
         self.omega = math.radians(FTC_SPEEDS['speed_angular'])
         self.ways: Dict[Tuple[float, float, float, float], Optional[List[XY]]] = {}
+        self.rooms: Dict[Tuple[float, float, float, float], bool] = {}
 
     def way(self, a: XY, b: XY) -> Optional[List[XY]]:
         key = (round(a[0], 4), round(a[1], 4), round(b[0], 4), round(b[1], 4))
         if key not in self.ways:
             self.ways[key] = self.transit.careful_path(a, b) if self.careful else self.transit.path(a, b)
         return self.ways[key]
+
+    def room(self, p: Pose2D, ahead: float) -> bool:
+        """Whether an arc turning the mower round more than a quarter turn may fit leaving p (ahead 1) or arriving at
+        it (-1): the point the arc passes a quarter turn round, turn_radius beside and ahead of (behind) p, free on
+        either side."""
+        key = (round(p.x, 4), round(p.y, 4), round(p.yaw, 4), ahead)
+        if key not in self.rooms:
+            c, s, r = math.cos(p.yaw), math.sin(p.yaw), self.r
+            self.rooms[key] = any(self.transit.is_free([(p.x + r * (ahead * c - side * s),
+                                                         p.y + r * (ahead * s + side * c))]) for side in (1.0, -1.0))
+        return self.rooms[key]
 
     def __call__(self, a: Pose2D, b: Pose2D, dock: bool = False, straight: bool = False) -> Cost:
         """From a to b, facing their yaw there (None: any way); dock: a way to or from the dock; straight: straight
@@ -176,8 +188,10 @@ class Guess:
         ends = [angle_diff(a.yaw, yaws[0]) if a.yaw is not None else 0.0,
                 angle_diff(yaws[-1], b.yaw) if b.yaw is not None else 0.0]
         bends = sum(angle_diff(p, q) for p, q in zip(yaws, yaws[1:]))
-        arc = min(length, self.r * (sum(ends) + bends))
-        # (turning round at an end of a way too short for its arc: on the spot)
-        spins = sum(1 for e in ends if e > 0.5 * math.pi and length < 2.0 * self.r)
+        # (turning round at an end of a way too short for its arc or with no room for one there: on the spot)
+        spun = [e > 0.5 * math.pi and (length < 2.0 * self.r or not self.room(p, ahead))
+                for e, p, ahead in ((ends[0], a, 1.0), (ends[1], b, -1.0))]
+        spins = sum(spun)
+        arc = min(length, self.r * (sum(e for e, s in zip(ends, spun) if not s) + bends))
         t = (length - arc) / self.fast + arc / self.slow + spins * math.pi / self.omega
         return Cost(spins=spins, time_s=t, transit_s=t, dock_s=t if dock else 0.0)

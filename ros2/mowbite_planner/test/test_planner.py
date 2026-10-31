@@ -12,6 +12,7 @@ import time
 from typing import Dict, List
 
 import pytest
+from shapely import affinity
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
 from shapely.ops import nearest_points, substring, unary_union
 from shapely.prepared import prep
@@ -1027,6 +1028,25 @@ def test_footprint_fit(monkeypatch, corners):
         assert fits == [room.covers(fp.body(p.x, p.y, p.yaw)) for p in poses]
 
 
+def test_all_fit_each_and_swung():
+    """all_fit_each is all_fit for each of the ways, their poses looked at at once (loop_round); swung, the outline
+    turned either way about the centre (the completion stage's moves), holds the body at every heading in between but
+    for a mm."""
+    room = Polygon(rect(0, 0, 4, 3)).difference(Polygon(rect(1.5, 1, 2.5, 2)))
+    fp = Footprint(room, BODY)
+    rng = random.Random(7)
+    ways = []
+    for _ in range(300):
+        x, y, h = rng.uniform(0.3, 3.7), rng.uniform(0.3, 2.7), rng.uniform(-math.pi, math.pi)
+        n = rng.randint(1, 30)
+        ways.append([Pose2D(x + 0.05 * k * math.cos(h), y + 0.05 * k * math.sin(h), h) for k in range(n)])
+    got = fp.all_fit_each(ways)
+    assert got == [fp.all_fit(way) for way in ways] and 30 < sum(got) < 270
+    hull = Polygon(footprint.swung(BODY, math.radians(8)))
+    assert all(hull.buffer(0.0012).covers(affinity.rotate(Polygon(BODY), a, origin=(0, 0))) for a in range(-8, 9))
+    assert not hull.buffer(-0.001).covers(affinity.rotate(Polygon(BODY), 8, origin=(0, 0)))
+
+
 def test_zones_keep_off():
     """space.buffer(-d / KEEP_OFF, 4) keeps d off space's edge, also where it bends a little at every point (recorded)
     and round corners of every angle (GEOS rounds them coarser than with 4 sides a quarter circle)."""
@@ -1958,8 +1978,8 @@ def test_body_fit_ends_before(monkeypatch, lead):
     FIT_START m of loops and lanes out at most. From there a way to where the body turns whatever way it faces, closest
     to where it would end, the body checked (from the path to the dock mower_logic doesn't check it), else to another
     of those (FIT_SPOTS). Where none fits (nothing but the path does near the end here) it says where it ends
-    (unchecked, a warning)."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_order='last'))
+    (unchecked, a warning). mop_up off: a move of its after the loop would end the path."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_order='last', mop_up=False))
     lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
     planned = plan_coverage(lawn, [], dataclasses.replace(cfg, body_fit=False), start=dock, end=dock[:2])
     end, last = planned.poses[-1], set(planned.poses[-2:])
@@ -2157,7 +2177,8 @@ def test_split_zones(base):
 def test_leftovers():
     """mowed (where the blade really went on a mow, report.track_mowed of its track): the plan is only passes over what
     that left, the nearest to the start first, drives between them, the body fitting everywhere. Here a mow that
-    missed every 15th lane: most of that gets mowed, about what the plan itself leaves stays. Nothing left: no plan."""
+    missed every 15th lane: most of that gets mowed, about what the plan itself leaves stays (and by the tree and the
+    bed what the passes leave keeping the body's swing off them, TRACK_TURN). Nothing left: no plan."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     runs, lanes = [[]], 0
@@ -2178,7 +2199,7 @@ def test_leftovers():
     stats = more.stats['leftovers']
     assert stats['left_m2'] == pytest.approx(left(mowed), abs=0.01) and stats['passes'] >= lanes // 15
     assert stats['area'] > 0.7 * stats['left_m2'] and check_plan(more)['body_out'] == []
-    assert left(mowed, swept_area(more, cfg.mower_width)) < left(swept_area(plan, cfg.mower_width)) + 0.5
+    assert left(mowed, swept_area(more, cfg.mower_width)) < left(swept_area(plan, cfg.mower_width)) + 1.0
     assert {(s.kind, s.maneuver) for s in more.segments} == {(LANE, 'leftover'), (TRANSIT, 'leftover')}
     assert more.stats['path_length'] < 0.2 * plan.stats['path_length'] and plan.stats['leftovers'] is None
     assert math.hypot(more.poses[0].x - 1, more.poses[0].y - 1) < 3.0  # (the nearest to the start first)
@@ -2385,7 +2406,8 @@ def test_round_corners():
     """A drive's corner (east, then north at (5, 5)): an arc in its place tangent to both ways, of turn_radius, the
     lanes before and after as they were. At a lane's end the lane ends turn_radius earlier for it (as much as a right
     angle of turn_radius takes, no more where it turns further round) where what that leaves of it is mowed elsewhere
-    (a loop along the lane, in a section of its own here), else an S from the lane's end onto the drive. Where the arc
+    (a loop along the lane, in a section of its own here), else an S from the lane's end onto the drive; a short lane
+    keeps min_lane_length. Where the arc
     doesn't fit (an obstacle in the corner) a tighter one, down to SMOOTH_RADII[-1] of turn_radius; where none does
     the corner stays, as it does where a drive along the headland goes with headland_corners 'sharp'."""
     r = 0.25
@@ -2412,6 +2434,13 @@ def test_round_corners():
     assert out[:segs[0].end] == poses[:infos[0].end] and (out[segs[0].end].x, out[segs[0].end].y) == (5, 5)
     assert max(angle_diff(q.yaw, p.yaw) for p, q in zip(out, out[1:])) <= MAX_ARC_STEP + 1e-9
     assert any(p.x > 5.01 for p in out[segs[1].start:]) and out[-1] == poses[-1]
+    # a short lane keeps min_lane_length of it (not a stub with a drive round it as tight as that)
+    route, poses, infos = corner_route(room, [(LANE, straight(4.82, 5, 5, 5)), (TRANSIT, straight(5, 5, 5, 7)), loop])
+    out, segs = bodyfit._round_corners(route, poses, infos)
+    a, b = out[segs[0].start], out[segs[0].end]
+    assert segs[0].kind == LANE and math.hypot(b.x - a.x, b.y - a.y) >= route.cfg.min_lane_length - 1e-9
+    way = out[:segs[1].end + 1]
+    assert b.x < 5 - 1e-9 and max(angle_diff(q.yaw, p.yaw) for p, q in zip(way, way[1:])) <= MAX_ARC_STEP + 1e-9
     # turning round at a lane's end by 150 degrees: the lane no more than turn_radius shorter
     h = math.radians(150)
     route, poses, infos = corner_route(room, [(LANE, straight(1, 5, 5, 5)),

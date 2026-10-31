@@ -69,6 +69,10 @@ BODY_ROUND_SEGS = 6
 # m, where a turn between two lanes doesn't fit at their ends, they end this much earlier at a time for it (turns.py,
 # what that leaves counted by objective)
 ROUND_STEP = 0.05
+# rad, how far the mower's heading is off its way getting onto and along a stroke of the completion stage (simulated
+# p95 there 7-8.5 deg, against 3.5 a metre after an arc): the strokes are checked with the body turned that much
+# either way, so the corners that swing out keep off the edges (the way across, p95 3 cm, the margins take)
+TRACK_TURN = math.radians(8.0)
 # m, with the body checked: where the path goes another way at a place and leaves LOOP_LEFT m or more of a loop out
 # there (round a bend of the edge the front swings out, and no short way fits), that stretch of the loop runs further in
 # instead: a step of LOOP_IN[0] at a time, LOOP_IN[1] at most (the next loop mows what's further in), getting there and
@@ -90,6 +94,7 @@ LOOP_ROUND = (1.0, 0.75, 0.5, 0.35, 0.25)
 LOOP_ROUND_REACH = 3.0
 LOOP_ROUND_GAP = 1.0
 LOOP_ROUND_TRIES = 6000
+ROUND_BATCH = 64  # ways of loop_round whose bodies are looked at at once at most
 # m, with the body checked: where the path goes another way where it gets onto a loop or off it (the body would stick
 # out turning on the spot there, by an obstacle) and leaves the loop's start or end out for that, the loop goes on past
 # its start by what's left out at both ends and LOOP_ON more: the blade mows at its end what's left out at its start,

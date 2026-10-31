@@ -151,6 +151,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     budget = max(FIT_TRIES, int(FIT_TRIES_M * fp.space.length))
     cap = [budget]  # (more for the way to the start and the one from the end, see lead())
     turns: Dict[Tuple[float, ...], bool] = {}  # fits_turn where and which way, rounded (ways share their corner)
+    drives: Dict[tuple, Optional[List[Pose2D]]] = {}  # drive_on's drives (places close by try the same ones)
 
     def hop(i: int) -> float:  # m from the pose before
         return math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y)
@@ -367,8 +368,11 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
             if gone > FIT_ON_MAX:
                 break
             for k in backs:
-                way = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
-                                     ((out[k].x, out[k].y), out[k].yaw))
+                key = (poses[j], out[k])
+                if key not in drives:
+                    drives[key] = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
+                                                 ((out[k].x, out[k].y), out[k].yaw))
+                way = drives[key]
                 if way and ok([out[k - 1]] if k > first else [], join(way, [poses[j]])):
                     return 0.0, k, j, join(way, [poses[j]])
         return None
@@ -863,6 +867,22 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
             d, j = d + hop, j + step
         return d
 
+    def spare(j: int, h: float, step: int) -> float:
+        # m along h past the drive's straight way from out[j] (back, step -1, or on) the piece next to it may lose: a
+        # lane keeps min_lane_length (a shorter one would be left as a stub, the drive round it as tight as that)
+        j = j - 1 if step < 0 else j
+        while 0 <= j < len(out) - 1 and infos[own[j + 1]].kind == TRANSIT and straight(j, h) > 0.0:
+            j += step
+        if not 0 <= j < len(out) - 1 or infos[own[j + 1]].kind != LANE:
+            return math.inf
+        k, a, b = own[j + 1], j + 1, j + 1
+        while a > 0 and own[a - 1] == k:
+            a -= 1
+        while b < len(out) - 1 and own[b + 1] == k:
+            b += 1
+        a -= shared[k]  # (its first pose)
+        return max(0.0, math.hypot(out[b].x - out[a].x, out[b].y - out[a].y) - route.cfg.min_lane_length)
+
     def ways(p: Pose2D, u: float, w: float, r: float, s: bool) -> Iterator[Tuple[float, float, List[Pose2D]]]:
         # (m before p it leaves the way, m after p it gets back on, the poses between), s: the S's too
         turn = normalize_angle(w - u)
@@ -954,8 +974,8 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
         # (into a loop, lane or turn next to it turn_radius at most, as much as a right angle of that takes: no more of
         # it left out)
         behind, ahead = leg(i, u, -1, True), leg(i, w, 1, True)
-        back = min(leg(i, u, -1), behind + route.cfg.turn_radius)
-        on = min(leg(i, w, 1), ahead + route.cfg.turn_radius)
+        back = min(leg(i, u, -1), behind + min(route.cfg.turn_radius, spare(i, u, -1)))
+        on = min(leg(i, w, 1), ahead + min(route.cfg.turn_radius, spare(i, w, 1)))
         # (with headland_turns out of the lanes' field where the corner is, with headland_corners 'rounded' into it
         # where nothing else fits, no S then)
         clear, here = route.clear([(p.x, p.y)]), []

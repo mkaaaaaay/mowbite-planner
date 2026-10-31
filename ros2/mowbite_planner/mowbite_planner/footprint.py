@@ -109,6 +109,15 @@ class _Zone:
         return contains_points(self.prepared, x, y)
 
 
+def swung(corners: Sequence[Tuple[float, float]], turn: float) -> List[Tuple[float, float]]:
+    """The outline round the body turned by up to turn either way about its centre (the convex hull of the three; at
+    the headings between, its corners pass outside by reach (1 - cos(turn / 2)) at most: 1 mm at 8 degrees)."""
+    pts = [(c * x - s * y, s * x + c * y) for a in (-turn, 0.0, turn) for c, s in [(math.cos(a), math.sin(a))]
+           for x, y in corners]
+    hull = MultiPoint(pts).convex_hull
+    return list(hull.exterior.coords)[:-1] if hull.geom_type == 'Polygon' else list(corners)
+
+
 class Footprint:
     def __init__(self, space, corners: Sequence[Tuple[float, float]], spin_margin: float = 0.0, back: float = 0.0):
         # the body's corners round the centre (x ahead, y left), how far it reaches ahead, behind and to either side
@@ -412,3 +421,20 @@ class Footprint:
                 return False
             poses = [p for k, p in enumerate(poses) if k % SCOUT != SCOUT // 2]
         return all(self._fit(poses)) if poses else True
+
+    def all_fit_each(self, ways: Sequence[Sequence]) -> List[bool]:
+        """[all_fit(way) for way in ways], the poses of all of them looked at at once (many short ways: quicker)."""
+        ways = [[(p.x, p.y, p.yaw) for p in way] for way in ways]
+        out = [True] * len(ways)
+        for scouts in (True, False):
+            which, poses = [], []
+            for k, way in enumerate(ways):
+                if not out[k] or len(way) <= 2 * SCOUT and scouts:
+                    continue
+                some = way if len(way) <= 2 * SCOUT else way[SCOUT // 2::SCOUT] if scouts else \
+                    [p for i, p in enumerate(way) if i % SCOUT != SCOUT // 2]
+                which += [k] * len(some)
+                poses += some
+            for k, fit in zip(which, self._fit(poses) if poses else []):
+                out[k] = out[k] and fit
+        return out
