@@ -159,6 +159,7 @@ import mowbite_planner
 from mowbite_planner import (CoveragePlan, NothingLeft, PlannerConfig, PlanningError, Pose2D, SegmentInfo,
                              plan_coverage, quaternion_to_yaw, yaw_to_quaternion)
 from mowbite_planner import config as limits
+from mowbite_planner.config import IGNORED
 from mowbite_planner.planner import plan_footprint, set_workers
 from mowbite_planner.export import ANSWER_TOO_BIG, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.footprint import Footprint
@@ -744,6 +745,8 @@ class MowbitePlannerRos1:
                 entry['nullable'] = True
             if name in CHOICES:
                 entry['choices'] = CHOICES[name]
+            if name in IGNORED:  # (changes nothing since planner 2: the app hides it)
+                entry['ignored'] = IGNORED[name]
             if name in AUTO_VALUES:
                 entry['auto_value'] = AUTO_VALUES[name]
             if kind == 'number':

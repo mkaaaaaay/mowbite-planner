@@ -133,7 +133,7 @@ SETTING_VALUES: Dict[Any, Tuple[Any, ...]] = {
     'overlap': (0.15, 0.0, 0.4),
     'lane_spacing_mode': ('fixed', 'auto'),
     ('lane_spacing_min', 'lane_spacing_max'): ((None, None), (0.08, 0.12)),
-    'perimeter_passes': (-1, 0, 1, 3),
+    'perimeter_passes': (-1, 0, 1, 3, 4),
     'obstacle_passes': (-1, 0, 2),
     'fill_pattern': ('lanes', 'crosshatch', 'concentric'),
     'crosshatch_angle': (1.5708, 0.7854),

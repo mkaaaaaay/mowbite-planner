@@ -37,6 +37,12 @@ LANE_SPACING_MODES = ('fixed', 'auto')
 SPACING_CANDIDATES = 5
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw', 'random')
 TURN_TYPES = ('u_turn', 'bulb', 'detour', 'pivot')
+# settings taken and checked that change nothing since planner 2, why (planner.settings tells them, "ignored": the app
+# hides them)
+IGNORED = {'turn_radius_auto': 'the turns pick their radius themselves',
+           'bend_max_gap': 'rows split by an obstacle are cells of their own',
+           'bend_max_offset': 'rows split by an obstacle are cells of their own',
+           'lane_overlap_limit': 'the turns take the room there is in the headland'}
 # m, with turn_radius 0 and the body checked every curve but the turns at the lanes' ends (the default turn_radius)
 ZERO_TURN = 0.25
 # 'recorded': the edges are where the mower's centre drove when they were recorded, 'hard': a wall

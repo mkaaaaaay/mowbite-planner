@@ -32,6 +32,7 @@ from .levels import Rings, narrow_left, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
 from .space import _check_coordinates, build_space, margins_of, recorded_space
+from .starts import Arrives, reached_starts
 from .sweep import plan_footprint, swept_area
 from .swaths import lane_sets
 from .transit import TransitPlanner
@@ -109,13 +110,15 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   keep_out: Sequence[Sequence[Sequence[float]]] = (),
                   margins: Sequence[Optional[float]] = (), mowed=None,
                   reach_over: Sequence[Sequence[Sequence[float]]] = (),
-                  unmowed: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
+                  unmowed: Sequence[Sequence[Sequence[float]]] = (), arrives: Optional[Arrives] = None) -> CoveragePlan:
     """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
     SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
     lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
     report.track_mowed): only what that left, see _plan_coverage. With set_workers the plans in processes of their
     own. The slots by the edge stay open (the loops go round one too narrow for the body, levels.body_free): the plan's
-    free_space, robot_space and transit_space are the map's as drawn."""
+    free_space, robot_space and transit_space are the map's as drawn. arrives(pose) (a robot that drives to the plan's
+    sections itself, MowBite OS: whether it gets to the pose facing its heading): every section starts where it does,
+    see starts.reached_starts."""
     cfg = config or PlannerConfig()
     cfg.validate()
     area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed)
@@ -126,9 +129,11 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     else:
         plan = _auto(area, cfg)
     if mowed is not None:
-        return _compact(plan)
-    lawn = area.lawn()
-    return _compact(_blade_on(_ring_ways(_completed(area, plan), lawn), lawn))
+        plan = _compact(plan)
+    else:
+        lawn = area.lawn()
+        plan = _compact(_blade_on(_ring_ways(_completed(area, plan), lawn), lawn))
+    return plan if arrives is None else reached_starts(plan, arrives)
 
 
 class _Area:
@@ -291,11 +296,12 @@ class _Timer:
 
 def _as_recorded(route: _Route, cfg: PlannerConfig, footprint, outlines, away_from, margin_of) -> None:
     """The outermost loop the way the outline was recorded (rings.drive_ring): the body where it was then, the centre
-    no further than RECORDED_CENTRE past the lines (drive_space reaches body_tolerance past the first loop, with
-    edge_margin 0 past the lines: rounding a corner cut it out)."""
+    no further than RECORDED_CENTRE past the lines, a negative perimeter_offset that far (drive_space reaches
+    body_tolerance past the first loop, with edge_margin 0 past the lines: rounding a corner cut it out)."""
     route.recorded_fp = Footprint(recorded_space(outlines, away_from, margin_of, cfg), cfg.body_outline, 0.0,
                                   blade=footprint.blade)
-    route.recorded_centre = union([clean_polygon(r) for r in outlines]).buffer(RECORDED_CENTRE, QUAD_SEGS)
+    out = max(RECORDED_CENTRE, -(cfg.perimeter_offset or 0.0))
+    route.recorded_centre = union([clean_polygon(r) for r in outlines]).buffer(out, QUAD_SEGS)
 
 
 def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),

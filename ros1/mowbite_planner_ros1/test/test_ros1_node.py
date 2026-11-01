@@ -791,6 +791,9 @@ def test_rpc_settings(planner):
     for name, value in (('edge_margin', 0.05), ('obstacle_margin', 0.1), ('spin_margin', 0.05)):
         assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'number', 'settable': True,
                            'unit': 'm', 'min': 0.0, 'max': 1.0}, name
+    # the ones changing nothing since planner 2 say why, the app hides them; the others don't have the key
+    assert s['turn_radius_auto']['ignored'] and s['bend_max_gap']['ignored'] and s['lane_overlap_limit']['ignored']
+    assert 'ignored' not in s['turn_radius'] and 'ignored' not in s['headland_turns']
 
 
 def test_rpc_settings_set(planner):

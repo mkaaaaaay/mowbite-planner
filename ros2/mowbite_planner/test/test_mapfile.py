@@ -289,6 +289,12 @@ def test_settings_for_layers():
     assert (cfg.perimeter_passes, cfg.angle, cfg.turn_types) == (2, None, ('bulb',))
     assert cfg.lane_spacing == pytest.approx(0.2) and cfg.turn_radius == 0.3
     assert base.perimeter_passes == 4  # not changed
+    # lane_spacing_mode auto: the blade as set, not widened to tool_width; the area's or the request's where they set it
+    auto = base.with_overrides({'lane_spacing_mode': 'auto', 'mower_width': 0.18})
+    assert settings_for(auto, params, job).mower_width == 0.18
+    assert settings_for(auto, params, job, {'mower_width': 0.25}).mower_width == 0.25
+    wide = area_job({'areas': [area('a', 'mow', rect(0, 0, 10, 6), planner={'mower_width': 0.22})]}, 0)
+    assert settings_for(auto, params, wide).mower_width == 0.22
     with pytest.raises(PlanningError, match='overlap'):
         settings_for(base, params, job, {'overlap': 1.5})
     for request, what in (({'colour': 'green'}, 'colour'), ({'turn_types': 5}, 'turn_types'),

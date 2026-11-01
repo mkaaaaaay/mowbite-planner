@@ -333,7 +333,9 @@ def settings_for(base: PlannerConfig, params: Optional[Mapping[str, Any]], job: 
     cfg = base.with_overrides(mower).with_overrides(overrides)
     if request:
         cfg = cfg.with_overrides(request)
-    if cfg.lane_spacing_mode == 'auto':  # the blade, not widened to the mower's lane spacing
-        cfg = cfg.with_overrides({'mower_width': base.mower_width})
+    if cfg.lane_spacing_mode == 'auto':  # the blade, not widened to the mower's lane spacing (the area's or the
+        # request's where they have one)
+        width = (request or {}).get('mower_width', overrides.get('mower_width', base.mower_width))
+        cfg = cfg.with_overrides({'mower_width': width})
     cfg.validate()
     return cfg
