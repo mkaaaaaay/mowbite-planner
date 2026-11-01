@@ -30,11 +30,11 @@ from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH, FIT_ROUND, FIT_SPOTS,  # noqa: E402
                                      FIT_START, FIT_TRIES, TURN_AHEAD)
 from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT,  # noqa: E402
-                                    TURN, ZERO_TURN, Lane, PathSegment)
+                                    TRACK, TURN, ZERO_TURN, Lane, PathSegment)
 from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
 from mowbite_planner.drive import _arcs, _spins  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
-from mowbite_planner import export, lead as leadin  # noqa: E402
+from mowbite_planner import export, lead as leadin, spacing  # noqa: E402
 from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.assemble import LaneKit, _drive_way  # noqa: E402
@@ -355,6 +355,16 @@ def test_obstacle_passes(base, obstacles):
     for bad in (-2, 256, 1.5, True):
         with pytest.raises(PlanningError, match='obstacle_passes'):
             PlannerConfig(obstacle_passes=bad).validate()
+
+
+def test_obstacle_passes_without_islands_with_the_body():
+    """With the body checked and no island obstacle_passes changes nothing: the lanes stay inside the outline's loops
+    (body_levels' level k has the edge's min(k, count) loops and each island's own; with 0 they ran up to the first)."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=3))
+    same = plan_coverage(GARDEN, [], cfg, start=(1, 1, 0.0), end=(1, 1))
+    for n in (0, 2):
+        got = plan_coverage(GARDEN, [], dataclasses.replace(cfg, obstacle_passes=n), start=(1, 1, 0.0), end=(1, 1))
+        assert got.poses == same.poses
 
 
 def test_skip_order_turns_forwards_with_the_full_radius():
@@ -2181,17 +2191,20 @@ def test_body_fit_drives_on(monkeypatch):
 
 def test_workers_plan_the_same():
     """With processes of their own (set_workers) the same plan: a bed 0.1 m from the edge leaves a slot too narrow for
-    the body, the plans with it closed and open made at once."""
+    the body, the plans with it closed and open made at once; lane_spacing_mode auto with the widest and the second
+    spacing planned at once."""
     args = (rect(0, 0, 10, 8), [rect(0.1, 3, 1.3, 4)], PlannerConfig(**MOWER, **NX60I))
-    alone = plan_coverage(*args, start=(5, 1, 0.0))
+    auto = (args[0], args[1], PlannerConfig(**MOWER, **NX60I, lane_spacing_mode='auto'))
+    alone = [plan_coverage(*a, start=(5, 1, 0.0)) for a in (args, auto)]
     try:
         planner.set_workers(2)
-        together = plan_coverage(*args, start=(5, 1, 0.0))
+        together = [plan_coverage(*a, start=(5, 1, 0.0)) for a in (args, auto)]
     finally:
         planner.set_workers(0)
     assert space._edge_slot_count(args[0], args[1], args[2], (), (), (), ()) == 1
-    assert [(p.x, p.y, p.yaw) for p in together.poses] == [(p.x, p.y, p.yaw) for p in alone.poses]
-    assert together.stats['edge_slots'] == alone.stats['edge_slots']
+    for one, other in zip(together, alone):
+        assert [(p.x, p.y, p.yaw) for p in one.poses] == [(p.x, p.y, p.yaw) for p in other.poses]
+        assert one.stats['edge_slots'] == other.stats['edge_slots'] and one.stats['chosen'] == other.stats['chosen']
 
 
 def test_body_rounded_corners():
@@ -2973,22 +2986,55 @@ def test_passes_worked_out():
         PlannerConfig(perimeter_passes=-2).validate()
 
 
+def test_swept_area_ways_the_blade_apart():
+    """Loops exactly the blade's width apart: swept_area keeps the holes between them (GEOS buffered a way along such
+    loops into its outline alone, real-mkay/0@mkay planned 0.14 m apart)."""
+    def rounded(a, b, r):
+        return [(x + r * math.cos(math.radians(a0 + 90 * i / 8)), y + r * math.sin(math.radians(a0 + 90 * i / 8)))
+                for x, y, a0 in ((a - r, b - r, 0), (r - a, b - r, 90), (r - a, r - b, 180), (a - r, r - b, 270))
+                for i in range(9)]
+    width = 0.3
+    rings = [rounded(3 - k * width, 2 - k * width, max(0.05, 0.6 - k * width)) for k in range(5)]
+    way = affinity.rotate(LineString([p for ring in rings for p in ring + ring[:1]]), 0.37, origin=(0, 0),
+                          use_radians=True)
+    way = affinity.translate(way, 10.123, -20.456)
+    pts = list(way.coords)
+    poses = [Pose2D(x, y, math.atan2(q[1] - y, q[0] - x)) for (x, y), q in zip(pts, pts[1:] + pts[-1:])]
+    plan = types.SimpleNamespace(poses=poses, section_starts=[0], config=None)
+    swept = swept_area(plan, width)
+    assert swept.area <= swept_area(plan, width + 1e-4).area
+    assert swept.area == pytest.approx(way.buffer(0.5 * width + 1e-4, 4).area, abs=0.01)
+
+
 def test_lane_spacing_auto(monkeypatch):
-    """lane_spacing_mode auto: the widest spacing that leaves nothing unmowed, the same every time, off again with
-    fixed; stats['chosen'] says what it planned with. What the plan leaves isn't worked out where the next spacing's
-    loops and lanes leave no less."""
+    """lane_spacing_mode auto: the widest spacing that leaves nothing unmowed with the blade TRACK narrower each side
+    (the mower off its way), or the widest asked where that has fewer places in spin_margin or leaves LEFT_GAIN less
+    with the whole blade; the same every time, off again with fixed; stats['chosen'] says what it planned with. What
+    the plan leaves isn't worked out where the next spacing's loops and lanes leave no less."""
     # (what's left is at the corners the outer loop turns round further in, see
     # test_body_turns_and_lane_ends_stay_inside)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, lane_spacing_mode='auto', edge_margin=0.0))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, plan.config)
     chosen = plan.stats['chosen']
-    assert chosen['mode'] == 'auto' and chosen['lane_spacing'] == pytest.approx(0.85 * 0.18)
-    assert chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 1.15
+    assert chosen['mode'] == 'auto' and chosen['perimeter_passes'] == 4 and check_plan(plan)['left_m2'] < 1.15
+    widest = dataclasses.replace(cfg, lane_spacing_mode='fixed', overlap=0.15)
+    wide = plan_coverage(GARDEN, [TREE, BED], widest, start=(1, 1, 0.0), end=(1, 1))
+    places = [spacing.turn_places(p, plan_footprint(p)) for p in (plan, wide)]
+    if chosen['lane_spacing'] == pytest.approx(0.85 * 0.18):
+        assert plan.poses == wide.poses
+    else:
+        # (none wider than the blade TRACK narrower each side covers: 0.14 of 0.18, not 0.85 of it)
+        assert chosen['lane_spacing'] <= 0.18 - 2 * TRACK + 1e-9 and places[0] <= places[1]
     swept = []
     monkeypatch.setattr(planner, 'swept_area', lambda *args: swept.append(args) or swept_area(*args))
     again = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
-    assert [(p.x, p.y) for p in again.poses] == [(p.x, p.y) for p in plan.poses] and not swept
+    # (what they leave worked out with the blade TRACK narrower, and as wide as it is to compare two)
+    assert [(p.x, p.y) for p in again.poses] == [(p.x, p.y) for p in plan.poses]
+    assert {round(args[1], 6) for args in swept} <= {round(0.18 - 2 * TRACK, 6), 0.18}
+    # (without the body too: the widest's planned alongside, no places in spin_margin to count)
+    bare = plan_coverage(rect(0, 0, 6, 4), [], PlannerConfig(**dict(MOWER, lane_spacing_mode='auto')))
+    assert bare.stats['chosen']['mode'] == 'auto' and bare.config.body is False
     fixed = plan_coverage(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I)), start=(1, 1, 0.0), end=(1, 1))
     assert fixed.stats['chosen'] == {'lane_spacing': 0.13, 'perimeter_passes': 4, 'mode': 'fixed'}
     # a range of one spacing plans that one

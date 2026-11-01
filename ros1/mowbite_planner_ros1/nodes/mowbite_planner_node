@@ -747,6 +747,14 @@ class MowbitePlannerRos1:
                 entry['choices'] = CHOICES[name]
             if name in IGNORED:  # (changes nothing since planner 2: the app hides it)
                 entry['ignored'] = IGNORED[name]
+            if name in ('lane_spacing_min', 'lane_spacing_max'):  # (what lane_spacing_mode 'auto' goes by)
+                k = name == 'lane_spacing_max'
+                cfg = current.base.with_overrides({'mower_width': current.mower_width})
+                entry['effective'] = round(cfg.spacing_range[k], 4)
+                if k and cfg.spacing_range[1] < cfg.spacing_asked[1] - 1e-9:
+                    entry['effective_why'] = (f'no wider than the blade covers with the mower {limits.TRACK * 100:.0f} '
+                                              'cm off its way each side, but the widest asked where that leaves '
+                                              'less unmowed or sticks into spin_margin less often')
             if name in AUTO_VALUES:
                 entry['auto_value'] = AUTO_VALUES[name]
             if kind == 'number':

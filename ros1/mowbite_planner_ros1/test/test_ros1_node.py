@@ -783,6 +783,9 @@ def test_rpc_settings(planner):
                                     'auto_value': -1, 'min': -1, 'max': 255}
     assert s['lane_spacing_mode']['choices'] == ['fixed', 'auto'] and s['lane_spacing_mode']['value'] == 'fixed'
     assert s['lane_spacing_min']['nullable'] and s['lane_spacing_min']['unit'] == 'm'
+    # (what auto goes by: half the blade, and no wider than the blade covers with the mower 2 cm off each side)
+    assert s['lane_spacing_min']['effective'] == 0.09 and 'effective_why' not in s['lane_spacing_min']
+    assert s['lane_spacing_max']['effective'] == 0.14 and '2 cm' in s['lane_spacing_max']['effective_why']
     assert s['transit_edge_cost']['unit'] == ''
     for name, value in (('headland_turns', False), ('turn_on_spot', False), ('body_fit', True)):
         assert s[name] == {'value': value, 'default': value, 'stored': False, 'type': 'boolean', 'settable': True}

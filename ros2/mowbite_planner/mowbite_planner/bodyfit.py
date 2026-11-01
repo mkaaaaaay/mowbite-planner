@@ -190,6 +190,14 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     def recorded(k: int, j: int) -> bool:  # (a way from out[k] to poses[j], both of a loop driven as recorded)
         return rec is not None and orig[k] is not None and lenient[orig[k]] and lenient[j]
 
+    def checked(k: int, j: int, way: List[Pose2D]) -> bool:  # ok() for a way from out[k] to poses[j]
+        # (out[k] on a way put in before: what's kept of that is checked with this one where it gets off the loops
+        # driven as recorded, it may have been checked as one between poses of those)
+        mild, a = recorded(k, j), k
+        while rec is not None and not mild and not lenient[j] and a > first and orig[a] is None:
+            a -= 1
+        return ok(out[min(a + 1, k - 1):k] if k > first else [], way, mild)
+
     def straight(a: Pose2D, b: Pose2D) -> List[Pose2D]:
         return join(sample_straight(a.x, a.y, b.x, b.y, math.atan2(b.y - a.y, b.x - a.x), step), [b])
 
@@ -350,7 +358,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                 ma = next(m for m, _, r in ons if r == j)
                 for mb, k, into in ins:
                     if (angle_diff(into[-1].yaw, onto[0].yaw) <= SPIN or turns_at(x, y, into[-1].yaw, onto[0].yaw)) \
-                            and ok([out[k - 1]] if k > first else [], join(into, onto), recorded(k, j)):
+                            and checked(k, j, join(into, onto)):
                         return mb + ma, k, j, join(into, onto)
         return None
 
@@ -390,7 +398,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                     drives[key] = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
                                                  ((out[k].x, out[k].y), out[k].yaw))
                 way = drives[key]
-                if way and ok([out[k - 1]] if k > first else [], join(way, [poses[j]]), recorded(k, j)):
+                if way and checked(k, j, join(way, [poses[j]])):
                     return 0.0, k, j, join(way, [poses[j]])
         return None
 
@@ -444,11 +452,10 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
         for least, lost, k, j in pairs:
             if best is not None and least >= best[0] or spent():
                 break
-            before = [out[k - 1]] if k > first else []
             for way in through_room(k, j) if eased is None else ways(out[k], poses[j], eased):
                 field = 0.0 if route.field is None or route.clear([(q.x, q.y) for q in way]) else FIT_FIELD
                 cost = lost + FIT_DRIVE * path_length(way) + field
-                if (best is None or cost < best[0]) and ok(before, way, recorded(k, j)):
+                if (best is None or cost < best[0]) and checked(k, j, way):
                     best = (cost, k, j, way)
                     if not field:
                         break  # (the next way is longer)

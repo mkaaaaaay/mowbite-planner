@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Polygon
 
-from .config import PERIMETER, SWEPT_PIECE, TRANSIT, TURN, XY, CoveragePlan, PlannerConfig, SegmentInfo
+from .config import PERIMETER, SWEPT_PIECE, SWEPT_SLACK, TRANSIT, TURN, XY, CoveragePlan, PlannerConfig, SegmentInfo
 from .footprint import BLADE_SLACK, SPIN, SPIN_BACK, Blade, Footprint
 from .geometry import union
 from .mathutil import Pose2D, normalize_angle
@@ -143,7 +143,7 @@ def swept_area(plan: CoveragePlan, mower_width: float, simplify: float = 0.0):
     # (GEOS takes a lot longer for one long way crossing itself all over than for pieces of it and their union. Cut
     # in the middle of a piece at least the width long, the two ends' round caps lie in the strip of the other half:
     # the union is the same area)
-    return union(LineString(piece).buffer(0.5 * mower_width, 4) for line in lines
+    return union(LineString(piece).buffer(0.5 * mower_width + SWEPT_SLACK, 4) for line in lines
                  for piece in _pieces(list(line.coords), SWEPT_PIECE, mower_width))
 
 

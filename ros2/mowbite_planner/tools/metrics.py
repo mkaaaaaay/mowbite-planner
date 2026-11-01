@@ -350,16 +350,36 @@ def _places(found, near=PLACE):
 def outer_ring(plan) -> List[bool]:
     """For each pose whether it's on the outermost loop along the outline (its PERIMETER segments, by plan.origins:
     of the outline, from level 0), or on a way of the safety net from a pose of it to one of it (like sweep.body_out
-    takes them). Without origins none."""
+    takes them), also where the completion stage put a detour in that way (out and back to where it left, the way goes
+    on from there: the detour's own poses not). Without origins none."""
     origins = getattr(plan, 'origins', None) or {}
     loops = {name for name, o in origins.items() if o.get('kind') == 'outline' and o.get('parent') == 'level-0'}
     on = [False] * len(plan.poses)
     for seg in plan.segments:
         if seg.kind == PERIMETER and seg.source in loops:
             on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
-    for seg in plan.segments:
-        if seg.maneuver == 'body' and on[seg.start] and on[seg.end]:
-            on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
+    segs, P = plan.segments, plan.poses
+    k = 0
+    while k < len(segs):
+        if segs[k].maneuver != 'body':
+            k += 1
+            continue
+        run, j = [segs[k]], k + 1
+        while True:  # (the next piece of the way after a detour that comes back to where it left)
+            m = j
+            while m < len(segs) and segs[m].maneuver == 'mop_up':
+                m += 1
+            if m == j or m == len(segs) or segs[m].maneuver != 'body':
+                break
+            a, b = P[segs[j].start], P[segs[m - 1].end]
+            if math.hypot(a.x - b.x, a.y - b.y) > 1e-3:
+                break
+            run.append(segs[m])
+            j = m + 1
+        if on[run[0].start] and on[run[-1].end]:
+            for seg in run:
+                on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
+        k = j
     return on
 
 

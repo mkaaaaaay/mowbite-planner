@@ -35,6 +35,10 @@ NARROW_PARTS = ('lanes', 'loops')
 LANE_SPACING_MODES = ('fixed', 'auto')
 # lane spacings lane_spacing_mode 'auto' tries, from lane_spacing_max down to lane_spacing_min
 SPACING_CANDIDATES = 5
+# m, how far the mower is off its way, as lane_spacing_mode 'auto' counts it: what the blade leaves between the lanes
+# taken this much narrower each side (the user's mower on RTK: ~1 cm median, 2-3 cm p95; 2 cm: 11 % less left
+# simulated on the real gardens for 3 % more time, 3 cm left more on some, mkay 01.11.)
+TRACK = 0.02
 PERIMETER_DIRECTIONS = ('auto', 'ccw', 'cw', 'random')
 TURN_TYPES = ('u_turn', 'bulb', 'detour', 'pivot')
 # settings taken and checked that change nothing since planner 2, why (planner.settings tells them, "ignored": the app
@@ -118,6 +122,9 @@ FIT_EASE_OFF = 0.01
 RECORDED_CENTRE = 0.02
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
+# m, swept_area: on the blade's half width. Loops or lanes exactly the blade's width apart made GEOS buffer a way along
+# them into its outline alone, the holes lost (real-mkay/0@mkay, 0.14 m apart, the blade TRACK narrower each side)
+SWEPT_SLACK = 1e-6
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
 # all threads: where _fit_body got to (poses, their sections, whether the blade mows on the way to each, [(the furthest
 # pose read, where it got to)]) and the body spaces (_body_space, as WKB), by a hash of what they depend on, the last
@@ -178,7 +185,10 @@ class PlannerConfig:
     finished_mows: int = 0  # all of them so far, the ROS 1 node counts them (see perimeter_direction)
     # m, the first perimeter loop runs this far inside the outline. None: mower_width / 2, the blade's edge
     # on the outline. OpenMower records outlines driving the mower's centre along the edge and uses 0,
-    # negative goes outside the outline (OpenMower's outline_offset allows that too)
+    # negative goes outside the outline (OpenMower's outline_offset allows that too). With the body checked the
+    # first loop keeps edge_margin + simplify_tolerance off the lines (hard edges: half the body's width more, see
+    # blade_loop_offset): less changes nothing there but how far past the lines the outermost loop driven as
+    # recorded may go where it's driven anew (RECORDED_CENTRE at least)
     perimeter_offset: Optional[float] = None
     # m, radius of the turns between lanes, and no arc of a turn, a drive or a loop out is tighter (min_turn_radius):
     # where none fits the drives turn on the spot instead (with the body checked a drive's corner gets a tighter arc
@@ -186,9 +196,9 @@ class PlannerConfig:
     # at one, a bulb or a detour, tighter only where none of those fits where the lanes end (lane_order skip: nor with
     # the lanes ending a little earlier), the lanes ending earlier where nothing fits, never a loop; a drive into a lane
     # ends on a way into it where one fits (the lane starting later for it where that leaves nothing, see
-    # _Route.into_lane). 0 with the body checked: on the spot at the lanes' ends, lane after lane (turn_on_spot,
-    # lane_order snake), every other curve ZERO_TURN wide (all on the spot, a long front by the edges wouldn't fit:
-    # whole loops left out)
+    # _Route.into_lane). 0 with the body checked: lane after lane, at the lanes' ends a half circle of half the
+    # lane spacing or on the spot, the quicker (turn_on_spot, lane_order snake), every other curve ZERO_TURN wide
+    # (all on the spot, a long front by the edges wouldn't fit: whole loops left out)
     turn_radius: float = 0.25
     # the kinds of turns allowed between lanes ('u_turn', 'bulb', 'detour', 'pivot', see turns.py): pivot only with
     # turn_on_spot or where it's the only one
@@ -332,10 +342,18 @@ class PlannerConfig:
             int(self.obstacle_passes)
 
     @property
-    def spacing_range(self) -> Tuple[float, float]:
+    def spacing_asked(self) -> Tuple[float, float]:
+        """lane_spacing_min and lane_spacing_max, half and 0.85 of the blade where not set."""
         lo = 0.5 * self.mower_width if self.lane_spacing_min is None else self.lane_spacing_min
         hi = 0.85 * self.mower_width if self.lane_spacing_max is None else self.lane_spacing_max
         return lo, hi
+
+    @property
+    def spacing_range(self) -> Tuple[float, float]:
+        """The lane spacings lane_spacing_mode 'auto' picks from: spacing_asked, none wider than the blade TRACK
+        narrower each side still covers (where the mower is off its way, see TRACK)."""
+        lo, hi = self.spacing_asked
+        return lo, max(lo, min(hi, self.mower_width - 2.0 * TRACK))
 
     @property
     def lane_spacing(self) -> float:
@@ -516,7 +534,7 @@ class PlannerConfig:
         for name in ('lane_spacing_min', 'lane_spacing_max'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, self.mower_width, lo_open=True)
-        lo, hi = self.spacing_range
+        lo, hi = self.spacing_asked
         if lo > hi:
             raise PlanningError(f'lane_spacing_min must be <= lane_spacing_max, got {lo} > {hi}')
         finite('blade_offset', -MAX_BLADE_OFFSET, MAX_BLADE_OFFSET)

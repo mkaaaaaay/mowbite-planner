@@ -451,6 +451,9 @@ def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]]
     lane_region = inset(free, first + lane_passes * spacing) if lane_out == lane_isl else \
         shrink.shrunk(lane_out, lane_isl)
     if lanes is not None:
+        # (body_levels' level k has the edge's min(k, count) loops and each island's own at once: the side with the
+        # most loops reaches lane_overlap_passes out, the other no further than its own)
+        lane_passes = max(0, most - int(cfg.lane_overlap_passes))
         lane_region = lanes if lane_passes >= most else levels[lane_passes]
     # where the area is too narrow for lanes but wider than the loops reach (a strip of 0.8 to 1 m with the
     # defaults, or narrower ones where the loops stop earlier), what the loops leave in the middle gets a
