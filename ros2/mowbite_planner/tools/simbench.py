@@ -29,7 +29,8 @@ of two settings together at least once (settings_rows()), --settings all both; a
 summary compares them with. The zones of the gardens made by hand (where each situation is) get what's left and
 the places the body sticks out in them (rec['zones'], the summary's Zones).
 
-The simulation (mowbite_planner.simulate) is used if it can be imported, else only the plans are checked.
+The simulation (mowbite_sim.simulate, sim/ in the repository) is used if it can be imported, else only the plans are
+checked.
 """
 
 import argparse
@@ -48,6 +49,7 @@ from multiprocessing.connection import wait
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(TOOLS, '..', '..', '..', 'sim'))  # (the simulation: mowbite_sim)
 sys.path.insert(0, os.path.join(TOOLS, '..'))
 sys.path.insert(0, TOOLS)
 
@@ -64,7 +66,7 @@ from shapely.geometry import Point, Polygon  # noqa: E402
 from shapely.ops import unary_union  # noqa: E402
 
 try:
-    from mowbite_planner.simulate import MowerModel, evaluate, simulate
+    from mowbite_sim.simulate import MowerModel, evaluate, simulate
     SIM_MISSING = ''
 except Exception as e:  # (not there yet, or broken while it's being written)
     MowerModel = evaluate = simulate = None
@@ -969,7 +971,7 @@ def summary(recs: Sequence[Dict[str, Any]], opts: argparse.Namespace, seconds: f
         for a in r['anomalies']:
             by_kind.setdefault(a['kind'], []).append(r['case'])
     sim = f'run with {opts.sim_seeds} seed(s)' if simulate is not None and not opts.no_sim else \
-        f'not run ({"--no-sim" if opts.no_sim else "mowbite_planner.simulate: " + SIM_MISSING})'
+        f'not run ({"--no-sim" if opts.no_sim else "mowbite_sim.simulate: " + SIM_MISSING})'
     out = [f'# simbench {time.strftime("%Y-%m-%d %H:%M")}', '',
            f'{len(recs)} cases, {len(planned)} planned, {len(flagged)} flagged (severity {FLAG:.0f} and up); '
            f'{seconds:.0f} s on {opts.jobs} processes, timeout {opts.timeout:.0f} s. Simulation: {sim}.', '',

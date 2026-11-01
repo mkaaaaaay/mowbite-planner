@@ -76,7 +76,7 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         without paths gets none (mower_logic skips it): start mowing as ever and the mower only mows
                         what was left. That job doesn't count as a mow (angle_increment, duration). armed: s it still is
   planner.simulate      the plan of planner.plan (its params: area_id or outline, settings...) driven by a simulated
-                        mower (mowbite_planner.simulate: OpenMower's FTC controller and mower_logic, the drive,
+                        mower (mowbite_sim.simulate: OpenMower's FTC controller and mower_logic, the drive,
                         xbot_positioning, each a bit off like on a real mower): {model (a preset: realistic, the
                         default, ideal, omsim, or {preset, name: value, ...}: MowerModel's values; this mower's FTC
                         values, wheel distance and antenna offset over the preset's), seeds (1..SIM_SEEDS runs, the
@@ -166,7 +166,7 @@ from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
 from mowbite_planner.mapfile import _points, area_job, area_settings, margins_for, match_area, openmower_settings
 from mowbite_planner.mqtt_service import PlannerService
 from mowbite_planner.report import drive_time, track_mowed
-from mowbite_planner.simulate import MowerModel, evaluate, simulate
+from mowbite_sim.simulate import MowerModel, evaluate, simulate
 
 # set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
 FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',

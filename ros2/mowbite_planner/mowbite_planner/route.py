@@ -71,6 +71,8 @@ class Route:
         # driven the way it was recorded is checked in that (rings.drive_ring, the safety net), the loops (by name)
         # driven so
         self.recorded_fp: Optional[Footprint] = None
+        self.recorded_centre = None  # (and where its centre may go, see planner._as_recorded)
+        self._recorded_centre = None  # (prepared)
         self.recorded_loops: set = set()
         self.loop_side: Dict[str, float] = {}  # loop -> 1 driven with the mowable side on its left, -1 on its right
         self.angle = 0.0

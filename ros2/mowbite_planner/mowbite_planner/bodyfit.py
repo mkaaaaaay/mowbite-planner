@@ -1053,13 +1053,14 @@ def _turn_at(route: BodyRoute, poses: List[Pose2D],
              infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
     """Where the path turns on the spot (the heading jumping by more than footprint.SPIN) and the way in
     is longer than twice TURN_AHEAD, a pose TURN_AHEAD before the point on it, facing the way it came (where the body
-    fits so)."""
+    fits so; not where the way in goes the new way already, turned at its start)."""
     first = {info.start for k, info in enumerate(infos) if k == 0 or infos[k - 1].section != info.section}
     out, at = [], []  # (at: where the poses are put in, by the index of the one after)
     for i, p in enumerate(poses):
         q = poses[i - 1] if i else p
         d = math.hypot(p.x - q.x, p.y - q.y)
-        if i not in first and angle_diff(p.yaw, q.yaw) > SPIN and d > 2.0 * TURN_AHEAD:
+        if i not in first and angle_diff(p.yaw, q.yaw) > SPIN and d > 2.0 * TURN_AHEAD and \
+                (p.x - q.x) * math.cos(q.yaw) + (p.y - q.y) * math.sin(q.yaw) > 0.0:
             f = TURN_AHEAD / d
             ahead = Pose2D(p.x + f * (q.x - p.x), p.y + f * (q.y - p.y), q.yaw)
             if route.body([ahead]):

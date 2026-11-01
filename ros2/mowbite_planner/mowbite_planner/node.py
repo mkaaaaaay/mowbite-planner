@@ -5,9 +5,6 @@ Services
       boundary + obstacles as geometry_msgs/Polygon in, the route as nav_msgs/Path out (plus where its
       perimeter loops, lanes, turns and transits are). Any of the node's parameters can be overridden per
       request (overrides).
-  ~/plan_path (mowbite_planner_interfaces/srv/PlanPath)
-      the request and response of OpenMower's slic3r_coverage_planner/PlanPath. Started with the node
-      name slic3r_coverage_planner it's at the same name as OpenMower's (slic3r_coverage_planner/plan_path).
   ~/plan_from_parameters (std_srvs/srv/Trigger)
       plans the area in the parameters boundary_polygon and obstacles, the result goes out on the topic.
 
@@ -35,10 +32,9 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from std_msgs.msg import Header
 from std_srvs.srv import Trigger
 
-from mowbite_planner_interfaces.msg import Path as PlanPiece
-from mowbite_planner_interfaces.srv import PlanCoverage, PlanPath
+from mowbite_planner_interfaces.srv import PlanCoverage
 
-from .export import MAX_PATH_POSES, fingerprint, plan_pieces
+from .export import fingerprint
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
                      NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
@@ -172,8 +168,6 @@ PARAMETERS = {
     'transit_edge_cost': (2.0, 'every metre of a transit closer to the edge than transit_edge_distance counts this '
                           'much more', lambda v: v >= 0.0, 'must be >= 0'),
     'publish_path': (True, 'publish every plan on ~/coverage_path', None, ''),
-    'max_path_poses': (MAX_PATH_POSES, '~/plan_path splits longer paths (OpenMower counts poses in an int16)',
-                       lambda v: v >= 4, 'must be >= 4'),
 }
 RANGES = {
     'mower_width': (0.01, 5.0),
@@ -192,7 +186,6 @@ RANGES = {
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),
 }
-FILL_TYPES = {PlanPath.Request.FILL_LINEAR: 'lanes', PlanPath.Request.FILL_CONCENTRIC: 'concentric'}
 # m, float32 has steps of 1 mm or less up to here
 FLOAT32_RANGE = 8192.0
 
@@ -295,10 +288,8 @@ class MowbitePlannerNode(Node):
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._path_pub = self.create_publisher(Path, '~/coverage_path', latched)
         self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage)
-        self.create_service(PlanPath, '~/plan_path', self._on_plan_path)
         self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters)
-        self.get_logger().info('MowBite Planner ready: services ~/plan_coverage, ~/plan_path and '
-                               '~/plan_from_parameters')
+        self.get_logger().info('MowBite Planner ready: services ~/plan_coverage and ~/plan_from_parameters')
 
     # parameters
 
@@ -400,42 +391,6 @@ class MowbitePlannerNode(Node):
         response.segment_end = [int(s.end) for s in plan.segments]
         response.segment_type = [int(SEGMENT_TYPES[kind]) for kind in out_kinds(plan.segments)]
         response.segment_reverse = [bool(s.reverse) for s in plan.segments]
-        return response
-
-    def _on_plan_path(self, request, response):
-        # OpenMower's request: distance is the lane spacing, the blade's width is the parameter
-        if request.fill_type not in FILL_TYPES:
-            self.get_logger().error(f'plan_path: fill_type {request.fill_type} is not supported')
-            return response
-        if not request.distance > 0.0:
-            self.get_logger().error(f'plan_path: distance must be > 0, got {request.distance}')
-            return response
-        values = self.values()
-        width = max(float(values['mower_width']), float(request.distance))
-        overrides = dict(
-            fill_pattern=FILL_TYPES[request.fill_type],
-            # OpenMower added its mow_angle_offset already, the node's angle offset and range don't apply
-            angle=float(request.angle),
-            angle_offset=0.0,
-            angle_min=None,
-            angle_max=None,
-            mower_width=width,
-            overlap=1.0 - float(request.distance) / width,
-            perimeter_offset=float(request.outer_offset),
-            perimeter_passes=int(request.outline_count),
-            lane_overlap_passes=int(request.outline_overlap_count),
-            skip_outline_loops=bool(request.skip_area_outline),
-            skip_obstacle_loops=bool(request.skip_obstacle_outlines),
-            skip_lanes=bool(request.skip_fill),
-        )
-        outline, holes = xy(request.outline), [xy(poly) for poly in request.holes]
-        plan, path, _ = self.plan(outline, holes, values, overrides, warnings=float32_warnings([outline, *holes]))
-        if plan is None:
-            return response
-        # the pieces share the path's poses, also the one where a piece ends and the next one starts
-        response.paths = [PlanPiece(is_outline=1 if is_outline else 0,
-                                    path=Path(header=path.header, poses=path.poses[a:b + 1]))
-                          for is_outline, a, b in plan_pieces(plan, values['max_path_poses'])]
         return response
 
     def _on_plan_from_parameters(self, request, response):

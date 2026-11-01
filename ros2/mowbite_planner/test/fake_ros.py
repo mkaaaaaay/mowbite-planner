@@ -116,7 +116,7 @@ def _parse(text, package):
 def _interfaces(package, folder):
     msgs = types.ModuleType(f'{package}.msg')
     srvs = types.ModuleType(f'{package}.srv')
-    for fname in sorted(os.listdir(os.path.join(folder, 'msg'))):
+    for fname in sorted(os.listdir(os.path.join(folder, 'msg')) if os.path.isdir(os.path.join(folder, 'msg')) else []):
         with open(os.path.join(folder, 'msg', fname)) as f:
             fields, constants = _parse(f.read(), package)
         setattr(msgs, fname[:-4], _message(f'{package}/{fname[:-4]}', fields, constants))

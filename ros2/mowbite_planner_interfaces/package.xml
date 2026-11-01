@@ -3,7 +3,7 @@
 <package format="3">
   <name>mowbite_planner_interfaces</name>
   <version>0.1.0</version>
-  <description>Service definitions of the MowBite Planner, its own and one matching OpenMower's PlanPath</description>
+  <description>Service definitions of the MowBite Planner</description>
   <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
   <license>GPL-3.0-only</license>
 

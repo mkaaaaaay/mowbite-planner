@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # the node keeps the settings changed over RPC in $ROS_HOME, not in the real one
 os.environ['ROS_HOME'] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner'))
+sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'sim'))
 
 
 class Msg:

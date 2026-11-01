@@ -107,6 +107,9 @@ LOOP_ON = 0.5
 # front swinging out FIT_EASE_OFF m at most)
 FIT_EASE = 1.5
 FIT_EASE_OFF = 0.01
+# m, the outermost loop driven the way the outline was recorded: its centre this far past the lines as drawn at most
+# (rounding a corner, a stretch driven anew; with edge_margin 0 the space the body was in let it out further)
+RECORDED_CENTRE = 0.02
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for

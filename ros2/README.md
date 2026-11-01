@@ -4,17 +4,19 @@ The planner as a ROS 2 node (Humble and Jazzy, Python, shapely). It mows an area
 a few loops along the edge and around every bed and tree, then straight lanes, with turns that keep the wheels
 rolling instead of tearing up the lawn. Out comes a `nav_msgs/Path` in the `map` frame.
 
-It doesn't need OpenMower or the MowBite app, but it fits OpenMower: besides its own service it answers OpenMower's
-`PlanPath` field by field. For OpenMower as it is today (ROS 1) use [`../ros1`](../ros1/README.md).
+It doesn't need OpenMower or the MowBite app. For OpenMower as it is today (ROS 1) use [`../ros1`](../ros1/README.md),
+it answers OpenMower's `PlanPath` field by field.
 
 ## Packages
 
 | Package | What's in it |
 | --- | --- |
-| `mowbite_planner_interfaces` | `PlanCoverage.srv`, OpenMower's `PlanPath.srv` and `Path.msg` (ament_cmake, a `.srv` needs it) |
+| `mowbite_planner_interfaces` | `PlanCoverage.srv` (ament_cmake, a `.srv` needs it) |
 | `mowbite_planner` | the planner (`planner.py` with `config.py`, `objective.py`, `rings_old.py`, `lanes.py`, `swaths.py`, `stripes.py`, `turns.py`, `order.py`, `assemble.py`, `complete.py`, `strokes.py`, `bodyfit.py`, `maneuvers.py`, `transit.py`, `footprint.py`; only shapely), the node, the MQTT service, `tools/plot_coverage.py`, tests |
 
-The planner itself imports nothing from ROS, so it runs and plots on any PC with shapely.
+The planner itself imports nothing from ROS, so it runs and plots on any PC with shapely. The simulation of OpenMower
+driving a plan (`mowbite_sim`, for the ROS 1 node and the measuring tools) is in [`../sim`](../sim), not in these
+packages.
 
 ## How it plans
 
@@ -46,9 +48,6 @@ The same input always gives exactly the same poses (on the same shapely and GEOS
   between parts), `overrides` (any parameter, this request only), optional fixed `angle`, `start_pose` (the path
   starts on the loop next to it) and `end_point` (ends close to it). Answers the path, `section_start`, the angle,
   lane spacing, length, a SHA-256 `fingerprint` and the segments (loop, lane, turn, transit).
-- **`~/plan_path`** (`PlanPath`): OpenMower's request and answer, field by field (`Path[] paths`, loops
-  `is_outline` 1, lanes with their turns 0). Paths longer than `max_path_poses` (30000) are cut, OpenMower counts
-  poses in an int16.
 - **`~/plan_from_parameters`** (`Trigger`): plans `boundary_polygon` and `obstacles` from the parameters, for trying
   things out.
 - **`~/coverage_path`** (`nav_msgs/Path`, transient local): every plan.
@@ -116,7 +115,6 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `bend_max_gap`, `bend_max_offset` | 0.0, 0.5 | let lanes bend round small obstacles up to this gap (m) |
 | `transit_edge_distance`, `transit_edge_cost` | 0.0, 2.0 | make drives keep further off the edges where cheap |
 | `publish_path` | true | publish every plan on `~/coverage_path` |
-| `max_path_poses` | 30000 | `~/plan_path` cuts longer paths |
 
 The MQTT service and the ROS 1 node take every planner setting (`PlannerConfig` in `config.py`), also
 `lane_spacing_mode` (`auto` picks the spacing), `nested_areas`, `angle_increment` and friends.

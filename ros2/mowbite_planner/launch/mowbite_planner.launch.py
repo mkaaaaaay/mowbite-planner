@@ -2,8 +2,6 @@
 
     ros2 launch mowbite_planner mowbite_planner.launch.py
     ros2 launch mowbite_planner mowbite_planner.launch.py params_file:=/path/to/my.yaml
-    # OpenMower's name: the PlanPath service is then /slic3r_coverage_planner/plan_path
-    ros2 launch mowbite_planner mowbite_planner.launch.py node_name:=slic3r_coverage_planner
 """
 
 from launch import LaunchDescription
@@ -22,7 +20,7 @@ def generate_launch_description():
             description='parameter file of the planner'),
         DeclareLaunchArgument(
             'node_name', default_value='mowbite_planner',
-            description='node name, its services and topic are under it (~/plan_coverage, ~/plan_path, ...)'),
+            description='node name, its services and topic are under it (~/plan_coverage, ...)'),
         Node(
             package='mowbite_planner',
             executable='mowbite_planner_node',

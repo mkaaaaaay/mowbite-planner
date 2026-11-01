@@ -420,7 +420,8 @@ def rules(plan, ref: Ref) -> Dict[str, Any]:
     import shapely
     P = plan.poses
     xy = np.array([(p.x, p.y) for p in P]).reshape(-1, 2)
-    zone = ref.allowed.buffer(OUT_TOL)
+    # (a negative perimeter_offset asks for the loops that far outside the lines: the centre may go there, mkay 01.11.)
+    zone = ref.allowed.buffer(max(OUT_TOL, -(getattr(ref.cfg, 'perimeter_offset', None) or 0.0)))
     out = int((~shapely.contains_xy(zone, xy[:, 0], xy[:, 1])).sum()) if len(xy) else 0
     back = dup = 0
     for part in _sections_of(P, plan.section_starts):
@@ -509,7 +510,7 @@ def sim_numbers(plan, samples, ref: Ref) -> Dict[str, Any]:
     and BODY_CONTACT past the real edges (r0_n, r0_worst, r0_at); of those following one on it the places BODY_DEEP
     out of the recorded space (ring_n5, ring_worst, ring_at) and past the real edges (ring_r0_n, ring_r0_worst,
     ring_r0_at)."""
-    from mowbite_planner.simulate import body_places, mowed_area
+    from mowbite_sim.simulate import body_places, mowed_area
     out: Dict[str, Any] = {}
     rest = _rest(ref.lawn, mowed_area(_as(plan, free_space=ref.lawn, config=ref.cfg), samples))
     out['lawn_left_m2'] = round(sum(p.area for p in rest), 4)

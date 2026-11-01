@@ -8,13 +8,14 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', '..', 'ros2', 'mowbite_planner')]
 
 from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner.mathutil import Pose2D  # noqa: E402
-from mowbite_planner.simulate import (_FOLLOWING, APPROACH, HISTORY_DIST, PATH, MowerModel, _decimate,  # noqa: E402
-                                      _Ftc, _History, _rdp, evaluate, simulate)
+from mowbite_sim.simulate import (_FOLLOWING, APPROACH, HISTORY_DIST, PATH, MowerModel, _decimate,  # noqa: E402
+                                  _Ftc, _History, _rdp, evaluate, simulate)
 
 
 def rect(x0, y0, x1, y1):

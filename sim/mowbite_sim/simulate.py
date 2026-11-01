@@ -10,6 +10,30 @@ MowerModel() is an ideal mower (OpenMower knows where it is, the wheels do what 
 own errors, a bit better than OpenMower's simulator), MowerModel.omsim() like OpenMower's simulator, and
 MowerModel.realistic(seed) like a real one with RTK (its errors calibrated on the user's tracks)."""
 
+# Ported from OpenMower (https://github.com/ClemensElflein/open_mower_ros, licensed GPLv3 like this repository; the
+# upstream commit where it's named below): the FTC controller (src/lib/ftc_local_planner, ftc_planner.cpp),
+# mower_logic's ways of driving a path (src/mower_logic, MowingBehavior.cpp), the EKF of xbot_positioning
+# (src/lib/xbot_positioning) and the position history of xbot_monitoring (src/lib/xbot_monitoring, PositionHistory.h).
+# xbot_positioning and xbot_monitoring carry this notice of their own:
+#
+#   MIT License
+#
+#   Copyright (c) 2022 Clemens Elflein
+#
+#   Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+#   documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+#   the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+#   permit persons to whom the Software is furnished to do so, subject to the following conditions:
+#
+#   The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+#   the Software.
+#
+#   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+#   THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+#   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#   SOFTWARE.
+
 import collections
 import dataclasses
 import math
@@ -20,13 +44,13 @@ from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 from shapely.strtree import STRtree
 
-from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, PlanningError
-from .export import plan_pieces
-from .footprint import Footprint
-from .geometry import union
-from .mathutil import Pose2D
-from .sweep import swept_area
-from .report import drive_time, left_of
+from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, PlanningError
+from mowbite_planner.export import plan_pieces
+from mowbite_planner.footprint import Footprint
+from mowbite_planner.geometry import union
+from mowbite_planner.mathutil import Pose2D
+from mowbite_planner.sweep import swept_area
+from mowbite_planner.report import drive_time, left_of
 
 # Move Base Flex's controller loop (move_base_legacy_relay sets move_base's defaults at OpenMower's start): the first
 # command of a plan comes this many s after the plan (setPlan and computeVelocityCommands in the same loop, so FTC's D

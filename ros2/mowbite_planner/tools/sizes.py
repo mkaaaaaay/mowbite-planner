@@ -12,7 +12,7 @@ import sys
 MAX_MODULE = 600
 MAX_FUNCTION = 80
 KEPT = {'__init__', 'angles', 'bodyfit', 'config', 'drive', 'export', 'footprint', 'geometry', 'maneuvers', 'mapfile',
-        'mathutil', 'mqtt_service', 'node', 'report', 'simulate', 'space', 'sweep', 'transit'}
+        'mathutil', 'mqtt_service', 'node', 'report', 'space', 'sweep', 'transit'}
 OLD = {'lanes'}
 
 

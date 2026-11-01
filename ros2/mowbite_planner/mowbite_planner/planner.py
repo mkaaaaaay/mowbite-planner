@@ -23,8 +23,8 @@ from .assemble import mow_parts
 from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
 from .complete import complete, leftovers
 from .config import (_BODY_SPACE, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, PERIMETER, SPACING_CANDIDATES, XY,
-                     ZERO_TURN, CoveragePlan, Lane, NothingLeft, PlannerConfig, PlanningError)
-from .geometry import clean_polygon, polygonal, polygons, rings, subtract
+                     RECORDED_CENTRE, ZERO_TURN, CoveragePlan, Lane, NothingLeft, PlannerConfig, PlanningError)
+from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subtract, union
 from .handover import _blade_on, _compact, _lengths, _ring_ways
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
@@ -289,6 +289,15 @@ class _Timer:
         self.lap = now
 
 
+def _as_recorded(route: _Route, cfg: PlannerConfig, footprint, outlines, away_from, margin_of) -> None:
+    """The outermost loop the way the outline was recorded (rings.drive_ring): the body where it was then, the centre
+    no further than RECORDED_CENTRE past the lines (drive_space reaches body_tolerance past the first loop, with
+    edge_margin 0 past the lines: rounding a corner cut it out)."""
+    route.recorded_fp = Footprint(recorded_space(outlines, away_from, margin_of, cfg), cfg.body_outline, 0.0,
+                                  blade=footprint.blade)
+    route.recorded_centre = union([clean_polygon(r) for r in outlines]).buffer(RECORDED_CENTRE, QUAD_SEGS)
+
+
 def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
                    config: Optional[PlannerConfig] = None, start: Optional[Sequence[float]] = None,
                    end: Optional[Sequence[float]] = None,
@@ -350,10 +359,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         probe['alone'] = (space.free, loop_rings, passes, 0.5 * cfg.mower_width)
     route, start_xy = _new_route(cfg, space, footprint, rings_of, passes, start, end, boundary)
     if footprint is not None and cfg.edges == 'recorded' and rings_of.owners is not None:
-        # the outermost loop the way the outline was recorded: where the body was then (rings.drive_ring)
-        route.recorded_fp = Footprint(recorded_space([boundary] + list(drivable) + list(reach_over),
-                                                     list(obstacles) + list(keep_out), margin_of, cfg),
-                                      cfg.body_outline, 0.0, blade=footprint.blade)
+        _as_recorded(route, cfg, footprint, [boundary] + list(drivable) + list(reach_over),
+                     list(obstacles) + list(keep_out), margin_of)
     if mowed is None:
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)

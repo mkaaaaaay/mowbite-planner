@@ -69,13 +69,14 @@ OpenMower's `.env`, restart OpenMower, then stop the planner's stack.
 How it plans, every setting and the RPCs over MQTT: [`ros1/README.md`](ros1/README.md) (with OpenMower) and
 [`ros2/README.md`](ros2/README.md) (the planner itself). For OpenMower only `ros1/` is needed. `ros2/` holds the
 planner (plain Python with shapely, used by both), a ROS 2 node for robots that already run ROS 2, and
-`tools/plot_coverage.py` to draw a plan on a PC.
+`tools/plot_coverage.py` to draw a plan on a PC. `sim/` simulates OpenMower driving a plan (parts of OpenMower
+ported, see there), for the ROS 1 node's `planner.simulate` and the measuring tools.
 
 Tests (the planner only needs shapely, the tests pytest):
 
 ```bash
 python3 -m venv /tmp/venv && /tmp/venv/bin/pip install shapely pytest
-/tmp/venv/bin/python -m pytest ros2/mowbite_planner/test ros1/mowbite_planner_ros1/test
+/tmp/venv/bin/python -m pytest ros2/mowbite_planner/test ros1/mowbite_planner_ros1/test sim/test
 ```
 
 ## License

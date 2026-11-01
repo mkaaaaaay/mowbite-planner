@@ -17,3 +17,4 @@ jobs:
       - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q shapely pytest
       - run: /tmp/venv/bin/python -m pytest ros2/mowbite_planner/test -q -p no:cacheprovider
       - run: /tmp/venv/bin/python -m pytest ros1/mowbite_planner_ros1/test -q -p no:cacheprovider
+      - run: /tmp/venv/bin/python -m pytest sim/test -q -p no:cacheprovider
