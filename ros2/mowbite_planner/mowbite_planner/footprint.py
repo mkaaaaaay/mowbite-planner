@@ -41,6 +41,12 @@ SPIN_BACK = 0.1
 OUT_STEP = 0.004
 OUT_ARC = 0.01
 OUT_NEAR = 0.15
+# m, how far the blade's disc may reach over an area not to mow (Blade): a loop along its line half the mower width
+# off it comes a mm or two closer here and there
+BLADE_SLACK = 0.002
+# rad between the headings the blade's checked at turning on the spot (its middle 0.2 mm off the arc between, 0.185 m
+# ahead)
+BLADE_TURN = math.radians(5.0)
 # fits_turn's answers kept (the same turn again, to the bit: the same answer), cleared at this many
 TURNS_KEPT = 100000
 # fit's and fits_pose's answers kept for poses the same way (most poses are asked about again and again: the ways
@@ -118,8 +124,114 @@ def swung(corners: Sequence[Tuple[float, float]], turn: float) -> List[Tuple[flo
     return list(hull.exterior.coords)[:-1] if hull.geom_type == 'Polygon' else list(corners)
 
 
+class Blade:
+    """The blade kept off the areas not to mow next to the area (away; mkay 31.10.: the body may reach over into
+    one, the blade not): its disc, half m round its middle ahead m ahead of the mower's centre and left m to its left,
+    at a pose facing its way (and turned up to turn either way about the centre, see strokes.TRACK_TURN), turning on
+    the spot at the headings between, BLADE_TURN apart."""
+
+    def __init__(self, away, half: float, ahead: float, left: float, turn: float = 0.0) -> None:
+        self.away, self.half, self.ahead, self.left, self.turn = away, half, ahead, left, turn
+        self.key = (away.wkb, half, ahead, left, turn)
+        # a blade's middle in here reaches over (GEOS's rounded corners lie inside the circle)
+        self.zone = away.buffer(half - BLADE_SLACK, QUAD_SEGS)
+        self._zone = prep(self.zone)
+        # a centre outside this, the blade's off them whichever way it faces
+        self.near = away.buffer((half + math.hypot(ahead, left)) / KEEP_OFF, 4)
+        self._near = prep(self.near)
+
+    @classmethod
+    def of(cls, away, cfg) -> Optional['Blade']:
+        """The blade of cfg kept off away (a geometry), None where there's nothing."""
+        if away is None or away.is_empty:
+            return None
+        return cls(away, 0.5 * cfg.mower_width, cfg.blade_ahead, cfg.blade_offset)
+
+    def turned(self, turn: float) -> 'Blade':
+        return self if turn == self.turn else Blade(self.away, self.half, self.ahead, self.left, turn)
+
+    def _at(self, x: float, y: float, yaw: float) -> Tuple[float, float]:
+        """The blade's middle at (x, y) facing yaw."""
+        c, s = math.cos(yaw), math.sin(yaw)
+        return x + self.ahead * c - self.left * s, y + self.ahead * s + self.left * c
+
+    def _headings(self, yaw0: float, yaw1: Optional[float] = None) -> List[float]:
+        """Facing yaw0 (and turned either way), or turning on the spot from yaw0 to yaw1 (the shorter way round, both
+        ways where they're about as long, see Footprint._turns) and turned on past both ends."""
+        if yaw1 is None:
+            return [yaw0 - self.turn, yaw0, yaw0 + self.turn] if self.turn else [yaw0]
+        out = []
+        for t in Footprint._turns(yaw0, yaw1):
+            turn = t[-1] - t[0]
+            a, b = yaw0 - math.copysign(self.turn, turn), yaw0 + turn + math.copysign(self.turn, turn)
+            n = max(1, int(math.ceil(abs(b - a) / BLADE_TURN)))
+            out += [a + (b - a) * i / n for i in range(n + 1)]
+        return out
+
+    def _over(self, xs: Sequence[float], ys: Sequence[float]) -> List[bool]:
+        """Whether the blade's middles at xs, ys lie in zone."""
+        if contains_xy is not None:
+            return contains_xy(self.zone, numpy.asarray(xs, float), numpy.asarray(ys, float)).tolist()
+        return [self._zone.contains(Point(x, y)) for x, y in zip(xs, ys)]
+
+    def _near_at(self, xs: Sequence[float], ys: Sequence[float]) -> List[bool]:
+        if contains_xy is not None:
+            return contains_xy(self.near, numpy.asarray(xs, float), numpy.asarray(ys, float)).tolist()
+        return [self._near.contains(Point(x, y)) for x, y in zip(xs, ys)]
+
+    def off(self, poses: Sequence[Tuple[float, float, float]]) -> List[bool]:
+        """For each (x, y, yaw) of poses: whether the blade's off the areas there."""
+        if not poses:
+            return []
+        near = self._near_at([p[0] for p in poses], [p[1] for p in poses])
+        out = [not n for n in near]
+        which = [k for k, n in enumerate(near) if n]
+        if which:
+            xs, ys, owner = [], [], []
+            for k in which:
+                x, y, yaw = poses[k]
+                for h in self._headings(yaw):
+                    bx, by = self._at(x, y, h)
+                    xs.append(bx)
+                    ys.append(by)
+                    owner.append(k)
+            over = set(k for k, o in zip(owner, self._over(xs, ys)) if o)
+            for k in which:
+                out[k] = k not in over
+        return out
+
+    def off_turning(self, x: float, y: float, yaw0: float, yaw1: float, dx: float = 0.0, dy: float = 0.0) -> bool:
+        """Whether the blade's off the areas turning on the spot from yaw0 to yaw1 anywhere from (x, y) to (dx, dy)
+        back from there."""
+        ends = [(x, y)] + ([(x - dx, y - dy)] if dx or dy else [])
+        ends = [e for e, n in zip(ends, self._near_at([e[0] for e in ends], [e[1] for e in ends])) if n]
+        if not ends:
+            return True
+        hs = self._headings(yaw0, yaw1)
+        xs, ys = zip(*[self._at(ex, ey, h) for ex, ey in ends for h in hs])
+        return not any(self._over(xs, ys))
+
+    def depth(self, x: float, y: float, yaw0: float, yaw1: Optional[float] = None, dx: float = 0.0,
+              dy: float = 0.0) -> Tuple[float, Optional[Tuple[float, float]]]:
+        """(m, (x, y)): how far the blade's middle lies in zone at its deepest, at a pose facing yaw0 (turning on the
+        spot from yaw0 to yaw1 anywhere from (x, y) to (dx, dy) back), and where; (0, None) where it's off the
+        areas."""
+        ends = [(x, y)] + ([(x - dx, y - dy)] if yaw1 is not None and (dx or dy) else [])
+        pts = [self._at(ex, ey, h) for ex, ey in ends for h in self._headings(yaw0, yaw1)]
+        best: Tuple[float, Optional[Tuple[float, float]]] = (0.0, None)
+        for (bx, by), over in zip(pts, self._over([p[0] for p in pts], [p[1] for p in pts])):
+            if over:
+                q = Point(bx, by)
+                d = self.half - BLADE_SLACK + (self.away.boundary.distance(q) if self.away.contains(q) else
+                                               -self.away.distance(q))
+                if best[1] is None or d > best[0]:
+                    best = (max(0.0, d), (float(bx), float(by)))
+        return best
+
+
 class Footprint:
-    def __init__(self, space, corners: Sequence[Tuple[float, float]], spin_margin: float = 0.0, back: float = 0.0):
+    def __init__(self, space, corners: Sequence[Tuple[float, float]], spin_margin: float = 0.0, back: float = 0.0,
+                 blade: Optional[Blade] = None):
         # the body's corners round the centre (x ahead, y left), how far it reaches ahead, behind and to either side
         self.corners = tuple(corners)
         xs, ys = [x for x, _ in self.corners], [y for _, y in self.corners]
@@ -141,17 +253,31 @@ class Footprint:
         # than off the edges themselves; off them where the body doesn't reach as far as the circles, a round one)
         self.anywhere = halves.buffer(-(self.reach - radius) / KEEP_OFF, 4) if self.reach >= radius else \
             space.buffer(-(self.reach + back) / KEEP_OFF, 4)
+        # (blade: and the blade off the areas not to mow next to the area, see Blade)
+        self.blade = blade
+        if blade is not None:
+            self.anywhere = self.anywhere.difference(blade.near.buffer(back / KEEP_OFF, 4) if back else blade.near)
         self._safe = None if self.anywhere.is_empty else _Zone(self.anywhere)
         # turning on the spot (fits_turn) the body keeps spin_margin further off the edges, from SPIN_BACK before on,
         # on a turn between lanes (OnTurn) at the pose
         self.spin_margin = spin_margin
-        self.turning = Footprint(space.buffer(-spin_margin, QUAD_SEGS), self.corners, back=SPIN_BACK) \
+        self.turning = Footprint(space.buffer(-spin_margin, QUAD_SEGS), self.corners, back=SPIN_BACK, blade=blade) \
             if spin_margin > 0 else self
         self._xy = numpy.array(self.corners).T if contains_xy is not None or contains_points is not None else None
         self._edge = None  # (space's boundary, see out_by)
         self._turns_kept: dict = {}
         self._fit_kept: dict = {}
         self._pose_kept: dict = {}
+        self._plain: Optional['Footprint'] = None
+
+    @property
+    def plain(self) -> 'Footprint':
+        """The body's alone, without the blade (itself where it has none)."""
+        if self.blade is None:
+            return self
+        if self._plain is None:
+            self._plain = Footprint(self.space, self.corners, self.spin_margin, self.back)
+        return self._plain
 
     def body(self, x: float, y: float, yaw: float) -> Polygon:
         c, s = math.cos(yaw), math.sin(yaw)
@@ -213,8 +339,9 @@ class Footprint:
         if got is None:
             if len(self._pose_kept) >= POSES_KEPT:
                 self._pose_kept.clear()
-            got = self._pose_kept[key] = self._safe_at(x, y) or self._halves_at(x, y, yaw) or \
-                self._space.covers(self.body(x, y, yaw))
+            got = self._pose_kept[key] = self._safe_at(x, y) or (
+                self._halves_at(x, y, yaw) or self._space.covers(self.body(x, y, yaw))) and \
+                (self.blade is None or self.blade.off([key])[0])
         return got
 
     def fit(self, poses: Sequence, on_turn: OnTurn = False) -> List[bool]:
@@ -249,7 +376,7 @@ class Footprint:
                 corners = numpy.stack([x + c * dx - s * dy, y + s * dx + c * dy], -1)
                 ok = iter(covers(self.space, polygons(corners)).tolist())  # (prep() above prepared space)
                 fit = [f or next(ok) for f in fit]
-            return fit
+            return self._blade_off(poses, fit)
         if contains_points is None:
             return [self.fits_pose(*p) for p in poses]
         x, y, yaw = numpy.array(poses).T
@@ -257,7 +384,16 @@ class Footprint:
         if self._halves is not None:
             (front, rear), c, s = self._middles, numpy.cos(yaw), numpy.sin(yaw)
             fit |= self._halves.inside(x + c * front, y + s * front) & self._halves.inside(x + c * rear, y + s * rear)
-        return [f or self._space.covers(self.body(*p)) for f, p in zip(fit.tolist(), poses)]
+        return self._blade_off(poses, [f or self._space.covers(self.body(*p)) for f, p in zip(fit.tolist(), poses)])
+
+    def _blade_off(self, poses: List[Tuple[float, float, float]], fit: List[bool]) -> List[bool]:
+        """fit, where the body fits out of the safe zone the blade off the areas not to mow too."""
+        if self.blade is None:
+            return fit
+        which = [k for k, f in enumerate(fit) if f and not self._safe_at(poses[k][0], poses[k][1])]
+        for k, off in zip(which, self.blade.off([poses[k] for k in which])):
+            fit[k] = off
+        return fit
 
     def fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
         """Turning on the spot here from yaw0 to yaw1, the shorter way round (body poses TURN_STEP apart), both ways
@@ -278,6 +414,8 @@ class Footprint:
         if fp._safe_at(x, y):
             return True
         dx, dy = fp.back * math.cos(yaw0), fp.back * math.sin(yaw0)
+        if self.blade is not None and not self.blade.off_turning(x, y, yaw0, yaw1, dx, dy):
+            return False
         for yaws in self._turns(yaw0, yaw1):
             if fp is self:
                 if not all(self._halves_at(x, y, yaw) or self._space.covers(self.body(x, y, yaw)) for yaw in yaws):
@@ -402,6 +540,14 @@ class Footprint:
                     for d, q in zip(distance(fp.space, points(xy)).tolist(), xy.tolist()):  # (all at once, the same)
                         if d > got[k][0]:
                             got[k] = (round(d, 3), (q[0], q[1]))
+        for k, ((before, p), turning) in enumerate(zip(turns, spin) if self.blade is not None else ()):
+            # (the blade's middle as far in its zone, where that's further)
+            back = self.turning.back if turning else 0.0
+            d, at = self.blade.depth(p.x, p.y, before.yaw if turning else p.yaw, p.yaw if turning else None,
+                                     back * math.cos(before.yaw) if turning else 0.0,
+                                     back * math.sin(before.yaw) if turning else 0.0)
+            if at is not None and (got[k][1] is None or d > got[k][0]):
+                got[k] = (round(d, 3), at)
         return got
 
     def poses_fit(self, poses: Sequence, on_turn: OnTurn = False) -> bool:

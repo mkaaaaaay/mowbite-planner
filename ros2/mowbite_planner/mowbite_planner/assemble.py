@@ -1,4 +1,4 @@
-"""The path put together on the route: the parts of the area one after the other, in each the loops (rings_old) and
+"""The path put together on the route: the parts of the area one after the other, in each the loops (rings) and
 the lanes, the cells in the order order.py finds, each one of the ways stripes.py has (its lanes and the turns between
 from the catalogue in turns.py), the drives between through drive.py."""
 
@@ -14,7 +14,8 @@ from .maneuvers import same_position, sample_straight
 from .mathutil import Pose2D, angle_diff
 from .objective import END_S, Cost, seconds
 from .order import EXACT, Guess, plan_order
-from .rings_old import Rings, _Route
+from .levels import Rings
+from .rings import _Route
 from .stripes import Cells, Run, Runs, Way, kept_runs, lane_poses
 from .swaths import Passes
 from .turns import Catalog, Turn
@@ -105,7 +106,8 @@ def _work(route: _Route, parts: list, rings_of: Rings, passes: Passes, narrow) -
     work: Work = {}
 
     def todo(k: int) -> Dict[str, Any]:
-        return work.setdefault(k, {'levels': {}, 'middles': {}, 'cells': [[] for _ in passes], 'narrow': None})
+        return work.setdefault(k, {'levels': {}, 'middles': {}, 'cells': [[] for _ in passes], 'narrow': None,
+                                   'own': []})
 
     for key, geoms in (('levels', rings_of.drive_levels), ('middles', rings_of.middles)):
         for i, geom in enumerate(geoms):
@@ -120,6 +122,8 @@ def _work(route: _Route, parts: list, rings_of: Rings, passes: Passes, narrow) -
                     .append(cell)
     for k, geom in split(narrow).items():
         todo(k)['narrow'] = geom
+    for level, ring in rings_of.own_rings:
+        todo(part_of(ring[0]))['own'].append((level, ring))
     return work
 
 
@@ -130,18 +134,23 @@ def _mow_part(route: _Route, w: Dict[str, Any], rings_of: Rings, passes: Passes,
     cfg = route.cfg
     last, empty = cfg.perimeter_order == 'last', Polygon()
     skip = {'outline': cfg.skip_outline_loops, 'hole': cfg.skip_obstacle_loops}
-    loops_here = not rings_of.ringed and any(not skip[kind] and not route.left_out(kind, i)
-                                             for i, g in w['levels'].items() for kind, _ in rings(g))
-    loops_end = loops_here and (last or not any(w['cells']) and w['narrow'] is None)
+    spiral = rings_of.ringed and cfg.fill_pattern == 'concentric'
+    loops_here = not spiral and any(not skip[kind] and not route.ring_out(kind, ring, i)
+                                    for i, g in w['levels'].items() if i < rings_of.perimeter for kind, ring in rings(g))
+    loops_end = loops_here and (last or not any(w['cells']) and w['narrow'] is None) and not rings_of.ringed
 
     def loops() -> None:
+        levels = [w['levels'].get(i, empty) for i in range(len(rings_of.levels))]
+        middles = [w['middles'].get(i, empty) for i in range(len(rings_of.middles))]
+        if spiral:
+            route.concentric(levels, middles, rings_of.most, last, rings_of.loop_spacing, last or not any(w['cells']),
+                             cfg.narrow_parts == 'loops')
+            return
+        route.perimeter(levels[:rings_of.perimeter], holes, last, loops_end, w['own'])
         if rings_of.ringed:
-            route.concentric([w['levels'].get(i, empty) for i in range(len(rings_of.levels))],
-                             [w['middles'].get(i, empty) for i in range(len(rings_of.middles))], rings_of.most, last,
-                             rings_of.loop_spacing, last or not any(w['cells']),
-                             cfg.fill_pattern != 'concentric' or cfg.narrow_parts == 'loops')
-        else:
-            route.perimeter([w['levels'].get(i, empty) for i in range(rings_of.perimeter)], holes, last, loops_end)
+            # narrow_parts 'loops': the narrow parts' own loops after the loops along the edges, one after the other
+            route.concentric([empty] * rings_of.most + levels[rings_of.most:], middles, rings_of.most, last,
+                             rings_of.loop_spacing, last or not any(w['cells']), False)
 
     if not last:
         loops()

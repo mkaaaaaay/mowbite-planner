@@ -10,7 +10,7 @@ from shapely.geometry import Point, Polygon
 
 from .geometry import polygons, rings
 from .mathutil import Pose2D
-from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
+from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, out_kinds
 from .report import check_plan
 
 # OpenMower counts the poses of a path in an int16 (current_path_index), longer paths are split
@@ -19,6 +19,10 @@ MAX_PATH_POSES = 30000
 SIMPLIFY = 0.01
 
 SEGMENT_TYPES = {PERIMETER: 0, LANE: 1, TURN: 2, TRANSIT: 3}
+# bytes an answer over MQTT takes at most: Mosquitto drops a message of about 2 MB without a word (Master 31.10.,
+# settled with the contracts, I1); a bigger one gets the error ANSWER_TOO_BIG in its place (see too_big)
+MAX_ANSWER = 1900000
+ANSWER_TOO_BIG = -32002
 
 
 def plan_pieces(plan: CoveragePlan, max_poses: int = MAX_PATH_POSES) -> List[Tuple[bool, int, int]]:
@@ -103,6 +107,15 @@ def _mm(v: float) -> float:
     return round(v, 3)
 
 
+def too_big(data: str) -> Optional[str]:
+    """The error message for an answer (its JSON, ASCII as json.dumps makes it) of more than MAX_ANSWER bytes, None
+    where it's no bigger."""
+    if len(data) <= MAX_ANSWER:
+        return None
+    return (f'answer too big: {len(data) / 1e6:.2f} MB, MQTT takes {MAX_ANSWER / 1e6:.1f} MB at most (poses, report '
+            'and trace make it bigger)')
+
+
 def body_edges(plan: CoveragePlan, tolerance: float = SIMPLIFY) -> Optional[Dict[str, List[List[List[float]]]]]:
     """Where the mower's body keeps to (body_space: the real edges, the margins off them): {'outlines':
     [[[x, y], ...], ...], 'holes': [...]}, the rings simplified to tolerance and rounded to mm, the holes the obstacles
@@ -119,17 +132,19 @@ def to_openmower_json(plan: CoveragePlan, area_id: Optional[str] = None,
                       max_poses: int = MAX_PATH_POSES, tolerance: float = SIMPLIFY) -> Dict[str, Any]:
     """The result of OpenMower's mowing.plan RPC: {area_id, angle, paths: [{is_outline, points,
     pose_index}]}, points simplified (pose_index says which pose of the full path each one is) and rounded
-    to mm. On top: every path's segments (kind, first and last pose, reverse, maneuver), the
-    fingerprint, warnings and stats, with the body checked where it keeps to (body_space, see body_edges)."""
+    to mm. On top: every path's segments (kind as MowBite OS gets it, config.out_kinds; first and last pose, reverse,
+    maneuver), the fingerprint, warnings and stats, with the body checked where it keeps to (body_space, see
+    body_edges)."""
     paths = []
+    kinds = out_kinds(plan.segments)
     for is_outline, start, end in plan_pieces(plan, max_poses):
         pts = [(p.x, p.y) for p in plan.poses[start:end + 1]]
         keep = simplified_indices(pts, tolerance) if tolerance > 0 else list(range(len(pts)))
         segments = []
-        for s in plan.segments:
+        for s, kind in zip(plan.segments, kinds):
             a, b = max(s.start, start), min(s.end, end)
             if a < b:
-                segments.append({'type': s.kind, 'start': a - start, 'end': b - start, 'reverse': s.reverse,
+                segments.append({'type': kind, 'start': a - start, 'end': b - start, 'reverse': s.reverse,
                                  'maneuver': s.maneuver})
         paths.append({
             'is_outline': is_outline,
@@ -155,11 +170,12 @@ def to_openmower_json(plan: CoveragePlan, area_id: Optional[str] = None,
 
 
 def to_poses_json(plan: CoveragePlan) -> Dict[str, Any]:
-    """Every pose as [x, y, yaw] and the segments with indices into that list, unsimplified."""
+    """Every pose as [x, y, yaw] and the segments with indices into that list, unsimplified, x and y rounded to mm,
+    yaw to 1e-4 rad (Master 31.10.: the answer a third as big; the fingerprint stays the unrounded poses')."""
     return {
-        'poses': [[p.x, p.y, p.yaw] for p in plan.poses],
-        'segments': [{'type': s.kind, 'start': s.start, 'end': s.end, 'reverse': s.reverse,
-                      'maneuver': s.maneuver} for s in plan.segments],
+        'poses': [[_mm(p.x), _mm(p.y), round(p.yaw, 4)] for p in plan.poses],
+        'segments': [{'type': kind, 'start': s.start, 'end': s.end, 'reverse': s.reverse,
+                      'maneuver': s.maneuver} for s, kind in zip(plan.segments, out_kinds(plan.segments))],
     }
 
 

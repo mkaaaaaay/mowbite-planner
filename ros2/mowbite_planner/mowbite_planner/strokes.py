@@ -66,10 +66,13 @@ class Kit:
            drives: int, field=None) -> 'Kit':
         zones = [drive_space.buffer(SLACK), shapely.union(transit_space, drive_space).buffer(SLACK),
                  transit_space.buffer(SLACK, 4), fp.turning.space.buffer(-fp.reach, QUAD_SEGS)]
+        if fp.blade is not None:  # (turning round the blade off the areas not to mow whatever way it faces too)
+            zones[3] = zones[3].difference(fp.blade.near)
         inner = field.buffer(-SLACK, 1) if field is not None and not field.is_empty else None
         for z in zones + ([inner] if inner is not None else []):
             shapely.prepare(z)
-        track = Footprint(fp.space, swung(fp.corners, TRACK_TURN), fp.spin_margin)
+        track = Footprint(fp.space, swung(fp.corners, TRACK_TURN), fp.spin_margin,
+                          blade=fp.blade and fp.blade.turned(TRACK_TURN))
         return cls(cfg, fp, transit, *zones, [drives], track, inner)
 
     def turns_in_field(self, poses: Sequence[Pose2D]) -> bool:

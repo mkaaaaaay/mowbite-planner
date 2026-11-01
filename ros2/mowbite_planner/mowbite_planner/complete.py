@@ -1,8 +1,8 @@
 """The completion stage: what the path leaves of the lawn mowed by moves the body fits (strokes.py), put into the
-path as detours from its loops and drives where the ranking says they're worth it (objective.better), the rest one
-after the other from its end (mop_up); or what a mow left, as a path of its own (mowed). Every detour's body is checked
-before it's taken like check_plan does (body_out with on_turn, the turns also found from the way), over a window round
-it."""
+path as detours from its loops and drives where the ranking says they're worth it (objective.better) and they don't
+cross the path (CROSS_TRIM), the rest one after the other from its end (mop_up); or what a mow left, as a path of its
+own (mowed). Every detour's body is checked before it's taken like check_plan does (body_out with on_turn, the turns
+also found from the way), over a window round it."""
 
 import dataclasses
 import math
@@ -10,6 +10,9 @@ import types
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy
+from shapely.geometry import LineString, MultiLineString
+from shapely.ops import substring
+from shapely.prepared import prep
 
 from .bodyfit import _assemble, _turn_at
 from .config import LANE, PERIMETER, TRANSIT, TURN, XY, PathSegment, PlannerConfig, SegmentInfo
@@ -35,6 +38,7 @@ SPREAD = 1.0
 FAR = 8.0
 KEEP = 2.0
 MERGE = 3.0  # m from a detour's last move to the next one it may take on
+CROSS_TRIM = 0.25  # m at either end of a detour (where it leaves the path and gets back) the path may be crossed
 LINKED = 7  # of the places for a move, the best this many by straight ways get drive.py's ways too
 WINDOW = 12  # poses each side a detour's cost is taken over
 CHECK_M = 0.7  # m of path each side of a detour its body is checked over
@@ -141,6 +145,9 @@ class Placer:
         # (what _priced and _link work out again and again: the path's windows' costs, the straight ways)
         self.windows: Dict[Tuple[int, int], Cost] = {}
         self.lines: Dict[tuple, Optional[Tuple[List[Pose2D], float]]] = {}
+        # (no detour crosses the path: mkay 31.10., a tidy picture)
+        drawn = [[(p.x, p.y) for p in poses[s.start:s.end + 1]] for s in segments if s.end > s.start]
+        self.drawn = prep(MultiLineString(drawn)) if drawn else None
 
     def _fail(self, why: str) -> None:
         self.failed[why] = self.failed.get(why, 0) + 1
@@ -195,6 +202,8 @@ class Placer:
         if way is None:
             return self._fail('back')
         parts.append((TRANSIT, way))
+        if self.drawn is not None and _crosses(self.drawn, parts):
+            return self._fail('crosses')
         d = self._priced(i, parts, (prior.moves if prior is not None else []) + [m])
         if prior is not None:
             d.cost, d.gain = _minus(d.cost, prior.cost), self.rest.gain(m.lines)
@@ -358,6 +367,18 @@ class Placer:
             tail = _tail(new, CHECK_M, WINDOW)
             here = (m.last.x, m.last.y)
         self.chain = chain if chain.moves else None
+
+
+def _crosses(drawn, parts: List[Tuple[str, List[Pose2D]]]) -> bool:
+    """Whether the detour (its parts one after the other, from and back to the path) crosses the path (drawn) but
+    within CROSS_TRIM m of either end."""
+    pts = [(p.x, p.y) for _, ps in parts for p in ps]
+    if len(pts) < 2:
+        return False
+    line = LineString(pts)
+    if line.length <= 2.0 * CROSS_TRIM:
+        return False
+    return drawn.intersects(substring(line, CROSS_TRIM, line.length - CROSS_TRIM))
 
 
 def _tail(w: Window, metres: float, n: int) -> Window:

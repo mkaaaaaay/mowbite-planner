@@ -72,11 +72,12 @@ def test_area_job():
     assert job.keep_out == [rect(6, 8, 8, 10)]
     assert job.dock == (-3.0, 1.0, math.pi)  # the first one with a position
     assert job.overrides == {'angle': 0.5, 'perimeter_passes': 1} and job.planner == {}
-    # a mowing area not to mow is like a navigation area, unless it's one to mow around
+    # a mowing area not to mow is like a navigation area, unless it's one to mow around: the body may reach over into
+    # it, the blade keeps off it (unmowed), nothing goes over it on the way
     meadow = area('meadow', 'mow', rect(0, 8, 6, 12), mowable=False)
     job = area_job({'areas': [MAP['areas'][1], meadow]}, 'front')
     assert job.nav == [rect(0, 8, 6, 12)] and not job.drivable and not job.obstacles and not job.mow_around
-    assert job.keep_out == [rect(0, 8, 6, 12)] and job.navigation == []  # (a lawn: the body stays off it)
+    assert job.unmowed == [rect(0, 8, 6, 12)] and job.keep_out == [] and job.navigation == []
     # an inactive mowing area is no way either
     lawn = area('lawn', 'mow', rect(0, 8, 6, 12), active=False)
     job = area_job({'areas': [MAP['areas'][1], lawn]}, 'front')

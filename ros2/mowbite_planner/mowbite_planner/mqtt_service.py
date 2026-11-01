@@ -26,7 +26,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from .export import to_openmower_json, to_poses_json, to_studio_payload, to_trace_json
+from .export import ANSWER_TOO_BIG, to_openmower_json, to_poses_json, to_studio_payload, to_trace_json, too_big
 from .mapfile import AreaJob, _number, area_job, area_settings, margins_for, settings_for
 from .config import PlannerConfig, PlanningError
 from .planner import plan_coverage
@@ -208,7 +208,7 @@ class PlannerService:
         # an obstacle's or area's own margin, from the map by its outline (an obstacle the request changed has none)
         margins = margins_for(data, obstacles + job.keep_out)
         plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
-                                               margins, reach_over=job.navigation)
+                                               margins, reach_over=job.navigation, unmowed=job.unmowed)
         result = to_openmower_json(plan, area_id)
         if p.get('poses'):
             result.update(to_poses_json(plan))
@@ -306,6 +306,10 @@ class MqttBridge:
         except (TypeError, ValueError) as e:
             log.exception('response of %s is not JSON', request.get('method'))
             data = json.dumps(_error(response.get('id'), INTERNAL_ERROR, f'internal error: {e}'))
+        message = too_big(data)
+        if message is not None:  # (the broker would drop it without a word)
+            log.warning('%s %s: %s', request.get('method'), response.get('id'), message)
+            data = json.dumps(_error(response.get('id'), ANSWER_TOO_BIG, message))
         self.client.publish(self.prefix + 'rpc/response', data)
 
 

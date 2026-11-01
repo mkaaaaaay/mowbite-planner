@@ -210,8 +210,9 @@ def test_plan_with_the_margins_of_the_map(planned):
     map's. With the body checked the answer says where the body keeps to."""
     s = PlannerService(PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14))
     bed, pond = rect(4, 2, 5, 3), rect(7, 3, 8, 4)
+    # (an inactive mowing area: one to keep out of; one not to mow the body may reach over, see mapfile's unmowed)
     s.on_map(json.dumps(dict(MAP, areas=[MAP['areas'][0], area('bed', 'obstacle', bed, margin=0.3),
-                                         area('pond', 'mow', pond, mowable=False, margin=0.2)])))
+                                         area('pond', 'mow', pond, active=False, margin=0.2)])))
     res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'front'})
     assert planned[-1][1] == [[tuple(p) for p in bed]] and planned[-1][6] == [[tuple(p) for p in pond]]
     assert planned[-1][7] == [0.3, 0.2]
@@ -448,6 +449,25 @@ def test_bridge_publishes_an_error_for_what_is_no_json(monkeypatch):
     bridge.answer(json.dumps({'jsonrpc': '2.0', 'id': 'x', 'method': 'ext.mowbite_planner.info'}))
     [(topic, response)] = client.published
     assert topic == 'rpc/response' and response['id'] == 'x' and response['error']['code'] == -32603
+
+
+def test_bridge_answers_too_big_with_an_error(monkeypatch):
+    """An answer bigger than MQTT takes (export.MAX_ANSWER, the broker drops it without a word) is an error saying so;
+    poses: true gives x and y to mm, yaw to 1e-4 rad (Master 31.10.)."""
+    from mowbite_planner import export
+    client = FakeClient()
+    bridge = MqttBridge(PlannerService(), client)
+    ask = {'jsonrpc': '2.0', 'id': 'x', 'method': 'ext.mowbite_planner.plan',
+           'params': {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]], 'poses': True}}
+    bridge.answer(json.dumps(ask))
+    [(_, plan)] = client.published
+    poses = plan['result']['poses']
+    assert poses and all(round(x, 3) == x and round(y, 3) == y and round(yaw, 4) == yaw for x, y, yaw in poses)
+    monkeypatch.setattr(export, 'MAX_ANSWER', 1000)
+    bridge.answer(json.dumps(ask))
+    (topic, response) = client.published[-1]
+    assert topic == 'rpc/response' and response['id'] == 'x' and 'result' not in response
+    assert response['error']['code'] == export.ANSWER_TOO_BIG and 'too big' in response['error']['message']
 
 
 def fake_paho(monkeypatch, with_api_version):

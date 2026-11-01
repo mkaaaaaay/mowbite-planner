@@ -160,7 +160,7 @@ from mowbite_planner import (CoveragePlan, NothingLeft, PlannerConfig, PlanningE
                              plan_coverage, quaternion_to_yaw, yaw_to_quaternion)
 from mowbite_planner import config as limits
 from mowbite_planner.planner import plan_footprint, set_workers
-from mowbite_planner.export import MAX_PATH_POSES, plan_pieces
+from mowbite_planner.export import ANSWER_TOO_BIG, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
 from mowbite_planner.mapfile import _points, area_job, area_settings, margins_for, match_area, openmower_settings
@@ -348,6 +348,9 @@ class XbotRpc:
         except ValueError:
             params = []
         result, error = call(self.methods, req.method, params)
+        if error is None and too_big(result):  # (over MQTT: the broker would drop it without a word)
+            error = (ANSWER_TOO_BIG, too_big(result))
+            rospy.logwarn('MowBite Planner: %s: %s', req.method, error[1])
         if error is not None:
             return self.fail(req, *error)
         if req.id:
@@ -1480,13 +1483,14 @@ class MowbitePlannerRos1:
         return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished']})
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-                      reach_over=()):
+                      reach_over=(), unmowed=()):
         """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
         given and the planner's code, the same again (to the last bit) is the same plan."""
-        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over)[0]
+        return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over,
+                              unmowed)[0]
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-                  reach_over=()):
+                  reach_over=(), unmowed=()):
         """(plan, whether it was kept from before), see plan_coverage."""
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
@@ -1496,8 +1500,9 @@ class MowbitePlannerRos1:
         obstacles = [o for o, _ in pairs]
         margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
         args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
-        reach_over = canon(reach_over)
-        key = hashlib.sha1((self.code + repr(args) + (repr(reach_over) if reach_over else '')).encode()).hexdigest()
+        reach_over, unmowed = canon(reach_over), canon(unmowed)
+        key = hashlib.sha1((self.code + repr(args) + (repr(reach_over) if reach_over else '') +
+                            (repr(unmowed) if unmowed else '')).encode()).hexdigest()
         with self.plans_lock:
             plan = self.plans.get(key)
             if plan is not None:
@@ -1513,7 +1518,7 @@ class MowbitePlannerRos1:
                     plan = self.read_plan(key)
                 kept = self.local.kept = plan is not None
                 if plan is None:
-                    plan = plan_coverage(*args, reach_over=reach_over)
+                    plan = plan_coverage(*args, reach_over=reach_over, unmowed=unmowed)
                     self.write_plan(key, plan)
                 with self.plans_lock:
                     self.plans[key] = plan
@@ -1581,13 +1586,14 @@ class MowbitePlannerRos1:
         with self.lock:
             data = self.map
         index = match_area(data, boundary) if data else None
-        job, drivable, keep_out, dock, reach_over = None, [], [], None, []
+        job, drivable, keep_out, dock, reach_over, unmowed = None, [], [], None, [], []
         try:
             if index is not None:
                 job = area_job(data, index)
                 # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
                 obstacles += job.mow_around
                 drivable, keep_out, dock, reach_over = job.drivable, job.keep_out, job.dock, job.navigation
+                unmowed = job.unmowed
             armed = self.armed
             if armed is not None and time.time() > armed['until']:
                 armed = self.armed = None
@@ -1612,7 +1618,8 @@ class MowbitePlannerRos1:
             margins = margins_for(data, obstacles + keep_out)
             # (the end as planner.plan gives it, the heading doesn't count there: planned ahead it's this plan)
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
-                                        drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over)
+                                        drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over,
+                                        unmowed=unmowed)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res

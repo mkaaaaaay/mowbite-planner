@@ -29,13 +29,15 @@ class AreaJob:
     mow_around: List[List[XY]]  # those areas to mow around alone (OpenMower sends its planner the obstacles)
     drivable: List[List[XY]]  # the other mowing areas, mowed when crossed
     nav: List[List[XY]]  # navigation areas and mowing areas not to mow: not for crossing while mowing
-    # where the mower mustn't go on the way through the drivable areas: inactive mowing and navigation areas, mowing
-    # areas not to mow
+    # where the mower mustn't go on the way through the drivable areas: inactive mowing and navigation areas
     keep_out: List[List[XY]] = field(default_factory=list)
     # the other active mowing areas lying in this one (NESTED_SHARE of them at least): left out with nested_areas
     nested: List[List[XY]] = field(default_factory=list)
     # the active navigation areas: the mower drives there, the body may reach over the edge into one (not the path)
     navigation: List[List[XY]] = field(default_factory=list)
+    # the active mowing areas not to mow (not to mow around): the body may reach over the edge into one too, the blade
+    # stays off it, nothing goes over it on the way (mkay 31.10., Master: planner 2)
+    unmowed: List[List[XY]] = field(default_factory=list)
     overrides: Dict[str, Any] = field(default_factory=dict)  # planner settings from the area's properties
     planner: Dict[str, Any] = field(default_factory=dict)  # MowBite's own of them: angle range, planner object
     dock: Optional[Tuple[float, float, float]] = None  # x, y, heading of the first docking station
@@ -236,10 +238,11 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     around, not across), these also in mow_around. drivable: the other active mowing areas, for getting
     from one part of this area to another. Not the navigation areas and the mowing areas not to mow (nav):
     OpenMower mows a path from start to end, a part only reachable over them is a section of its own. keep_out:
-    the mowing areas not to mow and the inactive mowing and navigation areas, nothing goes over them on the way
-    (an inactive obstacle is gone, the mower may go there). nested: the other active mowing areas lying in this
-    one, which it leaves out with nested_areas (see NESTED_SHARE). navigation: the active navigation areas, the
-    body may reach over the edge into one (plan_coverage's reach_over).
+    the inactive mowing and navigation areas, nothing goes over them on the way (an inactive obstacle is gone, the
+    mower may go there). nested: the other active mowing areas lying in this one, which it leaves out with
+    nested_areas (see NESTED_SHARE). navigation: the active navigation areas, the body may reach over the edge into
+    one (plan_coverage's reach_over). unmowed: the active mowing areas not to mow (but those to mow around), the body
+    may reach over into one as well, the blade stays off it (plan_coverage's unmowed).
     Other areas with a broken outline are left out, a broken area to plan is a PlanningError."""
     found = find_area(data, which)
     area = dict(found, properties=dict(_props(found), **properties)) if properties else found
@@ -255,7 +258,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     except ValueError as e:  # PlanningError too
         raise PlanningError(f'area {area.get("id")!r}: {e}') from None
     shape = clean_polygon(boundary)
-    obstacles, mow_around, drivable, nav, keep_out, nested, navigation = [], [], [], [], [], [], []
+    obstacles, mow_around, drivable, nav, keep_out, nested, navigation, unmowed = [], [], [], [], [], [], [], []
     for other in _areas(data):
         p = _props(other)
         if other is found:
@@ -271,8 +274,10 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
             if kind in ('mow', 'nav'):
                 keep_out.append(pts)
             continue
-        if kind == 'mow' and p.get('mowable') is False and p.get('mow_around') is not True:
-            keep_out.append(pts)
+        # (one that covers this whole area doesn't count, like one to mow around: it's the area set otherwise)
+        if kind == 'mow' and p.get('mowable') is False and p.get('mow_around') is not True and \
+                not clean_polygon(pts).buffer(1e-6).contains(shape):
+            unmowed.append(pts)
         if kind == 'obstacle':
             obstacles.append(pts)
         elif kind == 'mow' and p.get('mowable') is not False:
@@ -294,7 +299,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     return AreaJob(area_id=str(area.get('id')), name=str(_props(area).get('name') or area.get('id')),
                    boundary=boundary, obstacles=obstacles, mow_around=mow_around, drivable=drivable, nav=nav,
                    overrides=overrides, planner=own, dock=_dock(data), keep_out=keep_out, nested=nested,
-                   navigation=navigation)
+                   navigation=navigation, unmowed=unmowed)
 
 
 def openmower_angle(boundary: List[XY]) -> float:

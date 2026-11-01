@@ -10,7 +10,7 @@ from shapely.prepared import prep
 from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
 from .geometry import inset, polygons, union
 from .mathutil import Pose2D
-from .sweep import blade_points, body_out, plan_footprint, swept_area
+from .sweep import blade_over, blade_points, body_out, plan_footprint, recorded_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
@@ -98,9 +98,9 @@ def track_mowed(runs: Sequence[Sequence[Sequence[float]]], mower_width: float, b
 
 
 def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
-    """{'hard': [...], 'soft': [...], 'body_out': [...], 'mowed_m2', 'left_m2', 'left_pieces', 'left',
-    'double_mowed_pct', ...}. body_out: the poses where the mower's body sticks out (see planner.body_out), empty
-    when it isn't checked.
+    """{'hard': [...], 'soft': [...], 'body_out': [...], 'blade_over': [...], 'mowed_m2', 'left_m2', 'left_pieces',
+    'left', 'double_mowed_pct', ...}. body_out: the poses where the mower's body sticks out (see planner.body_out),
+    empty when it isn't checked. blade_over: where the blade reaches over an area not to mow (sweep.blade_over).
 
     left: where it leaves grass, the LEFT_SHOWN biggest pieces of the left_pieces (TUFT m2 at least), biggest first:
     [{'m2', 'outline': [[x, y], ...]}], the outline simplified to LEFT_SIMPLIFY and rounded to mm.
@@ -136,14 +136,20 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
                     f'{gaps[0]}')
     if any(s.reverse for s in plan.segments):
         hard.append('drives backwards')
-    footprint = plan_footprint(plan)
-    body = body_out(poses, plan.segments, plan.section_starts, footprint) if footprint is not None else []
+    footprint = plan_footprint(plan, blade=False)
+    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
+        if footprint is not None else []
     if body:
         hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '
                     f'({body[0]["x"]:.2f}, {body[0]["y"]:.2f})')
+    over = blade_over(plan)
+    if over:
+        deepest = max(over, key=lambda o: o['m'])
+        hard.append(f'the blade reaches over an area not to mow at {len(over)} poses, {deepest["m"]:.3f} m at the '
+                    f'most ({deepest["kind"]}) at ({deepest["x"]:.2f}, {deepest["y"]:.2f})')
 
     mowed = swept_area(plan, width).intersection(plan.free_space) if width > 0 else None
-    out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': body}
+    out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': body, 'blade_over': over}
     if mowed is not None:
         target, pieces, got = left_of(plan, mowed)
         out.update(got)

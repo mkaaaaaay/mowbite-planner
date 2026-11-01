@@ -22,13 +22,16 @@ from .transit import TransitPlanner
 
 
 class BodyRoute(Protocol):
-    """What the body's repairs use of a route (rings_old._Route has it)."""
+    """What the body's repairs use of a route (rings._Route has it)."""
     cfg: PlannerConfig
     footprint: Footprint
     step: float  # cfg.waypoint_spacing
     transit: TransitPlanner  # drives, through the drivable areas too
     area: TransitPlanner  # the mowing area
     field: Any  # headland_turns: the lanes' field, else None
+    # the body where it was while the outline was recorded, the loops (by name) driven the way it was: checked in that
+    recorded_fp: Optional[Footprint]
+    recorded_loops: Set[str]
     rounded: Set[XY]  # headland_corners 'rounded': the arcs into the field (_round_corners adds them)
     sharp: Set[XY]  # headland_corners 'sharp': the drives along the headland
 
@@ -147,6 +150,15 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     for info in infos:
         on_turn[info.start + 1:info.end + 1] = [info.kind == TURN] * (info.end - info.start)
     fit, turn_room = fp.fit(poses, on_turn), fp.turning.anywhere
+    # (the outermost loop driven the way the outline was recorded: where the body was then, see route.recorded_fp)
+    rec, lenient = getattr(route, 'recorded_fp', None), [False] * n
+    if rec is not None:
+        for info in infos:
+            if info.kind == PERIMETER and info.source in route.recorded_loops:
+                lenient[info.start:info.end + 1] = [True] * (info.end + 1 - info.start)
+        mild = [i for i in range(n) if lenient[i]]
+        for i, f in zip(mild, rec.fit([poses[i] for i in mild])):
+            fit[i] = f
     tries, most = [0], [0]  # (most: the tries this place may take up to)
     budget = max(FIT_TRIES, int(FIT_TRIES_M * fp.space.length))
     cap = [budget]  # (more for the way to the start and the one from the end, see lead())
@@ -159,19 +171,23 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     def fits(prev: Optional[Pose2D], i: int) -> bool:
         p = poses[i]
         if prev is not None and angle_diff(p.yaw, prev.yaw) > SPIN:
-            return fp.fits_turn(p.x, p.y, prev.yaw, p.yaw)
+            return (rec if lenient[i] else fp).fits_turn(p.x, p.y, prev.yaw, p.yaw)
         return fit[i]
 
     def spent() -> bool:
         return tries[0] >= min(cap[0], most[0])
 
-    def ok(before: List[Pose2D], way: List[Pose2D]) -> bool:
+    def ok(before: List[Pose2D], way: List[Pose2D], mild: bool = False) -> bool:
         if spent():
             return False
         tries[0] += 1
+        f = rec if mild else fp
         # (where it leaves and gets back on first: a way that sticks out mostly does so there)
-        return len(way) > 1 and all(fp.fits_pose(q.x, q.y, q.yaw) for q in (way[0], way[-2])) and \
-            route.transit.is_free([(q.x, q.y) for q in way]) and fp.poses_fit(before + way)
+        return len(way) > 1 and all(f.fits_pose(q.x, q.y, q.yaw) for q in (way[0], way[-2])) and \
+            route.transit.is_free([(q.x, q.y) for q in way]) and f.poses_fit(before + way)
+
+    def recorded(k: int, j: int) -> bool:  # (a way from out[k] to poses[j], both of a loop driven as recorded)
+        return rec is not None and orig[k] is not None and lenient[orig[k]] and lenient[j]
 
     def straight(a: Pose2D, b: Pose2D) -> List[Pose2D]:
         return join(sample_straight(a.x, a.y, b.x, b.y, math.atan2(b.y - a.y, b.x - a.x), step), [b])
@@ -333,7 +349,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                 ma = next(m for m, _, r in ons if r == j)
                 for mb, k, into in ins:
                     if (angle_diff(into[-1].yaw, onto[0].yaw) <= SPIN or turns_at(x, y, into[-1].yaw, onto[0].yaw)) \
-                            and ok([out[k - 1]] if k > first else [], join(into, onto)):
+                            and ok([out[k - 1]] if k > first else [], join(into, onto), recorded(k, j)):
                         return mb + ma, k, j, join(into, onto)
         return None
 
@@ -373,7 +389,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                     drives[key] = route.drive_to((poses[j].x, poses[j].y), poses[j].yaw, None, route.transit,
                                                  ((out[k].x, out[k].y), out[k].yaw))
                 way = drives[key]
-                if way and ok([out[k - 1]] if k > first else [], join(way, [poses[j]])):
+                if way and ok([out[k - 1]] if k > first else [], join(way, [poses[j]]), recorded(k, j)):
                     return 0.0, k, j, join(way, [poses[j]])
         return None
 
@@ -431,7 +447,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
             for way in through_room(k, j) if eased is None else ways(out[k], poses[j], eased):
                 field = 0.0 if route.field is None or route.clear([(q.x, q.y) for q in way]) else FIT_FIELD
                 cost = lost + FIT_DRIVE * path_length(way) + field
-                if (best is None or cost < best[0]) and ok(before, way):
+                if (best is None or cost < best[0]) and ok(before, way, recorded(k, j)):
                     best = (cost, k, j, way)
                     if not field:
                         break  # (the next way is longer)
@@ -454,8 +470,11 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                                 FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY, FIT_ON, FIT_ON_MAX,
                                 route.cfg.turn_radius, route.cfg.min_turn_radius, route.cfg.turn_on_spot,
                                 route.cfg.allowed_turns, route.cfg.headland_corners)).encode())
-    for geom in (fp.space, route.transit.space, route.field):
+    for geom in (fp.space, route.transit.space, route.field, rec and rec.space):
         hashed.update(b'-' if geom is None else geom.wkb)
+    if fp.blade is not None:  # (the blade kept off the areas not to mow)
+        hashed.update(repr(fp.blade.key).encode())
+    hashed.update(repr(sorted(getattr(route, 'recorded_loops', ()) if rec is not None else ())).encode())
     key = hashed.hexdigest()
     with _KEPT_LOCK:
         earlier = _FITTED.get(key)

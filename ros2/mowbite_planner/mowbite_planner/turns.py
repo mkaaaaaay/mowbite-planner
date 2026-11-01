@@ -23,7 +23,7 @@ CUT_STEP = ROUND_STEP
 
 
 class TurnRoute(Protocol):
-    """What the turns need of the route (rings_old._Route has it)."""
+    """What the turns need of the route (rings._Route has it)."""
     cfg: PlannerConfig
     footprint: Optional[Footprint]
     step: float

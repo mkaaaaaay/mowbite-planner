@@ -385,7 +385,9 @@ def test_settings_parameter_angle(planner):
 @pytest.mark.parametrize('keeps_all', [False, True])
 def test_mowbite_properties_need_mower_map_to_keep_them(planner, keeps_all):
     """An area's planner property, angle range and mow_around reach the node only through a mower_map that keeps the
-    extra area properties (open_mower_ros #364), before it they were dropped."""
+    extra area properties (open_mower_ros #364), before it they were dropped. An area not to mow keeps the blade off
+    it either way ('mowable' is mower_map's own: without mow_around it's an area not to mow, plan_coverage's
+    unmowed)."""
     plain = planner.handle(request())
     pond = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
     send_map(through_mower_map(the_map({'fill_pattern': 'crosshatch'}, angle_min=0.2, angle_max=0.4, areas=[
@@ -393,7 +395,7 @@ def test_mowbite_properties_need_mower_map_to_keep_them(planner, keeps_all):
     res = planner.handle(request(angle=1.0))
     check(res)
     assert (len(poses(res)) > 1.6 * len(poses(plain))) == keeps_all  # crosshatch
-    assert (not inside(res, pond)) == keeps_all  # mowed around
+    assert not inside(res, pond)  # mowed around, or not mowed
     if keeps_all:  # in the area's range, not mower_logic's 1 rad
         assert math.degrees(0.2) - 0.05 <= lane_angle() <= math.degrees(0.4) + 0.05
     else:
@@ -975,6 +977,24 @@ def test_rpc_errors(planner, method, params, code, message):
     send_map(the_map())
     result, error = rpc(method, params)
     assert result is None and error[0] == code and message in error[1], error
+
+
+def test_rpc_plan_poses_rounded_and_too_big(planner, monkeypatch):
+    """poses: true gives every pose, x and y to mm, yaw to 1e-4 rad (Master 31.10.), the fingerprint the unrounded
+    ones'; an answer bigger than MQTT takes (export.MAX_ANSWER) is an error saying so, not dropped by the broker."""
+    from mowbite_planner import export
+    send_map(the_map())
+    rospy.params['/mower_logic'] = {'tool_width': 0.13, 'outline_count': 2, 'mow_angle_offset': 0.0}
+    full, error = rpc('planner.plan', {'area_id': 'a', 'poses': True})
+    assert error is None and full['poses']
+    assert all(round(x, 3) == x and round(y, 3) == y and round(yaw, 4) == yaw for x, y, yaw in full['poses'])
+    plain, _ = rpc('planner.plan', {'area_id': 'a'})
+    assert 'poses' not in plain and plain['fingerprint'] == full['fingerprint']
+    monkeypatch.setattr(export, 'MAX_ANSWER', len(json.dumps(plain)) + 10)
+    assert rpc('planner.plan', {'area_id': 'a'})[0] == plain
+    result, error = rpc('planner.plan', {'area_id': 'a', 'poses': True})
+    assert result is None and error[0] == export.ANSWER_TOO_BIG and 'too big' in error[1] and 'poses' in error[1]
+    assert any(level == 'warn' for level, _ in rospy.log)
 
 
 def test_rpc_plan_without_map(planner):

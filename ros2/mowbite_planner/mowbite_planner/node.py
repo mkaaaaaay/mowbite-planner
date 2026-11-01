@@ -42,7 +42,7 @@ from .export import MAX_PATH_POSES, fingerprint, plan_pieces
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
                      NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
-                     TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError)
+                     TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
 from .planner import plan_coverage
 
 XY = Tuple[float, float]
@@ -120,7 +120,7 @@ PARAMETERS = {
                         lambda v: v in PERIMETER_ORDERS, 'must be first or last'),
     'perimeter_direction': ('auto', 'perimeter loops ccw or cw, auto: the way the mower faces, random: ccw or cw at '
                             'random for each count of finished mows (the ROS 1 node counts them, here none: the '
-                            'same way every plan). With robot_outline the outermost loop of auto and random goes the '
+                            'same way every plan). With the body set the outermost loop of auto and random goes the '
                             'way the outline was recorded', lambda v: v in PERIMETER_DIRECTIONS,
                             'must be auto, ccw, cw or random'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
@@ -398,7 +398,7 @@ class MowbitePlannerNode(Node):
         response.section_start = [int(i) for i in plan.section_starts]
         response.segment_start = [int(s.start) for s in plan.segments]
         response.segment_end = [int(s.end) for s in plan.segments]
-        response.segment_type = [int(SEGMENT_TYPES[s.kind]) for s in plan.segments]
+        response.segment_type = [int(SEGMENT_TYPES[kind]) for kind in out_kinds(plan.segments)]
         response.segment_reverse = [bool(s.reverse) for s in plan.segments]
         return response
 

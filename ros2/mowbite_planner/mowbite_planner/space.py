@@ -11,7 +11,7 @@ from shapely.ops import clip_by_rect, nearest_points
 
 from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, MAX_BLADE_OFFSET, ON_EDGE, XY, PlannerConfig,
                      PlanningError, _keep)
-from .footprint import TURN_STEP, Footprint
+from .footprint import TURN_STEP, Blade, Footprint
 from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .mathutil import normalize_angle
 
@@ -101,19 +101,19 @@ def _edge_gaps(area, drivable: Sequence[Sequence[Sequence[float]]], shapes: List
 
 
 def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
-                margin_of: List[float], cfg: PlannerConfig) -> Tuple[object, Footprint]:
-    """Where the body may be, and its Footprint there: where the edges really are, where the body was while its centre
-    drove them (the outline and the drivable areas, the obstacles and areas to keep out of, each the way its points go),
-    into an obstacle or an area to keep out of only along its own edge (hard edges: the lines themselves; one too small
-    to have been driven round, of which that leaves less than DRAWN, its line), edge_margin and each one's margin off
-    that. The last ones worked out are kept (_BODY_SPACES), the last one of this thread with
-    its Footprint (_BODY_SPACE), the plan gets a copy."""
+                margin_of: List[float], cfg: PlannerConfig, blade: Optional[Blade] = None) -> Tuple[object, Footprint]:
+    """Where the body may be, and its Footprint there (with blade: the blade kept off the areas not to mow): where the
+    edges really are, where the body was while its centre drove them (the outline and the drivable areas, the obstacles
+    and areas to keep out of, each the way its points go), into an obstacle or an area to keep out of only along its own
+    edge (hard edges: the lines themselves; one too small to have been driven round, of which that leaves less than
+    DRAWN, its line), edge_margin and each one's margin off that. The last ones worked out are kept (_BODY_SPACES), the
+    last one of this thread with its Footprint (_BODY_SPACE), the plan gets a copy."""
     outlines, away_from = ([[(float(p[0]), float(p[1])) for p in ring] for ring in rings]
                            for rings in (outlines, away_from))
     hard = cfg.edges == 'hard'
     key = (outlines, away_from, tuple(margin_of), cfg.edge_margin, cfg.body_outline, hard)
     found = getattr(_BODY_SPACE, 'last', None)
-    if found is None or found[0] != (key, cfg.spin_margin):
+    if found is None or found[0] != (key, cfg.spin_margin, blade and blade.key):
         shared = hashlib.sha1(repr(key).encode()).hexdigest()
         with _KEPT_LOCK:
             space = _BODY_SPACES.get(shared)
@@ -129,8 +129,23 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
             space = subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb
             _keep(_BODY_SPACES, shared, space)
         space = wkb.loads(space)
-        found = _BODY_SPACE.last = ((key, cfg.spin_margin), space, Footprint(space, cfg.body_outline, cfg.spin_margin))
+        found = _BODY_SPACE.last = ((key, cfg.spin_margin, blade and blade.key), space,
+                                    Footprint(space, cfg.body_outline, cfg.spin_margin, blade=blade))
     return wkb.loads(found[1].wkb), found[2]
+
+
+def recorded_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
+                   margin_of: List[float], cfg: PlannerConfig):
+    """Where the body was while the outline was recorded, recorded_margin off it (_body_space with that in place of
+    edge_margin, no more than that: where the other loops may go too; the obstacles' margins kept): the outermost loop
+    driven the way it was recorded may go there (mkay 31.10.: "genauso fahren wie aufgenommen"). The kept spaces of
+    this thread left as they were."""
+    last = getattr(_BODY_SPACE, 'last', None)
+    try:
+        margin = min(cfg.recorded_margin, cfg.edge_margin)
+        return _body_space(outlines, away_from, margin_of, dataclasses.replace(cfg, edge_margin=margin))[0]
+    finally:
+        _BODY_SPACE.last = last
 
 
 def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY]):
@@ -200,6 +215,7 @@ class Space:
     slots: List[Polygon]  # the slots by the edge closed (_edge_gaps)
     first: float  # m from the outline in to the blade's first loop
     off: float  # m the centre is further in (blade_offset)
+    unmowed: object = None  # the areas not to mow next to it, the blade keeps off them (None: none)
 
 
 def margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins: Sequence[Optional[float]],
@@ -227,9 +243,11 @@ def margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins: Seq
 
 
 def build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of: List[float], cfg: PlannerConfig,
-                edge_slots: bool = True) -> Tuple[Space, Optional[Footprint]]:
+                edge_slots: bool = True, unmowed=()) -> Tuple[Space, Optional[Footprint]]:
     """The spaces, and the body's Footprint in body_space (None without the body checked). edge_slots: the slots by the
-    edge too narrow for the body closed (see _edge_gaps)."""
+    edge too narrow for the body closed (see _edge_gaps). unmowed (of reach_over): the blade keeps off them (the first
+    loop half the mower width off their lines, the Footprint checks it with the body: footprint.Blade), nothing goes
+    over them on the way."""
     half = 0.5 * cfg.mower_width
     # the blade's first loop, the mower's centre is `off` further in (blade_offset, the loops go round with the
     # blade on their outer side)
@@ -262,12 +280,17 @@ def build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of: 
     # with the body checked the loops go round an area to keep out of like round an obstacle (see edges)
     if cfg.body and keep_out:
         free = polygonal(free.difference(union(grown[len(obstacles):])))
+    # the blade off the areas not to mow next to this one: the first loop half the mower width off their lines
+    unmowed_space = union(clean_polygon(u) for u in unmowed)
+    if not unmowed_space.is_empty:
+        free = polygonal(free.difference(unmowed_space.buffer(max(0.0, half - first), QUAD_SEGS)))
     # slivers smaller than the blade (where a noisy outline crosses itself) aren't parts of their own
     free = polygonal(union(p for p in polygons(free) if p.area >= half * half))
     if free.is_empty:
         raise PlanningError('the areas to keep out of cover the whole area')
     body_space, footprint = _body_space([boundary] + list(drivable) + list(reach_over),
-                                        list(obstacles) + list(keep_out), margin_of, cfg) if cfg.body else (None, None)
+                                        list(obstacles) + list(keep_out), margin_of, cfg,
+                                        Blade.of(unmowed_space, cfg)) if cfg.body else (None, None)
     robot_space = inset(free, centre)
     if robot_space.is_empty:
         raise PlanningError(f'the area is too narrow for a first loop {centre} m inside the outline')
@@ -279,16 +302,18 @@ def build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of: 
     drive_space = robot_space
     if cfg.body and cfg.body_tolerance > 0:
         drive_space = polygonal(robot_space.buffer(cfg.body_tolerance, QUAD_SEGS))
+        if not unmowed_space.is_empty:  # (but no closer to an area not to mow than the first loop)
+            drive_space = polygonal(drive_space.difference(unmowed_space.buffer(half, QUAD_SEGS)))
 
     transit_space = robot_space if cfg.body else drive_space
     extra_space = union(clean_polygon(d) for d in drivable)
     if not extra_space.is_empty:
         # drivable areas are recorded like outlines, the mower's centre may go anywhere in them, but not
         # closer to an obstacle (or an area to keep out of) than in the mowing area
-        away = union(grown)
+        away = union(grown + [unmowed_space])
         keep_off = away.buffer(max(centre, half), QUAD_SEGS) if not away.is_empty else None
         if keep_off is not None:
             extra_space = extra_space.difference(keep_off)
         transit_space = polygonal(union([transit_space, extra_space]))
     return Space(area, free, robot_space, blade_space, drive_space, transit_space, body_space, slots, first,
-                 off), footprint
+                 off, None if unmowed_space.is_empty else unmowed_space), footprint

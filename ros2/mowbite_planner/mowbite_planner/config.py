@@ -148,8 +148,8 @@ class PlannerConfig:
     perimeter_order: str = 'first'  # loops 'first' or 'last' (smooths the marks the turns leave)
     # 'ccw', 'cw' around every loop, 'auto': the way the mower faces, 'random': ccw or cw at random for each count of
     # finished_mows (another way round every mow, all of a plan asked for again before the next one finishes the same).
-    # With robot_outline (auto, random) the outermost loop along the outline goes the way it was recorded (the way its
-    # points go): the body only where it was then, see edges
+    # With the body checked (auto, random) the outermost loop along the outline goes the way it was recorded (the way
+    # its points go): the body only where it was then, see edges
     perimeter_direction: str = 'auto'
     angle: Optional[float] = None  # rad, lane direction. None: worked out by angle_strategy
     # 'longest_edge', 'min_width' (narrowest width) or 'optimal' (tries angle_step apart, fewest lanes and
@@ -278,6 +278,11 @@ class PlannerConfig:
     # the lanes too (U-turns, loops, detours, all of them): there the mower keeps less exactly to its path, its corners
     # swinging further. 0: only at the point, the margins as everywhere
     spin_margin: float = 0.05
+    # m, with the body checked and recorded edges: how far the outermost loop, driven the way the outline was recorded,
+    # keeps the body off where it was while the outline was recorded (turning on the spot too, spin_margin not on top;
+    # edge_margin at most: it may go where the other loops may): it may go where the mower went then (mkay 31.10.); the
+    # other loops keep edge_margin and spin_margin
+    recorded_margin: float = 0.01
     # where the body would still stick out (a turn on the spot, a loop in a tight spot), the path goes another way there
     # that fits, leaving a little of a loop or lane out where it has to (_fit_body, stats['body_fit']). False: the path
     # as planned
@@ -498,6 +503,7 @@ class PlannerConfig:
         finite('edge_margin', 0.0, MAX_BLADE_OFFSET)
         finite('obstacle_margin', 0.0, MAX_BLADE_OFFSET)
         finite('spin_margin', 0.0, MAX_BLADE_OFFSET)
+        finite('recorded_margin', 0.0, MAX_BLADE_OFFSET)
         for name in ('lane_spacing_min', 'lane_spacing_max'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, self.mower_width, lo_open=True)
@@ -588,6 +594,24 @@ class SegmentInfo:
     # path jumps from the end of one to the start of the next, getting there is up to whoever drives it
     section: int = 0
     source: str = ''  # the loop or lane it mows or leads to: 'loop-<i>', 'lane-<i>'
+    blade: bool = False  # a drive with the blade on (mkay 31.10.: never off on the lawn), see out_kinds (where it's
+    # still TRANSIT; between pieces of loops it's of the loops' kind already, handover._ring_ways)
+
+
+def out_kinds(segments: List[SegmentInfo]) -> List[str]:
+    """The kind of each segment as MowBite OS gets it: a drive with the blade on of the kind of what comes after it in
+    its section (a lane's where that's a turn: the OS slows down on turns), else its own (the Master 31.10.)."""
+    out = [s.kind for s in segments]
+    after = None
+    for k in range(len(segments) - 1, -1, -1):
+        s = segments[k]
+        if k + 1 < len(segments) and segments[k + 1].section != s.section:
+            after = None
+        if s.kind != TRANSIT:
+            after = LANE if s.kind == TURN else s.kind
+        elif s.blade and after is not None:
+            out[k] = after
+    return out
 
 
 @dataclass
@@ -623,6 +647,12 @@ class CoveragePlan:
     narrow: object = None
     cells: List[Tuple[float, List[List['Lane']]]] = dataclasses.field(default_factory=list)
     origins: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
+    # with the body checked and recorded edges: where the body was while the outline was recorded (recorded_margin off
+    # it) and the loops driven the way it was (by name), which may go there
+    recorded_space: object = None
+    recorded_loops: List[str] = dataclasses.field(default_factory=list)
+    # the areas not to mow next to it (plan_coverage's unmowed), the blade kept off them (None: none)
+    unmowed: object = None
 
 
 def _rounded_box(width: float, front: float, rear: float, front_width: Optional[float],
