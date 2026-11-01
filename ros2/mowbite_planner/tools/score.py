@@ -233,10 +233,11 @@ def _total(cases, recs, get) -> float:
 
 def body_sim(cases, ref, new, n5: str = 'rm_n5', deepest: str = 'rm_worst', what: str = 'Sim-Körper',
              where: str = 'in R_m') -> Tuple[List[str], List[str]]:
-    """The simulation's body gate (E6): (what fails it, what to know). Off the outermost loop (rm_n5, rm_worst; the
-    contact with the edge r0_n and the navigation errors there too), or on it (n5 ring_n5, deepest ring_worst: out of
-    the recorded space; its contact only to know, ring_r0_n)."""
-    bad, notes = [], []
+    """The simulation's body (E6): (what fails it, what to know). Off the outermost loop (rm_n5, rm_worst; the contact
+    with the edge r0_n and the navigation errors there too), or on it (n5 ring_n5, deepest ring_worst: out of the
+    recorded space; its contact ring_r0_n). mkay 01.11.: where the body gets in the margins or over the edge is told,
+    not a gate (with RTK the margins are the user's buffer); the navigation errors still are."""
+    bad, notes, told = [], [], []
     ring = n5 != 'rm_n5'
     both = [c for c in cases if not failed(ref.get(c)) and not failed(new.get(c))]
     seeds = sorted({s for c in both for s in sims(ref.get(c))})
@@ -259,23 +260,27 @@ def body_sim(cases, ref, new, n5: str = 'rm_n5', deepest: str = 'rm_worst', what
     notes.append(f'{what}: Stellen ≥ 5 cm {where}, Δ je Seed ' + ', '.join(f'{d:+.0f}' for d in per_seed) +
                  (f' (SD {sd:.2f})' if sd is not None else ' (1 Seed: keine SD, nicht gegen das Rauschen geprüft)'))
     if sd is not None and all(d > 0 and d > 2 * sd for d in per_seed):
-        bad.append(f'{what}: Anstieg in jeder Seed über 2 SD ({", ".join(f"{d:+.0f}" for d in per_seed)})')
+        told.append(f'{what}: Anstieg in jeder Seed über 2 SD ({", ".join(f"{d:+.0f}" for d in per_seed)})')
     if cases_up:
-        bad.append(f'{what}: {len(cases_up)} Fälle mit mehr Stellen in jeder Seed ({", ".join(cases_up[:4])})')
+        told.append(f'{what}: {len(cases_up)} Fälle mit mehr Stellen in jeder Seed ({", ".join(cases_up[:4])})')
 
     def worst(recs, key):
         return max([s.get(key) or 0.0 for c in both for s in sims(recs[c]).values()] or [0.0])
 
     wa, wb = worst(ref, deepest), worst(new, deepest)
     if wb > wa + DEEP_MORE:
-        bad.append(f'{what}: tiefste Stelle {100 * wb:.1f} cm, Referenz {100 * wa:.1f} cm')
+        told.append(f'{what}: tiefste Stelle {100 * wb:.1f} cm, Referenz {100 * wa:.1f} cm')
     contact = 'ring_r0_n' if ring else 'r0_n'
     ca, cb = (sum(s.get(contact) or 0 for c in both for s in sims(recs[c]).values()) for recs in (ref, new))
-    if ring:  # (mkay 31.10.: the outermost loop's contact isn't the gate's, it's told apart)
-        notes.append(f'{what}: Kontakt mit der Kante {ca} -> {cb} Stellen (zählt nicht ins Kontakt-Tor)')
+    # (as rare events of the same rate both ways, the new run's share of them binomial: how likely this many or more)
+    p = sum(math.comb(ca + cb, k) for k in range(cb, ca + cb + 1)) / 2 ** (ca + cb) if ca + cb else 1.0
+    notes.append(f'{what}: Kontakt mit der Kante {ca} -> {cb} Stellen über {len(seeds)} Seeds '
+                 f'(so viele oder mehr bei gleicher Rate: p = {p:.2f})')
+    notes += [f'Bericht (kein Tor, mkay 01.11.): {line}' for line in told]
+    if ring:
         return bad, notes
     if cb > ca:
-        bad.append(f'{what}: Kontakt mit der Kante {ca} -> {cb} Stellen')
+        notes.append(f'Bericht (kein Tor, mkay 01.11.): {what}: Kontakt mit der Kante {ca} -> {cb} Stellen')
     nav = _more(cases, ref, new, lambda r: sum(s.get('nav_errors') or 0 for s in sims(r).values()))
     if nav:
         bad.append(f'Navigationsfehler: {len(nav)} Fälle mehr als die Referenz ({", ".join(nav[:4])})')
@@ -300,7 +305,15 @@ def gates(cases, ref, new, opts) -> Tuple[List[str], List[str]]:
     notes.append(f'Außenring: Plankörper > 1 cm aus R_m an {_total(cases, new, lambda r: rk(r, "ring_rm")):.0f} '
                  f'Stellen (Referenz {_total(cases, ref, lambda r: rk(r, "ring_rm")):.0f}; erlaubt bis zum '
                  'Aufnahme-Raum)')
-    for key, what in (('rm_turn_out', 'Körper im spin_margin an Wenden/Ecken'),
+    # (spin_margin: as mkay counts it (31.10.), on the loops turning on the spot only; to know, all of them)
+    raw = _more(cases, ref, new, lambda r: rk(r, 'rm_turn_out'))
+    notes.append(f'Körper im spin_margin roh (an Ringen auch Bögen): '
+                 f'{_total(cases, ref, lambda r: rk(r, "rm_turn_out")):.0f} -> '
+                 f'{_total(cases, new, lambda r: rk(r, "rm_turn_out")):.0f} Stellen, {len(raw)} Fälle mehr als die '
+                 f'Referenz' + (f' ({", ".join(raw[:4])})' if raw else '') +
+                 f'; nach Regel {_total(cases, ref, lambda r: rk(r, "rm_turn_rule")):.0f} -> '
+                 f'{_total(cases, new, lambda r: rk(r, "rm_turn_rule")):.0f}')
+    for key, what in (('rm_turn_rule', 'Körper im spin_margin an Wenden/Ecken (an Ringen nur Drehen auf der Stelle)'),
                       ('centre_out', 'Mitte außerhalb der erlaubten Flächen'),
                       ('backwards', 'Schritte gegen den Kurs'), ('reverse_segs', 'Rückwärts-Segmente')):
         more = _more(cases, ref, new, lambda r, k=key: rk(r, k))
@@ -439,18 +452,20 @@ def table(names: List[str], runs: List[Dict[str, Dict]], cases: List[str], fails
     line('fest', 'Körper > 1 cm aus R_m im Plan, abseits des Außenrings (Stellen)', tot('rm_out'))
     line('fest', 'Außenring > 1 cm aus dem Aufnahme-Raum im Plan (Stellen)', tot('ring_out'))
     line('info', 'Außenring > 1 cm aus R_m im Plan (Stellen)', tot('ring_rm'))
-    line('fest', 'Körper im spin_margin an Wenden/Ecken, Plan (Stellen)', tot('rm_turn_out'))
+    line('fest', 'Körper im spin_margin an Wenden/Ecken nach Regel (an Ringen nur Drehen auf der Stelle), Plan '
+                 '(Stellen)', tot('rm_turn_rule'))
+    line('info', 'Körper im spin_margin an Wenden/Ecken roh, Plan (Stellen)', tot('rm_turn_out'))
     line('fest', 'Mitte außerhalb erlaubt (Posen)', tot('centre_out'))
     line('fest', 'Schritte gegen den Kurs', tot('backwards'))
-    line('fest', 'Sim: Stellen ≥ 5 cm in R_m, Mittel der Seeds (Fälle)', [
+    line('Bericht', 'Sim: Stellen ≥ 5 cm in R_m, Mittel der Seeds (Fälle)', [
         f'{sum(_seed_mean(x, "rm_n5") for x in ok(r)):.1f} ({sum(1 for x in ok(r) if _seed_mean(x, "rm_n5") > 0)})'
         for r in runs])
-    line('fest', 'Sim: tiefste Stelle cm', [f'{100 * max(sim_all(r, "rm_worst") or [0]):.1f}' for r in runs])
-    line('fest', 'Sim: Kontakt ≥ 2 cm hinter R0 (Stellen, alle Seeds)', [str(sum(sim_all(r, 'r0_n'))) for r in runs])
-    line('fest', 'Sim Außenring: Stellen ≥ 5 cm aus dem Aufnahme-Raum, Mittel der Seeds (Fälle)', [
+    line('Bericht', 'Sim: tiefste Stelle cm', [f'{100 * max(sim_all(r, "rm_worst") or [0]):.1f}' for r in runs])
+    line('Bericht', 'Sim: Kontakt ≥ 2 cm hinter R0 (Stellen, alle Seeds)', [str(sum(sim_all(r, 'r0_n'))) for r in runs])
+    line('Bericht', 'Sim Außenring: Stellen ≥ 5 cm aus dem Aufnahme-Raum, Mittel der Seeds (Fälle)', [
         f'{sum(_seed_mean(x, "ring_n5") for x in ok(r)):.1f} ({sum(1 for x in ok(r) if _seed_mean(x, "ring_n5") > 0)})'
         for r in runs])
-    line('fest', 'Sim Außenring: tiefste Stelle cm',
+    line('Bericht', 'Sim Außenring: tiefste Stelle cm',
          [f'{100 * max(sim_all(r, "ring_worst") or [0]):.1f}' for r in runs])
     line('info', 'Sim Außenring: Kontakt ≥ 2 cm hinter R0 (Stellen, alle Seeds)',
          [str(sum(sim_all(r, 'ring_r0_n'))) for r in runs])

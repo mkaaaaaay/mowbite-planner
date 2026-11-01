@@ -1,6 +1,7 @@
 """The plan in the shapes others want it in: OpenMower's paths (PlanPath, the mowing.plan RPC), the
 Planner Studio payload, a fingerprint. No ROS, plain lists and dicts (JSON ready)."""
 
+import bisect
 import hashlib
 import math
 import struct
@@ -15,6 +16,16 @@ from .report import check_plan
 
 # OpenMower counts the poses of a path in an int16 (current_path_index), longer paths are split
 MAX_PATH_POSES = 30000
+# rad, m: OpenMower's FTC takes a path on up to its max_goal_angle_error (20 deg) off the first pose's heading and ends
+# one up to max_goal_distance_error (0.2 m) short of its last pose, going on to the next path's first straight: where
+# the plan changes between loops and the rest within a section, the cut goes where the way is straight (turning
+# PIECE_BEND at most) PIECE_STRAIGHT either side and the body turned PIECE_SWING either way fits from PIECE_STRAIGHT
+# before it to PIECE_AFTER after it, the closest to the change within PIECE_REACH m of path (else at the change)
+PIECE_SWING = math.radians(20.0)
+PIECE_BEND = math.radians(5.0)
+PIECE_STRAIGHT = 0.3
+PIECE_AFTER = 0.5
+PIECE_REACH = 2.0
 # what the mowing.plan RPC does to points it sends: simplified to 1 cm, rounded to mm
 SIMPLIFY = 0.01
 
@@ -51,6 +62,7 @@ def plan_pieces(plan: CoveragePlan, max_poses: int = MAX_PATH_POSES) -> List[Tup
             runs[-1][2] = seg.end
         else:
             runs.append([is_outline, seg.start, seg.end, seg.section])
+    _move_cuts(plan, runs)
     pieces = []
     step = max(2, int(max_poses) - 1)
     for is_outline, start, end, _ in runs:
@@ -61,6 +73,34 @@ def plan_pieces(plan: CoveragePlan, max_poses: int = MAX_PATH_POSES) -> List[Tup
         cuts = [start + (end - start) * k // count for k in range(count + 1)]
         pieces.extend((is_outline, a, b) for a, b in zip(cuts, cuts[1:]))
     return pieces
+
+
+def _move_cuts(plan: CoveragePlan, runs: List[list]) -> None:
+    """The cuts between runs of a section (sharing a pose) moved where a path is taken on and left well (PIECE_SWING)."""
+    cfg, space = getattr(plan, 'config', None), getattr(plan, 'body_space', None)
+    if cfg is None or not cfg.body or space is None or len(runs) < 2:
+        return
+    from .footprint import Footprint, swung
+    P = plan.poses
+    s, h = [0.0], [P[0].yaw]
+    for a, b in zip(P, P[1:]):
+        s.append(s[-1] + math.hypot(b.x - a.x, b.y - a.y))
+        h.append(h[-1] + math.remainder(b.yaw - a.yaw, 2.0 * math.pi))
+    fp = None
+    for a, b in zip(runs, runs[1:]):
+        if a[3] != b[3] or a[2] != b[1]:
+            continue
+        at = a[2]
+        for c in sorted((c for c in range(a[1] + 2, b[2] - 1) if abs(s[c] - s[at]) <= PIECE_REACH),
+                        key=lambda c: (abs(s[c] - s[at]), c)):
+            lo, hi = bisect.bisect_left(s, s[c] - PIECE_STRAIGHT), bisect.bisect_right(s, s[c] + PIECE_STRAIGHT) - 1
+            if max(h[lo:hi + 1]) - min(h[lo:hi + 1]) > PIECE_BEND:
+                continue
+            if fp is None:
+                fp = Footprint(space, swung(cfg.body_outline, PIECE_SWING))
+            if all(fp.fit(P[lo:bisect.bisect_right(s, s[c] + PIECE_AFTER)])):
+                a[2] = b[1] = c
+                break
 
 
 def piece_poses(plan: CoveragePlan, start: int, end: int) -> List[Pose2D]:

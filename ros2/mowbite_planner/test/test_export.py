@@ -17,6 +17,7 @@ from mowbite_planner import PlannerConfig, SegmentInfo, plan_coverage  # noqa: E
 from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, simplified_indices,  # noqa: E402
                                     to_openmower_json, to_studio_payload)
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
+from mowbite_planner import lead as leadin  # noqa: E402
 from mowbite_planner.report import FTC_SPEEDS, check_plan, drive_time  # noqa: E402
 
 
@@ -219,11 +220,13 @@ def test_body_edges_of_the_answer():
     assert Polygon(edges['holes'][0]).within(Polygon(BED))
 
 
-def test_body_fit_of_the_answer():
+def test_body_fit_of_the_answer(monkeypatch):
     """The answer's stats say where the path goes another way for the body and leaves out what (body_fit): its places
     [x, y, m left out] and their poses [x, y, yaw, m the body sticks out there, 1 where it turns on the spot there] one
-    for one, the place where its pose is."""
-    plan = plan_of(robot_width=0.4, robot_front=0.43, robot_rear=0.14, perimeter_offset=0.0)
+    for one, the place where its pose is. (Without the way onto the first loop: the path starts where it doesn't fit.)"""
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
+    plan = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14,
+                                                    perimeter_offset=0.0))  # (not plan_of's: that may have the way)
     fit = json.loads(json.dumps(to_openmower_json(plan)['stats']['body_fit']))
     assert fit == plan.stats['body_fit'] and len(fit['poses']) == len(fit['places']) == fit['fixed'] + fit['left'] > 0
     for (x, y, _), (px, py, yaw, d, spin) in zip(fit['places'], fit['poses']):

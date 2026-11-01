@@ -16,6 +16,7 @@ from shapely.prepared import prep
 
 from .bodyfit import _assemble, _turn_at
 from .config import LANE, PERIMETER, TRANSIT, TURN, XY, PathSegment, PlannerConfig, SegmentInfo
+from .drive import BODY_OUT, turning
 from .geometry import polygons
 from .footprint import Footprint
 from .maneuvers import same_position
@@ -42,9 +43,6 @@ CROSS_TRIM = 0.25  # m at either end of a detour (where it leaves the path and g
 LINKED = 7  # of the places for a move, the best this many by straight ways get drive.py's ways too
 WINDOW = 12  # poses each side a detour's cost is taken over
 CHECK_M = 0.7  # m of path each side of a detour its body is checked over
-TURN_DEG, TURN_WIN = math.radians(90.0), 0.3  # a pose on a turn: the way turns this much within this much each side
-EPS = 1e-9  # (a corner of exactly 90 deg is one, however the headings add up)
-BODY_OUT = 0.01  # m the body may stick out there (the ranking's rule, design 2.4)
 SPIN_OUT = 0.002  # m turning on the spot (footprint.TURN_STEP's)
 FROM = (PERIMETER, TRANSIT)  # detours leave from loops and drives, lanes and their turns keep the pattern
 HOME_SPEED = 0.35  # m/s on the way home from where the path ends (the ranking's)
@@ -101,20 +99,6 @@ def _ahead(fp: Footprint, w: Window) -> Window:
 def _counted(fp: Footprint, poses: List[Pose2D], transit_s: float = 0.0) -> Cost:
     """objective.counted of poses as they'll be in the plan (_turn_at's poses in)."""
     return counted(_ahead(fp, _plain(poses))[0], transit_s)
-
-
-def turning(poses: Sequence[Pose2D]) -> numpy.ndarray:
-    """Which poses lie on a turn, from the way alone: it turns TURN_DEG at least within TURN_WIN before and after."""
-    if not poses:
-        return numpy.zeros(0, bool)
-    xy = numpy.array([(p.x, p.y) for p in poses])
-    s = numpy.concatenate([[0.0], numpy.cumsum(numpy.hypot(*numpy.diff(xy, axis=0).T))])
-    yaw = numpy.array([p.yaw for p in poses])
-    h = numpy.concatenate([[yaw[0]], yaw[0] + numpy.cumsum(numpy.remainder(numpy.diff(yaw) + math.pi, 2.0 * math.pi)
-                                                           - math.pi)])
-    lo = numpy.searchsorted(s, s - TURN_WIN - EPS, 'left')
-    hi = numpy.searchsorted(s, s + TURN_WIN + EPS, 'right')
-    return numpy.array([h[a:b].max() - h[a:b].min() >= TURN_DEG - EPS for a, b in zip(lo, hi)], bool)
 
 
 class Placer:

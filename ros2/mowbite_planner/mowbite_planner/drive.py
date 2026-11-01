@@ -1,23 +1,76 @@
-"""A drive through a space to a point, arriving facing a heading, on arcs where they fit, the body checked."""
+"""A drive through a space to a point, arriving facing a heading, on arcs where they fit, the body checked; whether a
+drive keeps spin_margin where it turns as a turn does (keeps_margin)."""
 
 import math
 from typing import List, Optional, Sequence
 
+import numpy
 from shapely.geometry import LineString
 
 from .config import SPIN_LIMIT, XY, PlannerConfig
 from .footprint import Footprint
-from .maneuvers import connect, join, path_length, plan_turn, same_position
+from .maneuvers import connect, join, path_length, plan_turn, same_position, sample_straight
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .transit import TransitPlanner
+
+
+TURN_DEG, TURN_WIN = math.radians(90.0), 0.3  # a pose on a turn: the way turns this much within this much each side
+EPS = 1e-9  # (a corner of exactly 90 deg is one, however the headings add up)
+BODY_OUT = 0.01  # m the body may stick out there (the ranking's rule, design 2.4)
+# poses of the path before a drive its check looks back at (turning: TURN_WIN each side)
+MARGIN_BEFORE = 6
+
+
+def turning(poses: Sequence[Pose2D]) -> numpy.ndarray:
+    """Which poses lie on a turn, from the way alone: it turns TURN_DEG at least within TURN_WIN before and after."""
+    if not poses:
+        return numpy.zeros(0, bool)
+    xy = numpy.array([(p.x, p.y) for p in poses])
+    s = numpy.concatenate([[0.0], numpy.cumsum(numpy.hypot(*numpy.diff(xy, axis=0).T))])
+    yaw = numpy.array([p.yaw for p in poses])
+    h = numpy.concatenate([[yaw[0]], yaw[0] + numpy.cumsum(numpy.remainder(numpy.diff(yaw) + math.pi, 2.0 * math.pi)
+                                                           - math.pi)])
+    lo = numpy.searchsorted(s, s - TURN_WIN - EPS, 'left')
+    hi = numpy.searchsorted(s, s + TURN_WIN + EPS, 'right')
+    return numpy.array([h[a:b].max() - h[a:b].min() >= TURN_DEG - EPS for a, b in zip(lo, hi)], bool)
+
+
+def keeps_margin(fp: Optional[Footprint], step: float, before: Sequence[Pose2D], drive: List[Pose2D],
+                 yaw: Optional[float]) -> bool:
+    """Whether the body keeps spin_margin (but BODY_OUT) on drive where it turns as a turn does, found from the way
+    with the poses before and straight on from its end facing yaw (turning)."""
+    if fp is None or fp.turning is fp or not drive:
+        return True
+    end = drive[-1]
+    after = sample_straight(end.x, end.y, end.x + TURN_WIN * math.cos(yaw), end.y + TURN_WIN * math.sin(yaw), yaw,
+                            step)[1:] if yaw is not None else []
+    window = list(before) + list(drive) + after
+    turn = turning(window).tolist()
+    lo, hi = len(before), len(before) + len(drive)
+    bad = [k for k in fp.bad_poses(window, turn) if lo <= k < hi]
+    out = fp.out_by([(window[k - 1] if k else None, window[k]) for k in bad], on_turn=[turn[k] for k in bad]) \
+        if bad else []
+    return not any(xy is not None and d > BODY_OUT for d, xy in out)
+
+
+class _OnTurns:
+    """A footprint's check with spin_margin kept where the way turns as a turn does (turning)."""
+
+    def __init__(self, fp: Footprint):
+        self.fp = fp
+
+    def poses_fit(self, poses: Sequence[Pose2D]) -> bool:
+        return self.fp.poses_fit(poses, turning(poses).tolist())
 
 
 class Drive:
     """Drives through space (shortest ways, is_free) with the body checked where there's a footprint."""
 
-    def __init__(self, space: TransitPlanner, footprint: Optional[Footprint], cfg: PlannerConfig):
+    def __init__(self, space: TransitPlanner, footprint: Optional[Footprint], cfg: PlannerConfig,
+                 margin: bool = False):
+        # (margin: spin_margin kept where it turns as a turn does, see keeps_margin)
         self.space, self.cfg = space, cfg
-        self.body = footprint.poses_fit if footprint is not None else None
+        self.body = (_OnTurns(footprint).poses_fit if margin else footprint.poses_fit) if footprint is not None else None
 
     def way(self, pos: XY, facing: Optional[float], target: XY, heading: Optional[float]) -> Optional[List[Pose2D]]:
         """From pos (facing that way) to target, arriving facing heading, on arcs where they fit (see _Route.drive_to);

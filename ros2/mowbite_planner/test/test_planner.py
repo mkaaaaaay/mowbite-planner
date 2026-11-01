@@ -34,6 +34,7 @@ from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RA
 from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
 from mowbite_planner.drive import _arcs, _spins  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
+from mowbite_planner import export, lead as leadin  # noqa: E402
 from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
 from mowbite_planner.assemble import LaneKit, _drive_way  # noqa: E402
@@ -1735,7 +1736,7 @@ def test_plan_starts_where_the_mower_gets_on(monkeypatch):
     check_invariants(plan, cfg, [TREE, BED])
     fit, p, way = plan.stats['body_fit'], plan.poses[0], plan.segments[0]
     assert plan_footprint(plan).turning.anywhere.distance(Point(p.x, p.y)) < 1e-6
-    assert way.kind == TRANSIT and way.maneuver == 'body' and fit['unchecked'] == []
+    assert (way.kind, way.maneuver) in ((TRANSIT, 'body'), (PERIMETER, 'lead')) and fit['unchecked'] == []
     assert plan.segments[1].kind == PERIMETER and plan.segments[1].start == way.end
     start = plan.poses[way.end]
     assert min(math.hypot(start.x - x, start.y - y) for x, y in GARDEN) > 1.0  # (away from the corner)
@@ -1743,6 +1744,62 @@ def test_plan_starts_where_the_mower_gets_on(monkeypatch):
     later = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     assert later.poses[later.segments[0].end] != start
     assert check_plan(plan)['left_m2'] <= check_plan(later)['left_m2'] + 0.2
+
+
+def test_lead_onto_the_first_loop(monkeypatch):
+    """The outermost loop driven as recorded keeps no room for the body turned leadin.START_SWING either way (OpenMower
+    takes a path on up to 20 deg off its first pose's heading): the plan starts with a way onto it (lead.way_onto) from
+    where the body turns whatever way it faces, along the loop on its mowable side and easing onto it, the body turned
+    START_SWING fitting its first START_SWUNG, turning LEAD_TURN a step at most; nothing more left unmowed for it."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(5, 1, 0.0), end=(5, 1))
+    check_invariants(plan, cfg)
+    first = plan.segments[0]
+    assert first.kind == PERIMETER and first.maneuver == 'lead' and plan.segments[1].kind == PERIMETER
+    assert first.source == plan.segments[1].source and plan.segments[1].start == first.end
+    way, fp = plan.poses[first.start:first.end + 1], plan_footprint(plan)
+    assert fp.turning.anywhere.distance(Point(way[0].x, way[0].y)) < 1e-6
+    swing = Footprint(fp.space, footprint.swung(fp.corners, leadin.START_SWING))
+    ahead = [p for k, p in enumerate(way) if path_length(way[:k + 1]) <= leadin.START_SWUNG]
+    assert all(swing.fit(ahead)) and not all(swing.fit(plan.poses[first.end:first.end + 6]))
+    assert max(angle_diff(a.yaw, b.yaw) for a, b in zip(way, way[1:])) <= leadin.LEAD_TURN + 1e-9
+    assert check_plan(plan)['body_out'] == []
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
+    plain = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(5, 1, 0.0), end=(5, 1))
+    assert plain.segments[0].maneuver != 'lead'
+    assert check_plan(plan)['left_m2'] <= check_plan(plain)['left_m2'] + 0.01
+
+
+def test_path_cuts_where_openmower_gets_on_well(monkeypatch):
+    """OpenMower takes a path on up to 20 deg off its first pose's heading and ends one up to 0.2 m short of its last
+    pose: where the plan changes between loops and the rest within a section, the cut between its paths goes where the
+    way is straight PIECE_STRAIGHT either side and the body turned PIECE_SWING either way fits from PIECE_STRAIGHT
+    before it to PIECE_AFTER after it, within PIECE_REACH of the change (export._move_cuts). The poses the same."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    pieces = plan_pieces(plan)
+    monkeypatch.setattr(export, '_move_cuts', lambda plan, runs: None)
+    plain = plan_pieces(plan)
+    assert len(pieces) == len(plain) and pieces[0][1] == 0 and pieces[-1][2] == len(plan.poses) - 1
+    for (_, _, end), (_, start, _) in zip(pieces, pieces[1:]):
+        assert start in (end, end + 1)
+    P = plan.poses
+    at = [path_length(P[:k + 1]) for k in range(len(P))]
+    swing = Footprint(plan.body_space, footprint.swung(cfg.body_outline, export.PIECE_SWING))
+    moved = 0
+    for (o, a, b), (_, c, d) in zip(pieces, plain):
+        if b == d:
+            continue
+        moved += 1
+        assert abs(at[b] - at[d]) <= export.PIECE_REACH + 1e-9
+        near = [k for k in range(len(P)) if abs(at[k] - at[b]) <= export.PIECE_STRAIGHT]
+        heads = [P[near[0]].yaw]
+        for k in near[1:]:
+            heads.append(heads[-1] + math.remainder(P[k].yaw - P[k - 1].yaw, 2 * math.pi))
+        assert max(heads) - min(heads) <= export.PIECE_BEND + 1e-9
+        assert all(swing.fit([P[k] for k in range(len(P)) if -export.PIECE_STRAIGHT <= at[k] - at[b] <=
+                              export.PIECE_AFTER]))
+    assert moved > 0
 
 
 def test_body_fit_late_start_left_out(monkeypatch):
@@ -1755,6 +1812,7 @@ def test_body_fit_late_start_left_out(monkeypatch):
     the plan doesn't start with a loop. The loops as planned: trace.repaired would drive the poses made not to fit
     here anew.)"""
     monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
     monkeypatch.setattr('mowbite_planner.rings.repaired', lambda poses, *args, **kw: (poses, 0, 0))
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
@@ -2203,6 +2261,7 @@ def test_body_fit_drives_on_not_too_far(monkeypatch):
                         lane_order='skip', narrow_parts='loops', robot_width=0.41, robot_front=0.43, robot_rear=0.18,
                         blade_ahead=0.185)
     loops_not_as_recorded(monkeypatch)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (where it starts as before)
     before = plan_coverage(zone, islands, cfg, start=(-1.5, 0.5, 0.0), end=(-1.5, 0.5))
     was = before.stats['body_fit']
     assert max(m for _, _, m in was['places']) <= bodyfit.FIT_ON_MAX
@@ -2294,6 +2353,7 @@ def test_body_fit_tries_grow_with_the_area(monkeypatch):
     there)."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (the safety net's way to the start)
     planned = plan_coverage(lawn, [], dataclasses.replace(cfg, body_fit=False), start=dock, end=dock[:2])
     space = plan_footprint(planned).space
     k = next(k for k in range(len(planned.poses)) if path_length(planned.poses[:k + 1]) > 3.0)
@@ -3038,6 +3098,7 @@ def test_body_fit_kept(monkeypatch):
     """Where _fit_body got to is kept every FIT_KEEP poses: a plan at another angle goes on from where its path (the
     loops) was still the same, the same plan as worked out afresh. Other settings of it start afresh."""
     monkeypatch.setattr(bodyfit, 'FIT_KEEP', 50)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (the loops from the start on)
     lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
     config._FITTED.clear()

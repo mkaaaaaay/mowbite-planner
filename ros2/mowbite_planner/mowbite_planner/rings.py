@@ -14,6 +14,7 @@ from shapely.prepared import prep
 
 from .config import FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, XY
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings
+from .lead import lead_in
 from .levels import CORNER_CUT, centre_line, left_out as levels_left_out
 from .loopfit import LoopFits
 from .maneuvers import CORNER_ANGLE, closest_on_polyline, drive_polyline
@@ -237,7 +238,9 @@ class Loops:
         self.source = name
         self.origins[name] = {'parent': parent or f'level-{level}', 'kind': 'obstacle' if hole else 'outline',
                               'level': level}
-        self.go_to(entry, poses[0].yaw)
+        poses, lead = lead_in(self, poses, -1.0 if flip else 1.0, self.recorded_fp if as_recorded else self.footprint)
+        self.go_to((poses[0].x, poses[0].y), poses[0].yaw)
+        self.add(kind, lead or [], maneuver='lead')  # (the plan's first loop's way onto it, see lead.py)
         self.add(kind, poses, maneuver=maneuver)
         self.loops.append([(p.x, p.y) for p in poses])
         self.loop_side[name] = -1.0 if flip else 1.0

@@ -18,6 +18,7 @@ KINK_ANGLE, KINK_LEN = math.radians(45.0), 0.15
 DIR_TOL = math.radians(5.0)
 BAND = 0.30
 PLACE = 0.5
+SPOT_STEP = 0.005  # m: a step this short with the heading changing turns on the spot (rm_turn_rule)
 
 
 def _xyh(plan) -> List[Sequence[float]]:
@@ -362,10 +363,27 @@ def outer_ring(plan) -> List[bool]:
     return on
 
 
+def _ringish(plan) -> List[bool]:
+    """For each pose whether it's on a loop or on a way between pieces of loops (the drives _ring_ways makes), not on
+    the completion stage's moves in a loop's path."""
+    on = [False] * len(plan.poses)
+    for seg in plan.segments:
+        if (seg.kind == PERIMETER or seg.maneuver == 'ring') and seg.maneuver != 'mop_up':
+            on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
+    return on
+
+
+def _on_spot(P, i: int) -> bool:
+    """Whether the mower turns on the spot at pose i or the next (a step of SPOT_STEP at most, the heading changing)."""
+    return any(0 <= j < len(P) and math.hypot(P[j].x - P[i].x, P[j].y - P[i].y) < SPOT_STEP and
+               abs(math.remainder(P[j].yaw - P[i].yaw, 2 * math.pi)) > 1e-6 for j in (i - 1, i + 1))
+
+
 def plan_body(plan, ref: Ref) -> Dict[str, Any]:
     """Where the planned body gets out: off the outermost loop more than BODY_PLAN out of R_m (rm_out), turning
     spin_margin further in (rm_turn_out); on it out of the recorded space (ring_out), and, to know, out of R_m
-    (ring_rm)."""
+    (ring_rm). rm_turn_rule: rm_turn_out's places as mkay counts them (31.10.): on the loops (and the ways between
+    their pieces) only those turning on the spot, of the others (rm_turn_arc) none."""
     from mowbite_planner.footprint import Footprint
     if ref.rm is None:
         return {}
@@ -375,17 +393,26 @@ def plan_body(plan, ref: Ref) -> Dict[str, Any]:
     got = {}
     for key, space, geometric, mine in (('rm_out', fp, False, False), ('rm_turn_out', fp, True, False),
                                         ('ring_out', rec, False, True), ('ring_rm', fp, False, True)):
-        found = []
+        found, where = [], {}
         for a, part in zip(plan.section_starts, _sections_of(plan.poses, plan.section_starts)):
             turn = _turning(part) if geometric else False
             bad = [i for i in space.bad_poses(part, turn) if ring[a + i] == mine]
             if bad:
                 on = [turn[i] for i in bad] if geometric else False
-                found += [(d, xy) for d, xy in space.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
-                                                            on_turn=on) if xy is not None and d > BODY_PLAN]
+                for i, (d, xy) in zip(bad, space.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
+                                                        on_turn=on)):
+                    if xy is not None and d > BODY_PLAN:
+                        found.append((d, xy))
+                        where.setdefault((d, xy), a + i)
         places = _places(found)
         got[key] = len(places)
         got[key + '_at'] = places[:AT_MAX]
+        if key == 'rm_turn_out':  # (the poses on loops not turning on the spot apart, each kind grouped on its own)
+            ringish = _ringish(plan)
+            arc = [f for f in found if ringish[where[f]] and not _on_spot(plan.poses, where[f])]
+            rule = _places([f for f in found if not (ringish[where[f]] and not _on_spot(plan.poses, where[f]))])
+            got['rm_turn_arc'], got['rm_turn_rule'] = len(_places(arc)), len(rule)
+            got['rm_turn_rule_at'] = rule[:AT_MAX]
     return got
 
 

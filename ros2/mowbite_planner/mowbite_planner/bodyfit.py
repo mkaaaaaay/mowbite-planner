@@ -13,6 +13,7 @@ from shapely.prepared import prep
 
 from .config import (_FITTED, _KEPT_LOCK, FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, SMOOTH_RADII, TRANSIT, TURN, XY,
                      Lane, PathSegment, PlannerConfig, SegmentInfo, _keep)
+from .drive import BODY_OUT, MARGIN_BEFORE, turning
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, subtract, union
 from .maneuvers import CORNER_ANGLE, dubins, join, path_length, same_position, sample_arc, sample_straight
@@ -854,7 +855,8 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
                    infos: List[SegmentInfo]) -> Tuple[List[Pose2D], List[SegmentInfo]]:
     """Where a drive or a way of _fit_body (TRANSIT) bends at a pose by more than CORNER_ANGLE (turns on the spot there
     from footprint.SPIN on), an arc in its place, of SMOOTH_RADII of turn_radius (tighter than min_turn_radius too): the
-    widest that keeps in the transit space and the body fits on. Tangent to the straight ends of the ways in and out,
+    widest that keeps in the transit space and the body fits on (spin_margin kept where it turns as a turn does,
+    drive.turning: else the corner stays, turning on the spot there with it). Tangent to the straight ends of the ways in and out,
     into the loop, lane or turn next to it turn_radius at most (as much as a right angle of that takes) and only where
     the blade mows what it leaves of it on the arc or on what no rounding leaves out (but EARLIER_LEFT); else an S
     from as far back on the way in as that allows (or where the drive's straight way in starts) onto the drive's way out
@@ -921,6 +923,19 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
                 if m.name == 'u_turn' or not route.cfg.turn_on_spot:  # (no loop with turn_on_spot)
                     yield a, b, m.pieces[0].poses
 
+    def margin(s: int, e: int, new: List[Pose2D]) -> bool:
+        # (in place of out[s..e]: spin_margin kept, but BODY_OUT, where the way turns as a turn does, with the poses
+        # before and after it)
+        fp = route.footprint
+        if fp.turning is fp:
+            return True
+        before, after = out[max(0, s - MARGIN_BEFORE):s], out[e + 1:e + 1 + MARGIN_BEFORE]
+        window = before + new + after
+        turn = turning(window).tolist()
+        bad = [k for k in fp.bad_poses(window, turn) if len(before) <= k < len(before) + len(new) and turn[k]]
+        return not bad or all(xy is None or d <= BODY_OUT for d, xy in fp.out_by(
+            [(window[k - 1] if k else None, window[k]) for k in bad], on_turn=[turn[k] for k in bad]))
+
     def fit(a: float, b: float, arc: List[Pose2D], out_of: bool) -> Optional[Tuple[int, int, List[Pose2D]]]:
         # (the poses before and after it that stay, those and it), where it fits
         s, e = i - 1, i + 1
@@ -933,7 +948,7 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
         # (where it ends at the next corner that one turns from the arc's last but one pose)
         if not route.transit.is_free(pts) or out_of and not route.clear(pts) or \
                 deep is not None and clear and deep.intersects(LineString(pts)) or \
-                not route.body(new[1:] if same_position(arc[-1], out[e]) else arc):
+                not route.body(new[1:] if same_position(arc[-1], out[e]) else arc) or not margin(s, e, new):
             return None
         # of the pieces next to the drive it leaves out the blade mows all but EARLIER_LEFT on it or elsewhere
         left = [route.blade([arc[0], Pose2D(p.x - behind * math.cos(u), p.y - behind * math.sin(u), u)])] \

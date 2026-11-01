@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from shapely.geometry import Point, Polygon, box
 
-from .complete import BODY_OUT, TURN_WIN, turning
+from .drive import MARGIN_BEFORE, keeps_margin
 from .config import LANE, TRANSIT, TURN, XY, Lane
 from .geometry import polygonal, polygons, rings, union
-from .maneuvers import same_position, sample_straight
+from .maneuvers import same_position
 from .mathutil import Pose2D, angle_diff
 from .objective import END_S, Cost, seconds
 from .order import EXACT, Guess, plan_order
@@ -21,8 +21,6 @@ from .swaths import Passes
 from .turns import Catalog, Turn
 
 Work = Dict[int, Dict[str, Any]]
-# poses of the path before a drive into a lane its check looks back at (complete.turning: TURN_WIN each side)
-MARGIN_BEFORE = 6
 
 
 class LaneKit:
@@ -313,6 +311,8 @@ def _drive_into(route: _Route, at: Pose2D, head: XY, maneuver: str) -> None:
             kept = poses
             break
         found = found or poses
+    if kept is None and found is not None:  # (one with spin_margin on its arcs, where one fits)
+        kept = route.margin_drive(target, at.yaw, before)
     if (kept or found) is None:
         route.go_to(target, at.yaw, head)
         return
@@ -322,18 +322,5 @@ def _drive_into(route: _Route, at: Pose2D, head: XY, maneuver: str) -> None:
 
 
 def _keeps_margin(route: _Route, before: List[Pose2D], drive: List[Pose2D], yaw: float) -> bool:
-    """Whether the body keeps spin_margin (but BODY_OUT) on drive where it turns as a turn does, found from the way
-    with the poses before and the lane on from its end facing yaw (complete.turning)."""
-    fp = route.footprint
-    if fp is None or fp.turning is fp or not drive:
-        return True
-    end = drive[-1]
-    after = sample_straight(end.x, end.y, end.x + TURN_WIN * math.cos(yaw), end.y + TURN_WIN * math.sin(yaw), yaw,
-                            route.step)[1:]
-    window = list(before) + list(drive) + after
-    turn = turning(window).tolist()
-    lo, hi = len(before), len(before) + len(drive)
-    bad = [k for k in fp.bad_poses(window, turn) if lo <= k < hi]
-    out = fp.out_by([(window[k - 1] if k else None, window[k]) for k in bad], on_turn=[turn[k] for k in bad]) \
-        if bad else []
-    return not any(xy is not None and d > BODY_OUT for d, xy in out)
+    """drive.keeps_margin with the lane on from the drive's end facing yaw."""
+    return keeps_margin(route.footprint, route.step, before, drive, yaw)
