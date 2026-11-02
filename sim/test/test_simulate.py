@@ -201,3 +201,62 @@ def test_start_elsewhere():
     res = simulate(plan, MowerModel(), start=Pose2D(first.x + 1.0, first.y + 1.0, 0.0))
     approach = [s for s in res.samples if s[8] == APPROACH and not s[7]]
     assert approach and math.hypot(approach[0][1] - first.x, approach[0][2] - first.y) > 1.0
+
+
+def drive_ftc(model, poses, steps=2000, dt=0.05):
+    """FTC (_Ftc) on poses driving a mower that does what it's told: ([(t, x, y, yaw, v)] each cycle till it's done
+    or gives up, whether it got there)."""
+    ftc = _Ftc(model)
+    ftc.set_plan(poses, 0.0)
+    x, y, yaw = poses[0]
+    out = []
+    for k in range(1, steps):
+        t = k * dt
+        v, w, ok = ftc.compute((x, y, yaw), t)
+        if not ok:
+            break
+        x, y, yaw = x + v * math.cos(yaw) * dt, y + v * math.sin(yaw) * dt, yaw + w * dt
+        out.append((t, x, y, yaw, v))
+        if ftc.reached():
+            break
+    return out, ftc.reached()
+
+
+def test_ftc_plan_backs_up():
+    """planBacksUp: where a pose and the next one elsewhere (more than 1 mm off) both face against the way between
+    them; a pose facing the way it came (slic3r's obstacle outlines) doesn't."""
+    ftc = _Ftc(MowerModel())
+    ahead = [(0.1 * i, 0.0, 0.0) for i in range(5)]
+    back = [(-0.1 * i, 0.0, 0.0) for i in range(5)]
+    ftc.set_plan(ahead, 0.0)
+    assert not any(ftc._backs_up(i) for i in range(5))
+    ftc.set_plan(back[:1] + [(0.0, 0.0005, 0.0)] + back[1:], 0.0)
+    assert all(ftc._backs_up(i) for i in range(5))
+    ftc.set_plan([(0.0, 0.0, 0.0), (0.1, 0.0, math.pi), (0.2, 0.0, 0.0), (0.3, 0.0, 0.0)], 0.0)
+    assert not ftc._backs_up(0) and not ftc._backs_up(1)
+
+
+def test_ftc_backs_up_with_the_plan():
+    """back_up_with_plan: 2 m ahead, 2 m back facing the same way: backed up, the point stopping where the plan turns
+    back (no jump in the speed asked for), at speed_reverse at most; without it the mower never backs up."""
+    line = [(0.05 * i, 0.0, 0.0) for i in range(41)]
+    poses = line + [(x, y, a) for x, y, a in reversed(line[:-1])]
+    model = MowerModel().with_overrides({'back_up_with_plan': True})
+    run, there = drive_ftc(model, poses)
+    v = [s[4] for s in run]
+    turn = [s[4] for s in run if s[1] > 1.0]  # (where it turns back, at 2 m)
+    assert min(v) < -0.1 and max(abs(b - a) for a, b in zip(turn, turn[1:])) < 0.05
+    assert there and abs(run[-1][1]) < 0.2 and abs(run[-1][2]) < 0.02
+    slow, there = drive_ftc(model.with_overrides({'speed_reverse': 0.08}), poses)
+    backing = [s for s in slow if s[4] < 0]
+    assert there and backing and -0.08 * 1.3 < sum(s[4] for s in backing) / len(backing) < 0
+    run, there = drive_ftc(MowerModel(), poses)
+    assert not there and min(s[4] for s in run) >= 0.0
+
+
+def test_back_up_with_plan_leaves_forward_plans_alone():
+    """back_up_with_plan on: a plan that only goes forwards is driven to the bit as without it."""
+    plan = plan_of()
+    a = simulate(plan, MowerModel.realistic(0))
+    b = simulate(plan, MowerModel.realistic(0).with_overrides({'back_up_with_plan': True}))
+    assert a.samples == b.samples

@@ -1084,9 +1084,10 @@ def test_rpc_simulate(planner):
     assert ideal['tracking']['lane']['p95'] < 0.01
     assert 0.85 * ideal['duration']['model_min'] < ideal['duration']['mow_min'] < 1.1 * ideal['duration']['model_min']
     assert 'track' not in ideal and 'runs' not in ideal
-    rospy.params[node_module.FTC_PARAMS] = {'speed_fast': 0.3, 'forward_only': True, 'debug_pid': True}
+    rospy.params[node_module.FTC_PARAMS] = {'speed_fast': 0.3, 'forward_only': True, 'debug_pid': True,
+                                            'back_up_with_plan': True, 'speed_reverse': 1}
     slower, _ = rpc_waited('planner.simulate', {'area_id': 'a', 'model': 'ideal'})
-    assert slower['model'] == {'speed_fast': 0.3, 'seed': 0}
+    assert slower['model'] == {'speed_fast': 0.3, 'back_up_with_plan': True, 'speed_reverse': 1.0, 'seed': 0}
     assert slower['duration']['mow_min'] > ideal['duration']['mow_min']
     small = {'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]}
     real, error = rpc_waited('planner.simulate', dict(small, seeds=2, track=True, playback=2,

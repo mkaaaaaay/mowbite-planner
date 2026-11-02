@@ -133,6 +133,10 @@ class MowerModel:
     speed_fast_threshold_angle: float = 20.0
     speed_angular: float = 45.0
     acceleration: float = 0.1
+    # back_up_with_plan (open_mower_ros PR #371): it backs up where the plan does (both poses of a step face against
+    # it), its point stopping where the plan switches between going and backing up; m/s its point backs up at most
+    back_up_with_plan: bool = False
+    speed_reverse: float = 2.0
     # its PIDs (on the distance ahead to its point, to the side, on the heading), the integrals' limits
     kp_lon: float = 4.0
     ki_lon: float = 0.0
@@ -238,8 +242,9 @@ class MowerModel:
             v = getattr(self, f.name)
             if isinstance(v, float) and not math.isfinite(v):
                 raise PlanningError('mower model %s: %r' % (f.name, v))
-        for name in ('speed_fast', 'speed_slow', 'speed_angular', 'acceleration', 'controller_frequency',
-                     'wheel_distance', 'gps_rate', 'odometry_rate', 'motion_vector_rate', 'drive_gain'):
+        for name in ('speed_fast', 'speed_slow', 'speed_angular', 'speed_reverse', 'acceleration',
+                     'controller_frequency', 'wheel_distance', 'gps_rate', 'odometry_rate', 'motion_vector_rate',
+                     'drive_gain'):
             if getattr(self, name) <= 0:
                 raise PlanningError('mower model %s must be above 0' % name)
         for name in ('drive_delay', 'drive_tau', 'drive_accel', 'drive_gain_sigma', 'drive_asymmetry_sigma',
@@ -311,10 +316,11 @@ _PRE_ROTATE, _FOLLOWING, _WAITING, _POST_ROTATE, _FINISHED = range(5)
 
 
 class _Ftc:
-    """OpenMower's FTCPlanner (ftc_planner.cpp, upstream a69d144) as Move Base Flex runs it: a point running along
-    the plan at its own speed (whatever the mower does, until it's max_follow_distance off), the mower steered onto it
-    by PIDs. Ported line by line, quirks kept: the errors of the cycle before survive a new plan (a D spike in the
-    first cycle), the integrals add up in every state, the last pose doubled with the heading of the one before."""
+    """OpenMower's FTCPlanner (ftc_planner.cpp, upstream a69d144 with back_up_with_plan and speed_reverse of
+    open_mower_ros PR #371, 7a14e8f) as Move Base Flex runs it: a point running along the plan at its own speed
+    (whatever the mower does, until it's max_follow_distance off), the mower steered onto it by PIDs. Ported line by
+    line, quirks kept: the errors of the cycle before survive a new plan (a D spike in the first cycle), the integrals
+    add up in every state, the last pose doubled with the heading of the one before."""
 
     def __init__(self, m: MowerModel):
         self.m = m
@@ -329,6 +335,7 @@ class _Ftc:
         self.state, self.t_state, self.crashed = _PRE_ROTATE, now, False
         self.p = [tuple(q) for q in plan]
         self.idx, self.prog = 0, 0.0
+        self.last_back = False  # (last_step_backs_up)
         self.last_time = now
         self.cur_speed = self.m.speed_slow
         self.lat = self.lon = self.ang = 0.0
@@ -361,15 +368,31 @@ class _Ftc:
             return 0.0, 0.0, False
         return v, w, True
 
+    def _backs_up(self, i: int) -> bool:
+        """planBacksUp: from pose i the plan backs up, it and the next pose elsewhere (more than 1 mm off) both face
+        against the way between them."""
+        p = self.p
+        if i >= len(p):
+            return False
+        x0, y0, a0 = p[i]
+        for x1, y1, a1 in p[i + 1:]:
+            dx, dy = x1 - x0, y1 - y0
+            if math.sqrt(dx * dx + dy * dy) > 0.001:
+                return dx * math.cos(a0) + dy * math.sin(a0) < 0.0 and dx * math.cos(a1) + dy * math.sin(a1) < 0.0
+        return False
+
     def _lookahead(self) -> float:
         m, (cx, cy, ca) = self.m, self.cp
         d, lx, ly = 0.0, cx, cy
+        back = m.back_up_with_plan and self._backs_up(self.idx)
         for i in range(self.idx + 1, len(self.p)):
             x, y, a = self.p[i]
             if d > m.speed_fast_threshold or abs(_wrap(a - ca)) > self.fast_angle:
                 break
             d += math.hypot(x - lx, y - ly)
             lx, ly = x, y
+            if m.back_up_with_plan and self._backs_up(i) != back:  # (it ends where the plan switches direction)
+                break
         return d
 
     def _control_point(self, dt: float, pose: Tuple[float, float, float]) -> None:
@@ -378,6 +401,9 @@ class _Ftc:
             self.cp = self.p[0]
         elif self.state == _FOLLOWING:
             target = m.speed_fast if self._lookahead() >= m.speed_fast_threshold else m.speed_slow
+            if self._backs_up(self.idx):
+                target = min(target, m.speed_reverse)
+                self.cur_speed = min(self.cur_speed, target)
             if target > self.cur_speed:
                 self.cur_speed = min(target, self.cur_speed + dt * m.acceleration)
             elif target < self.cur_speed:
@@ -394,9 +420,16 @@ class _Ftc:
                 rd, ra = pd * (1.0 - self.prog), pa * (1.0 - self.prog)
                 if rd < dm and ra < am:
                     self.prog = 0.0
+                    back = m.back_up_with_plan and self._backs_up(self.idx)
                     self.idx += 1
                     dm -= rd
                     am -= ra
+                    # (where the plan switches direction its point stops and starts again from standstill)
+                    if m.back_up_with_plan and self._backs_up(self.idx) != back:
+                        dm = 0.0
+                        if m.acceleration > 0.0:
+                            self.cur_speed = 0.0
+                    self.last_back = back
                 else:
                     pdist = (pd * self.prog + dm) / pd
                     pang = (pa * self.prog + am) / pa if pa > 0 else math.inf
@@ -451,10 +484,13 @@ class _Ftc:
         self.last_lat, self.last_lon, self.last_ang = lat, lon, ang
         if self.state == _FOLLOWING:
             v = lon * m.kp_lon + self.i_lon * m.ki_lon + d_lon * m.kd_lon
-            if v < 0:  # (forward_only)
+            # (forward_only, but where the plan backs up and just past where it goes forwards again)
+            if v < 0 and not (m.back_up_with_plan and (self.last_back or self._backs_up(self.idx))):
                 v = 0.0
             else:
-                v = min(v, m.max_cmd_vel_speed)
+                v = _clamp(v, m.max_cmd_vel_speed)
+                if v < 0:
+                    lat = -lat
             g = 1.0
             if m.lateral_priority_distance > 0:
                 g = max(m.lateral_priority_min_gain,

@@ -1383,7 +1383,8 @@ class MowbitePlannerRos1:
         own = {}
         ftc = rospy.get_param(FTC_PARAMS, {})
         for k, v in (ftc.items() if isinstance(ftc, dict) else ()):
-            if k in MowerModel.names() and isinstance(v, (int, float)) and not isinstance(v, bool):
+            if k in MowerModel.names() and isinstance(v, (int, float)) and \
+                    isinstance(v, bool) == isinstance(getattr(MowerModel, k), bool):  # (back_up_with_plan)
                 own[k] = v
         for k, param in SIM_PARAMS.items():
             v = rospy.get_param(param, None)
