@@ -32,7 +32,7 @@ from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH,
 from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT,  # noqa: E402
                                     TRACK, TURN, ZERO_TURN, Lane, PathSegment)
 from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
-from mowbite_planner.drive import _arcs, _spins  # noqa: E402
+from mowbite_planner.drive import BODY_OUT, _arcs, _spins, margins, on_spot, turning  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner import export, lead as leadin, spacing  # noqa: E402
 from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
@@ -917,6 +917,30 @@ def test_footprint_spin_margin(monkeypatch):
     assert [Footprint(room, BODY, 0.05).fits_turn(*t) for t in turns] == fits and 30 < sum(fits) < 270
 
 
+def test_margins_most_of_it():
+    """Where nothing keeps spin_margin the most of it, drive.MARGIN_STEP less each (0.15: 0.1, then 0.05), the same body
+    and space; the default's and none: that one alone."""
+    room = Polygon(rect(0, 0, 10, 10))
+    fp = Footprint(room, BODY, 0.15)
+    assert [f.spin_margin for f in margins(fp)] == [0.15, 0.1, 0.05]
+    assert all(f.space is room and f.corners == fp.corners for f in margins(fp)) and margins(fp)[1] is fp.spun(0.1)
+    assert [f.spin_margin for f in margins(Footprint(room, BODY, 0.08))] == [0.08, 0.05]
+    for m in (0.05, 0.0):
+        f = Footprint(room, BODY, m)
+        assert margins(f) == [f] and f.spun(m) is f
+
+
+def test_spacing_not_past_the_other():
+    """lane_spacing_min or lane_spacing_max not set: half or 0.85 of the blade, not past the other where that's set (a
+    0.3 m blade with lane_spacing_max 0.13 was refused); both set the other way round: refused."""
+    assert PlannerConfig(mower_width=0.3, lane_spacing_max=0.13).spacing_asked == (0.13, 0.13)
+    assert PlannerConfig(mower_width=0.1, lane_spacing_min=0.09).spacing_asked == (0.09, 0.09)
+    assert PlannerConfig(mower_width=0.3).spacing_asked == pytest.approx((0.15, 0.255))
+    PlannerConfig(mower_width=0.3, lane_spacing_max=0.13, lane_spacing_mode='auto').validate()
+    with pytest.raises(PlanningError, match='lane_spacing_min must be <= lane_spacing_max'):
+        PlannerConfig(mower_width=0.3, lane_spacing_min=0.2, lane_spacing_max=0.13).validate()
+
+
 def test_footprint_on_turn(monkeypatch):
     """On a turn between lanes (on_turn: all poses but the first, where it comes from, none, or one by one) the body
     keeps spin_margin further off the edges, facing the pose's way: there the mower keeps less exactly to its path.
@@ -1343,8 +1367,9 @@ def test_robot_outline_settings():
     assert diamond.body_outline == ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
     assert PlannerConfig(**NX60I, robot_outline=ROUNDED).body_outline == tuple(ROUNDED)
     auto = dict(MOWER, perimeter_passes=-1)
-    assert PlannerConfig(**auto, robot_outline=BODY).passes == PlannerConfig(**dict(auto, **NX60I)).passes == 5
-    assert PlannerConfig(**auto, robot_outline=ROUNDED).passes == 4
+    # (lanes closer than two turn_radius turn by a bulb, see test_passes_worked_out)
+    assert PlannerConfig(**auto, robot_outline=BODY).passes == PlannerConfig(**dict(auto, **NX60I)).passes == 8
+    assert PlannerConfig(**auto, robot_outline=ROUNDED).passes == 7
 
 
 @pytest.mark.parametrize('outline', [
@@ -1974,7 +1999,8 @@ def test_loop_round_where_beds_meet_the_edge(monkeypatch):
     """Beds by a round edge, the slots by them open or closed: the outermost loop's sharp corners onto the beds driven
     anew where the body fits (trace.py), little of it left out and unmowed, however many arcs loop_round tries (the
     wedges between a bed and the edge where the further loops' levels are rounded near the islands, levels.RING_TIP,
-    stay the completion stage's: 0.9 m2 here without it, 0.85 with it)."""
+    stay the completion stage's: 0.9 m2 here without it, 0.85 with it; 1.0 since the safety net keeps spin_margin
+    where the way turns as a turn does, stage 8)."""
     lawn = [(1.96, 6.72), (1.99, 7.14), (2.06, 7.57), (2.16, 8.03), (2.3, 8.48), (2.47, 8.88), (2.69, 9.23),
             (2.94, 9.54), (3.23, 9.81), (3.56, 10.02), (3.93, 10.19), (4.34, 10.32), (4.79, 10.4), (5.27, 10.44),
             (6.63, 10.44), (7.69, 10.4), (8.24, 10.34), (8.46, 10.3), (8.65, 10.26), (8.81, 10.19), (8.95, 10.09),
@@ -1998,7 +2024,7 @@ def test_loop_round_where_beds_meet_the_edge(monkeypatch):
         plan = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2], edge_slots=slots)
         report = check_plan(plan)
         assert (plan.stats['edge_slots'] > 0) == slots and plan.stats['body_fit']['skipped_m'] < 5.0
-        assert report['body_out'] == [] and report['left_m2'] < 0.95
+        assert report['body_out'] == [] and report['left_m2'] < 1.05
     monkeypatch.setattr('mowbite_planner.loopfit.LOOP_ROUND_TRIES', LOOP_ROUND_TRIES // 4)
     fewer = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2], edge_slots=True)
     assert fewer.stats['body_fit']['skipped_m'] < 5.0
@@ -2065,6 +2091,31 @@ def test_turns_keep_spin_margin():
         assert len(turns) > 1000
         off.append(min(room.boundary.distance(fp.body(p.x, p.y, p.yaw)) for p in (plan.poses[i] for i in turns)))
     assert cfg.spin_margin == 0.05 and off[0] > 0.05 - 1e-3 and off[1] < 0.01
+
+
+@pytest.mark.parametrize('spin', [0.05, 0.15])
+def test_turns_from_the_way_keep_spin_margin(spin):
+    """Where the path turns as a turn does (drive.turning: 90 degrees within 0.3 m, as the measuring tools find it), on
+    the loops only turning on the spot, the body keeps spin_margin (but BODY_OUT) further off the edges of its space:
+    the drives into the lanes and the safety net's ways too, a bigger spin_margin as well (it kept none on some of
+    those, stage 8). The outermost loop driven as recorded keeps to where the body was then."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, spin_margin=spin))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
+    fp, poses = Footprint(plan.body_space, cfg.body_outline, spin), plan.poses
+    ring, kept = [False] * len(poses), [False] * len(poses)
+    for s in plan.segments:
+        if (s.kind == PERIMETER or s.maneuver == 'ring') and s.maneuver != 'mop_up':
+            ring[s.start:s.end + 1] = [True] * (s.end + 1 - s.start)
+        if s.kind == PERIMETER and s.source in plan.recorded_loops:
+            kept[s.start:s.end + 1] = [True] * (s.end + 1 - s.start)
+    turn = [False] * len(poses)
+    for a, b in zip(plan.section_starts, plan.section_starts[1:] + [len(poses)]):
+        turn[a:b] = turning(poses[a:b]).tolist()
+    at = [i for i in range(1, len(poses)) if turn[i] and not kept[i] and (not ring[i] or on_spot(poses, i)) and
+          i not in plan.section_starts]
+    assert len(at) > 500
+    out = fp.out_by([(poses[i - 1], poses[i]) for i in at], on_turn=True)
+    assert max(d for d, _ in out) <= BODY_OUT, [(i, d) for i, (d, _) in zip(at, out) if d > BODY_OUT][:5]
 
 
 @pytest.mark.parametrize('corners', [NX60, MEASURED, WHEELS], ids=['nx60', 'measured', 'wheels'])
@@ -2924,14 +2975,15 @@ def test_passes_worked_out():
     """perimeter_passes -1: as many loops as the lanes' turns need, the strip along the edges they leave mowed."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1))
     # a U-turn of 0.25 reaches 0.62 past the lane end, 0.15 past the edge may be the body's (robot_width / 2,
-    # edge_margin less)
-    assert cfg.passes == 5
-    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_radius=0.5)).passes == 6
-    assert PlannerConfig(**dict(MOWER, perimeter_passes=-1)).passes == 3  # no body: the turn's radius
+    # edge_margin less); lanes 0.13 apart turn into the next by a bulb, its loop's middle 0.39 further ahead
+    assert cfg.passes == 8
+    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_types=('u_turn', 'detour'))).passes == 5
+    assert PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=-1, turn_radius=0.5)).passes == 12
+    assert PlannerConfig(**dict(MOWER, perimeter_passes=-1)).passes == 6  # no body: the turn's radius, the bulb
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     # (left: the corners, the outer loop turns round them further in, spin_margin further off the edges, at a kink too,
     # and starting away from the corner by the dock, see rings.START_CLEAR)
-    assert plan.stats['perimeter_loops'] >= 5 and check_plan(plan)['left_m2'] < 1.6
+    assert plan.stats['perimeter_loops'] >= 8 and check_plan(plan)['left_m2'] < 1.6
     with pytest.raises(PlanningError, match='perimeter_passes'):
         PlannerConfig(perimeter_passes=-2).validate()
 

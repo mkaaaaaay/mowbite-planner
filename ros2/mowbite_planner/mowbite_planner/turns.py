@@ -10,6 +10,7 @@ from shapely.geometry import LineString
 
 from .config import ROUND_STEP, XY, PlannerConfig
 from .bodyfit import TURN_AHEAD
+from .drive import margins
 from .footprint import SPIN, Footprint
 from .geometry import subtract
 from .maneuvers import Fits, _to_map, bulb_turn, detour_turn, dubins, pivot_turn, turn_radii, u_turn
@@ -150,11 +151,20 @@ class Catalog:
     def turn(self, end: Pose2D, start: Pose2D, room_end: float, room_start: float,
              wide: bool = False) -> Optional[Turn]:
         """The best turn from a lane ending at end into one starting at start the other way round, the one ending
-        up to room_end earlier, the other starting up to room_start later (wide: lanes rows apart). None where none
-        fits."""
+        up to room_end earlier, the other starting up to room_start later (wide: lanes rows apart); where none keeps
+        spin_margin, the best keeping the most of it (drive.margins). None where none fits."""
         key = (end, start, round(room_end, 6), round(room_start, 6), wide)
         if key not in self.kept:
-            self.kept[key] = self._best(end, start, room_end, room_start, wide)
+            # (where none keeps spin_margin, the first keeping the most of it: drive.margins)
+            fp, got = self.fp, None
+            try:
+                for self.fp in margins(fp) if fp is not None else [None]:
+                    got = self._best(end, start, room_end, room_start, wide)
+                    if got is not None:
+                        break
+            finally:
+                self.fp = fp
+            self.kept[key] = got
         return self.kept[key]
 
     def _best(self, end: Pose2D, start: Pose2D, room_end: float, room_start: float, wide: bool) -> Optional[Turn]:

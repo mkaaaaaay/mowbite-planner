@@ -298,21 +298,23 @@ def _drive_way(route: _Route, lanes: LaneKit, way: Way, cell_of: Dict[int, str])
 
 def _drive_into(route: _Route, at: Pose2D, head: XY, maneuver: str) -> None:
     """A drive into a lane starting at (ending at head), into_lane's then plain, each through the transit space then the
-    mowing area: the first keeping spin_margin on its turns, else the first found (none: the path jumps there)."""
+    mowing area: the first keeping spin_margin on its turns, else the first keeping the most of it (route.margin_drive),
+    else the first found (none: the path jumps there)."""
     target = (at.x, at.y)
     if not route.started or same_position(route.pos, target):
         route.go_to(target, at.yaw, head)
         return
     before = route.segments[-1].poses[-MARGIN_BEFORE:] if route.segments else []
-    found = kept = None
+    tried, kept = [], None
     for h, space in ((head, None), (head, route.area), (None, None), (None, route.area)):
         poses = None if space is not None and route.area is route.transit else route.drive_to(target, at.yaw, h, space)
         if poses is not None and _keeps_margin(route, before, poses, at.yaw):
             kept = poses
             break
-        found = found or poses
-    if kept is None and found is not None:  # (one with spin_margin on its arcs, where one fits)
-        kept = route.margin_drive(target, at.yaw, before)
+        tried.append(poses)
+    found = next((p for p in tried if p is not None), None)
+    if kept is None and found is not None:  # (one with spin_margin on its arcs, where one fits, else the most of it)
+        kept = route.margin_drive(target, at.yaw, before, tried)
     if (kept or found) is None:
         route.go_to(target, at.yaw, head)
         return

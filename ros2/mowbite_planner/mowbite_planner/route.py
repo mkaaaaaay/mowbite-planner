@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from shapely.geometry import LineString, Point
 
 from .config import ROUND_STEP, SPIN_LIMIT, TRANSIT, XY, PathSegment, PlannerConfig
-from .drive import MARGIN_BEFORE, Drive, keeps_margin
+from .drive import MARGIN_BEFORE, Drive, keeps_margin, margins
 from .footprint import Footprint
 from .geometry import subtract, union
 from .lanes import _ring_list, _Scanner
@@ -126,7 +126,7 @@ class Route:
             # (where it turns as a turn does without spin_margin: one that keeps it, where one fits)
             before = self.segments[-1].poses[-MARGIN_BEFORE:] if self.segments else []
             if not keeps_margin(self.footprint, self.step, before, poses, heading):
-                poses = self.margin_drive(target, heading, before) or poses
+                poses = self.margin_drive(target, heading, before, [poses]) or poses
         if poses is None:
             self.warnings.append(f'no way found from ({self.pos[0]:.2f}, {self.pos[1]:.2f}) to ({target[0]:.2f}, '
                                  f'{target[1]:.2f}): the path jumps there')
@@ -135,16 +135,24 @@ class Route:
             return
         self.add(TRANSIT, poses)
 
-    def margin_drive(self, target: XY, heading: Optional[float], before: Sequence[Pose2D]) -> Optional[List[Pose2D]]:
+    def margin_drive(self, target: XY, heading: Optional[float], before: Sequence[Pose2D],
+                     found: Sequence[Optional[List[Pose2D]]] = ()) -> Optional[List[Pose2D]]:
         """A drive from where the mower is to target (arriving facing heading) whose arcs keep spin_margin where it turns
-        as a turn does (drive.keeps_margin, with the poses before), through the transit space, else the mowing area;
-        None where none does (or with headland_turns: those drives keep to the headland)."""
-        if self.footprint is None or self.footprint.turning is self.footprint or self.field is not None:
+        as a turn does (drive.keeps_margin, with the poses before), through the transit space, else the mowing area
+        (not with headland_turns: those drives keep to the headland); where none does, of found (drives there) and
+        those the first keeping the most of it (drive.margins). None where none keeps any."""
+        if self.footprint is None or self.footprint.turning is self.footprint:
             return None
-        for space in (self.transit, self.area) if self.area is not self.transit else (self.transit,):
-            way = Drive(space, self.footprint, self.cfg, margin=True).way(self.pos, self.heading, target, heading)
-            if way is not None and keeps_margin(self.footprint, self.step, before, way, heading):
-                return way
+        spaces = () if self.field is not None else \
+            (self.transit, self.area) if self.area is not self.transit else (self.transit,)
+        for k, fp in enumerate(margins(self.footprint)):
+            for way in found if k else ():
+                if way is not None and keeps_margin(fp, self.step, before, way, heading):
+                    return way
+            for space in spaces:
+                way = Drive(space, fp, self.cfg, margin=True).way(self.pos, self.heading, target, heading)
+                if way is not None and keeps_margin(fp, self.step, before, way, heading):
+                    return way
         return None
 
     def drive_to(self, target: XY, heading: Optional[float], head: Optional[XY] = None,

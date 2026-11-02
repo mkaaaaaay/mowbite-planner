@@ -13,7 +13,7 @@ from shapely.prepared import prep
 
 from .config import (_FITTED, _KEPT_LOCK, FIT_EASE, FIT_EASE_OFF, LANE, PERIMETER, SMOOTH_RADII, TRANSIT, TURN, XY,
                      Lane, PathSegment, PlannerConfig, SegmentInfo, _keep)
-from .drive import BODY_OUT, MARGIN_BEFORE, turning
+from .drive import BODY_OUT, MARGIN_BEFORE, OUT_EPS, keeps_margin, margins, on_spot, turning, within
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, subtract, union
 from .maneuvers import CORNER_ANGLE, dubins, join, path_length, same_position, sample_arc, sample_straight
@@ -124,7 +124,8 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     Dubins' ways (FIT_ARCS), or in to the first point from where the two headings meet on towards where it can turn
     round whatever way it faces (FIT_VIA) that it can turn at, and out again (straight, the further ways easing off the
     path's line and onto it, FIT_EASE). Of those the one that leaves the least of the loops and lanes out, a metre
-    driven counting FIT_DRIVE of that (with headland_turns one into the lanes' field FIT_FIELD more), FIT_PLACE ways
+    driven counting FIT_DRIVE of that (with headland_turns one into the lanes' field FIT_FIELD more; first those keeping
+    spin_margin where they turn as a turn does, then the most of it, drive.margins), FIT_PLACE ways
     tried at most for a place (and the Dubins' ways) and FIT_TRIES (FIT_TRIES_M) for all. Where none fits it turns round
     before the place, or goes through turn_room (see FIT_AROUND), or drives on through the transit space to one of the
     next poses that fit, or turns round further to the side, and where none of that fits the path jumps from the pose
@@ -160,7 +161,34 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
         mild = [i for i in range(n) if lenient[i]]
         for i, f in zip(mild, rec.fit([poses[i] for i in mild])):
             fit[i] = f
+    # where the way turns as a turn does (drive.turning) spin_margin too, but BODY_OUT; on the loops (and the ways
+    # between their pieces) only turning on the spot there (mkay 31.10.)
+    if fp.turning is not fp:
+        ring = [False] * n
+        for info in infos:
+            if (info.kind == PERIMETER or info.maneuver == 'ring') and info.maneuver != 'mop_up':
+                ring[info.start:info.end + 1] = [True] * (info.end + 1 - info.start)
+        geo = turning(poses).tolist()
+        more = [i for i in range(n) if geo[i] and fit[i] and not on_turn[i] and not lenient[i] and
+                (not ring[i] or on_spot(poses, i))]
+        tight = [i for i, f in zip(more, fp.turning.fit([poses[i] for i in more])) if not f]
+        # (clear where the body fits BODY_OUT less OUT_EPS further in, or doesn't BODY_OUT and OUT_EPS more: out_by,
+        # which takes long, for those between only)
+        if tight and fp.spin_margin > BODY_OUT + OUT_EPS:
+            near = fp.spun(round(fp.spin_margin - BODY_OUT + OUT_EPS, 9)).turning.fit([poses[i] for i in tight])
+            tight = [i for i, f in zip(tight, near) if not f]
+            far = fp.spun(round(fp.spin_margin - BODY_OUT - OUT_EPS, 9)).turning.fit([poses[i] for i in tight])
+            for i in (i for i, f in zip(tight, far) if not f):
+                fit[i] = False
+            tight = [i for i, f in zip(tight, far) if f]
+        for i, (d, xy) in zip(tight, fp.out_by([(poses[i - 1] if i else None, poses[i]) for i in tight],
+                                               on_turn=True)):
+            if xy is not None and d > BODY_OUT:
+                fit[i] = False
     tries, most = [0], [0]  # (most: the tries this place may take up to)
+    # (its ways keep spin_margin where they turn as a turn does, where one does, else the most of it, drive.margins;
+    # strict: the footprint keeping what's looked for, None: the body alone)
+    strict: List[Optional[Footprint]] = [None]
     budget = max(FIT_TRIES, int(FIT_TRIES_M * fp.space.length))
     cap = [budget]  # (more for the way to the start and the one from the end, see lead())
     turns: Dict[Tuple[float, ...], bool] = {}  # fits_turn where and which way, rounded (ways share their corner)
@@ -178,14 +206,17 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     def spent() -> bool:
         return tries[0] >= min(cap[0], most[0])
 
-    def ok(before: List[Pose2D], way: List[Pose2D], mild: bool = False) -> bool:
+    def ok(before: List[Pose2D], way: List[Pose2D], mild: bool = False,
+           near: Tuple[Sequence[Pose2D], Sequence[Pose2D]] = ((), ())) -> bool:
         if spent():
             return False
         tries[0] += 1
         f = rec if mild else fp
         # (where it leaves and gets back on first: a way that sticks out mostly does so there)
         return len(way) > 1 and all(f.fits_pose(q.x, q.y, q.yaw) for q in (way[0], way[-2])) and \
-            route.transit.is_free([(q.x, q.y) for q in way]) and f.poses_fit(before + way)
+            route.transit.is_free([(q.x, q.y) for q in way]) and f.poses_fit(before + way) and \
+            (strict[0] is None or mild or keeps_margin(strict[0], step, list(near[0]) or before[-MARGIN_BEFORE:], way,
+                                                       None, near[1]))
 
     def recorded(k: int, j: int) -> bool:  # (a way from out[k] to poses[j], both of a loop driven as recorded)
         return rec is not None and orig[k] is not None and lenient[orig[k]] and lenient[j]
@@ -196,7 +227,12 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
         mild, a = recorded(k, j), k
         while rec is not None and not mild and not lenient[j] and a > first and orig[a] is None:
             a -= 1
-        return ok(out[min(a + 1, k - 1):k] if k > first else [], way, mild)
+        # (spin_margin where it turns as a turn does: with the path before and after it, in its section)
+        on = j + 1
+        while on < min(n, j + 1 + MARGIN_BEFORE) and section[on] == section[j]:
+            on += 1
+        return ok(out[min(a + 1, k - 1):k] if k > first else [], way, mild,
+                  (out[max(first, k - MARGIN_BEFORE):k], poses[j + 1:on]))
 
     def straight(a: Pose2D, b: Pose2D) -> List[Pose2D]:
         return join(sample_straight(a.x, a.y, b.x, b.y, math.atan2(b.y - a.y, b.x - a.x), step), [b])
@@ -530,23 +566,27 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                 jumps[-1][1].append(i)
                 i += 1
                 continue
-            for further, (reach, every, tried) in enumerate(zip(FIT_REACH, FIT_STEP, FIT_PLACE)):
-                if best is None and tries[0] < budget:
-                    most[0] = tries[0] + tried
-                    best = search(i, reach, every, further > 0)
-            if best is None and path_length(out[first:]) > FIT_START:  # (else the section starts later)
-                most[0] = tries[0] + FIT_ROUND
-                best = turn_round(i)
-                if best is None and not turn_room.is_empty:
-                    rooms.clear()
+            for strict[0] in (margins(fp) if fp.turning is not fp else []) + [None]:
+                for further, (reach, every, tried) in enumerate(zip(FIT_REACH, FIT_STEP, FIT_PLACE)):
+                    if best is None and tries[0] < budget:
+                        most[0] = tries[0] + tried
+                        best = search(i, reach, every, further > 0)
+                if best is None and path_length(out[first:]) > FIT_START:  # (else the section starts later)
                     most[0] = tries[0] + FIT_ROUND
-                    best = search(i, FIT_REACH[-1], FIT_STEP[-1], None)
-                if best is None:
-                    most[0] = tries[0] + FIT_ROUND
-                    best = drive_on(i)
-                if best is None and sum(hop(o) for o in range(i, n) if mows[o]) > FIT_START:  # (else it ends before)
-                    most[0] = tries[0] + FIT_ROUND
-                    best = next(filter(None, (turn_round(i, wider) for wider in range(1, 2 * len(FIT_IN)))), None)
+                    best = turn_round(i)
+                    if best is None and not turn_room.is_empty:
+                        rooms.clear()
+                        most[0] = tries[0] + FIT_ROUND
+                        best = search(i, FIT_REACH[-1], FIT_STEP[-1], None)
+                    if best is None:
+                        most[0] = tries[0] + FIT_ROUND
+                        best = drive_on(i)
+                    if best is None and sum(hop(o) for o in range(i, n) if mows[o]) > FIT_START:  # (or it ends before)
+                        most[0] = tries[0] + FIT_ROUND
+                        best = next(filter(None, (turn_round(i, wider) for wider in range(1, 2 * len(FIT_IN)))), None)
+                if best is not None:
+                    break
+            strict[0] = None
             if best is None:
                 # nothing fits: the path jumps from the pose before to the next one that fits (the section starts later
                 # where it began FIT_LATER before at most)
@@ -940,8 +980,7 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
         window = before + new + after
         turn = turning(window).tolist()
         bad = [k for k in fp.bad_poses(window, turn) if len(before) <= k < len(before) + len(new) and turn[k]]
-        return not bad or all(xy is None or d <= BODY_OUT for d, xy in fp.out_by(
-            [(window[k - 1] if k else None, window[k]) for k in bad], on_turn=[turn[k] for k in bad]))
+        return within(fp, [(window[k - 1] if k else None, window[k]) for k in bad], [turn[k] for k in bad])
 
     def fit(a: float, b: float, arc: List[Pose2D], out_of: bool) -> Optional[Tuple[int, int, List[Pose2D]]]:
         # (the poses before and after it that stay, those and it), where it fits
@@ -1006,7 +1045,8 @@ def _round_corners(route: BodyRoute, poses: List[Pose2D],
     while i < len(out) - 1:
         p, u, w = out[i], out[i - 1].yaw, out[i].yaw
         into, onto = infos[own[i]], infos[own[i + 1]]  # (the ways to and from it)
-        k = own[i + 1] if onto.kind == TRANSIT else own[i]
+        # (the arc goes with the way on from it, with a way of _fit_body's next to a drive with that: it stays one)
+        k = own[i + 1] if onto.kind == TRANSIT and (into.maneuver != 'body' or onto.maneuver == 'body') else own[i]
         if angle_diff(w, u) <= CORNER_ANGLE or angle_diff(w, u) > math.pi - 1e-3 or infos[k].kind != TRANSIT or \
                 not infos[own[i - 1]].section == into.section == onto.section or \
                 (p.x, p.y) in route.sharp:

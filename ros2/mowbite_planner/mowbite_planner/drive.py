@@ -19,6 +19,15 @@ EPS = 1e-9  # (a corner of exactly 90 deg is one, however the headings add up)
 BODY_OUT = 0.01  # m the body may stick out there (the ranking's rule, design 2.4)
 # poses of the path before a drive its check looks back at (turning: TURN_WIN each side)
 MARGIN_BEFORE = 6
+# poses measured at a time where the body may stick out BODY_OUT at most (within): out_by takes long, one out is enough
+OUT_CHUNK = 2
+# m either side of BODY_OUT a check of the space that much further in decides alone (its edges rounded 1 mm at most)
+OUT_EPS = 0.002
+# m, a step this short with the heading changing turns on the spot (also by less than footprint.SPIN)
+SPOT_STEP = 0.005
+# m: where no drive keeps spin_margin where it turns as a turn does, one keeping the most of it in steps this big (0.15:
+# 0.1, then 0.05), the body's margins alone only where none keeps any (a bigger spin_margin never closer to the edges)
+MARGIN_STEP = 0.05
 
 
 def turning(poses: Sequence[Pose2D]) -> numpy.ndarray:
@@ -35,22 +44,43 @@ def turning(poses: Sequence[Pose2D]) -> numpy.ndarray:
     return numpy.array([h[a:b].max() - h[a:b].min() >= TURN_DEG - EPS for a, b in zip(lo, hi)], bool)
 
 
+def on_spot(poses: Sequence[Pose2D], i: int) -> bool:
+    """Whether the mower turns on the spot at pose i or the next: a step of SPOT_STEP at most, the heading changing."""
+    return any(0 <= j < len(poses) and math.hypot(poses[j].x - poses[i].x, poses[j].y - poses[i].y) < SPOT_STEP and
+               angle_diff(poses[j].yaw, poses[i].yaw) > 1e-6 for j in (i - 1, i + 1))
+
+
+def margins(fp: Footprint) -> List[Footprint]:
+    """fp and the same keeping spin_margin MARGIN_STEP less each, the most first, more than 0."""
+    k = int(math.ceil(fp.spin_margin / MARGIN_STEP - 1e-9))
+    return [fp] + [fp.spun(round(i * MARGIN_STEP, 9)) for i in range(k - 1, 0, -1)]
+
+
 def keeps_margin(fp: Optional[Footprint], step: float, before: Sequence[Pose2D], drive: List[Pose2D],
-                 yaw: Optional[float]) -> bool:
+                 yaw: Optional[float], after: Optional[Sequence[Pose2D]] = None) -> bool:
     """Whether the body keeps spin_margin (but BODY_OUT) on drive where it turns as a turn does, found from the way
-    with the poses before and straight on from its end facing yaw (turning)."""
+    with the poses before and straight on from its end facing yaw (turning), or the poses after where they're given."""
     if fp is None or fp.turning is fp or not drive:
         return True
     end = drive[-1]
-    after = sample_straight(end.x, end.y, end.x + TURN_WIN * math.cos(yaw), end.y + TURN_WIN * math.sin(yaw), yaw,
-                            step)[1:] if yaw is not None else []
+    if after is None:
+        after = sample_straight(end.x, end.y, end.x + TURN_WIN * math.cos(yaw), end.y + TURN_WIN * math.sin(yaw), yaw,
+                                step)[1:] if yaw is not None else []
     window = list(before) + list(drive) + after
     turn = turning(window).tolist()
     lo, hi = len(before), len(before) + len(drive)
     bad = [k for k in fp.bad_poses(window, turn) if lo <= k < hi]
-    out = fp.out_by([(window[k - 1] if k else None, window[k]) for k in bad], on_turn=[turn[k] for k in bad]) \
-        if bad else []
-    return not any(xy is not None and d > BODY_OUT for d, xy in out)
+    return within(fp, [(window[k - 1] if k else None, window[k]) for k in bad], [turn[k] for k in bad])
+
+
+def within(fp: Footprint, turns: Sequence, on_turn: Sequence[bool]) -> bool:
+    """Whether none of turns ((the pose before or None, the pose)) lies more than BODY_OUT out of fp's space
+    (Footprint.out_by, on_turn for each), OUT_CHUNK at a time: the first further out answers."""
+    for a in range(0, len(turns), OUT_CHUNK):
+        if any(xy is not None and d > BODY_OUT for d, xy in fp.out_by(turns[a:a + OUT_CHUNK],
+                                                                      on_turn=list(on_turn[a:a + OUT_CHUNK]))):
+            return False
+    return True
 
 
 class _OnTurns:

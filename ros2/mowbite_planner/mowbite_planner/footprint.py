@@ -269,6 +269,15 @@ class Footprint:
         self._fit_kept: dict = {}
         self._pose_kept: dict = {}
         self._plain: Optional['Footprint'] = None
+        self._spun: dict = {}
+
+    def spun(self, spin_margin: float) -> 'Footprint':
+        """The same body in the same space keeping spin_margin turning (itself where that's its own)."""
+        if spin_margin == self.spin_margin:
+            return self
+        if spin_margin not in self._spun:
+            self._spun[spin_margin] = Footprint(self.space, self.corners, spin_margin, self.back, self.blade)
+        return self._spun[spin_margin]
 
     @property
     def plain(self) -> 'Footprint':

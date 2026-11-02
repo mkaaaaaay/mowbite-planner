@@ -157,8 +157,9 @@ PARAMETERS = {
     'lane_order': ('snake', 'snake: lane after neighbouring lane. skip: lanes far enough apart for a forward '
                    'U-turn of turn_radius, the ones between on the way back', lambda v: v in LANE_ORDERS,
                    'must be snake or skip'),
-    'route_order': ('nearest', 'cells: nearest (the closest one not mowed yet next) or optimized (the order with the '
-                    'shortest drives between them, takes a little longer to plan)', lambda v: v in ROUTE_ORDERS,
+    'route_order': ('nearest', 'cells: nearest (the closest one not mowed yet next) or optimized (the order that '
+                    'leaves the least unmowed, then takes the least time, takes a little longer to plan)',
+                    lambda v: v in ROUTE_ORDERS,
                     'must be nearest or optimized'),
     'bend_max_gap': (0.0, 'a row split by an obstacle with at most this much between its pieces becomes one lane '
                      'bending around it [m], 0 = split', lambda v: v >= 0.0, 'must be >= 0'),

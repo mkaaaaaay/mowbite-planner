@@ -21,7 +21,8 @@ TURN = 'turn'
 TRANSIT = 'transit'
 
 ANGLE_STRATEGIES = ('longest_edge', 'min_width', 'optimal')
-# 'nearest': the closest cell not mowed yet next, 'optimized': the order with the shortest drives between them
+# 'nearest': the closest cell not mowed yet next, 'optimized': the order that leaves the least unmowed, then takes the
+# least time (objective.py)
 ROUTE_ORDERS = ('nearest', 'optimized')
 # orders route_order 'optimized' tries at most for one set of cells, so it doesn't take long with many
 ORDER_BUDGET = 4000
@@ -148,9 +149,10 @@ class PlannerConfig:
     mower_width: float = 0.22  # m, cutting width
     overlap: float = 0.15  # 0..<1, share of the cutting width neighbouring lanes overlap
     # 'fixed': the lane spacing follows from overlap. 'auto': the planner tries up to SPACING_CANDIDATES spacings from
-    # lane_spacing_max down to lane_spacing_min (m, None: 85 % and 50 % of mower_width) and keeps the widest that
-    # leaves nothing unmowed (no piece of LEFT_PIECE, not LEFT_TOTAL together): the fewest lanes and turns. Where one
-    # leaves something, the next narrower only if it leaves LEFT_GAIN less (the angle stays as it is)
+    # lane_spacing_max down to lane_spacing_min (m, None: 85 % and 50 % of mower_width, not past the other where that's
+    # set) and keeps the widest that leaves nothing unmowed (no piece of LEFT_PIECE, not LEFT_TOTAL together): the
+    # fewest lanes and turns. Where one leaves something, the next narrower only if it leaves LEFT_GAIN less (the angle
+    # stays as it is)
     lane_spacing_mode: str = 'fixed'
     lane_spacing_min: Optional[float] = None
     lane_spacing_max: Optional[float] = None
@@ -237,7 +239,7 @@ class PlannerConfig:
     # at most, stats['headland_turns'] says how many and how deep, see _round_corners) or 'sharp' (turning on the spot
     # there, no arc into the field anywhere)
     headland_corners: str = 'rounded'
-    route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (shortest drives between them)
+    route_order: str = 'nearest'  # cells: 'nearest' one next, or 'optimized' (the best by the ranking, objective.py)
     perimeter_corner_radius: float = 0.15  # m, outline corners of the loops are rounded this much, 0 = sharp
     waypoint_spacing: float = 0.10  # m, distance between poses, 0 = only where the direction changes
     # m, transits keep this far from the outer loop and obstacle loops where that's not a lot longer (else
@@ -321,17 +323,21 @@ class PlannerConfig:
     @property
     def passes(self) -> int:
         """The loops, perimeter_passes -1 worked out: as many as mow the strip along the edges the lanes don't get to.
-        A lane ends where its turn (a quarter arc of turn_radius, the body round it) stays in what the edges allow,
-        the next one starts there too (the turn goes level with it), and the blade there is blade_ahead further in."""
+        A lane ends where its turn (a quarter arc of turn_radius, the body round it; lanes closer than two turn_radius
+        turn into the next by a bulb, its loop's middle further ahead) stays in what the edges allow, the next one
+        starts there too (the turn goes level with it), and the blade there is blade_ahead further in."""
         if self.perimeter_passes >= 0:
             return int(self.perimeter_passes)
-        half = 0.5 * self.mower_width
+        half, r, d = 0.5 * self.mower_width, self.turn_radius, self.lane_spacing
+        # (the bulb: out the other way by theta, round its loop of turn_radius, its middle 2 r sin(theta) ahead)
+        ahead = 2.0 * r * math.sqrt(1.0 - ((d + 2.0 * r) / (4.0 * r)) ** 2) \
+            if 'bulb' in self.allowed_turns and r > 1e-3 and d < 2.0 * r else 0.0
         if self.body:
-            out = max(math.hypot(self.turn_radius + abs(y), x) for x, y in self.body_outline)
+            out = ahead + max(math.hypot(r + abs(y), x) for x, y in self.body_outline)
             allowed = max(abs(y) for _, y in self.body_outline) - self.edge_margin
             end = max(self.centre_offset, out - allowed)
         else:
-            end = self.centre_offset + self.turn_radius
+            end = self.centre_offset + ahead + r
         strip = end + abs(self.blade_ahead) - half  # from the edge in, what the lanes leave
         return max(1, int(math.ceil((strip - half - self.blade_loop_offset) / self.lane_spacing - 1e-9)) + 1)
 
@@ -343,9 +349,13 @@ class PlannerConfig:
 
     @property
     def spacing_asked(self) -> Tuple[float, float]:
-        """lane_spacing_min and lane_spacing_max, half and 0.85 of the blade where not set."""
-        lo = 0.5 * self.mower_width if self.lane_spacing_min is None else self.lane_spacing_min
-        hi = 0.85 * self.mower_width if self.lane_spacing_max is None else self.lane_spacing_max
+        """lane_spacing_min and lane_spacing_max, half and 0.85 of the blade where not set (not past the other where
+        that's set)."""
+        lo, hi = self.lane_spacing_min, self.lane_spacing_max
+        if lo is None:
+            lo = 0.5 * self.mower_width if hi is None else min(0.5 * self.mower_width, hi)
+        if hi is None:
+            hi = max(0.85 * self.mower_width, lo)
         return lo, hi
 
     @property
