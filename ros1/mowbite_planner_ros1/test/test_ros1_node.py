@@ -1777,6 +1777,45 @@ def test_body_reaches_over_into_navigation_areas(planner):
     assert not space.contains(Spot(-0.5, 7.5))
 
 
+def test_drive(planner, stub_planner):
+    """drive (slope, reverse) for all areas (planner.settings.set) and an area's own (beats it, null: as for all):
+    planned so only with OpenMower's FTC backing up (back_up_with_plan true), the body set and planner mowbite, else
+    forwards, said in the plan's warnings and as ignored in planner.settings. Where it's planned so planner.settings
+    says what it forces (body_fit, spin_margin), for all areas at body_fit and spin_margin too."""
+    send_map(the_map({'drive': 'reverse'}))
+    result, _ = rpc('planner.settings')
+    drive = result['settings']['drive']
+    assert drive['choices'] == ['forward', 'slope', 'reverse'] and drive['value'] == 'forward' and drive['settable']
+    assert drive['ignored'] == node_module.NO_BACKING
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and stub_planner.config().drive == 'forward'
+    assert plan['warnings'][-1] == 'drive reverse ignored: ' + node_module.NO_BACKING
+    rospy.params['/move_base_flex/FTCPlanner/back_up_with_plan'] = True
+    result, _ = rpc('planner.settings')
+    assert 'no body set' in result['settings']['drive']['ignored']  # (the planner plans it forwards then)
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'spin_margin': 0.0})
+    result, _ = rpc('planner.settings')
+    drive, spin = result['settings']['drive'], result['settings']['spin_margin']
+    assert 'ignored' not in drive and drive['forces'] == {'body_fit': True, 'spin_margin': 0.05}
+    assert 'no bumper' in drive['forces_why'] and 'effective' not in spin
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and stub_planner.config().drive == 'reverse'
+    assert not any(w.startswith('drive') for w in plan['warnings'])
+    result, error = rpc('planner.settings.set', {'drive': 'slope'})
+    assert error is None and result['settings']['drive']['value'] == 'slope'
+    spin, fit = result['settings']['spin_margin'], result['settings']['body_fit']
+    assert spin['effective'] == 0.05 and 'drive slope' in spin['effective_why'] and fit['effective'] is True
+    rpc('planner.plan', {'area_id': 'a'})
+    assert stub_planner.config().drive == 'reverse'  # (the area's own)
+    send_map(the_map({'drive': None}))
+    rpc('planner.plan', {'area_id': 'a'})
+    assert stub_planner.config().drive == 'slope'
+    assert rpc('planner.settings.set', {'drive': 'backwards'})[1][1].startswith('drive must be one of')
+    rpc('planner.settings.set', {'planner': 'slic3r'})
+    result, _ = rpc('planner.settings')
+    assert result['settings']['drive']['ignored'] == node_module.NO_BACKING_SLIC3R
+
+
 # the worker and the progress (one planning at a time, the quick RPCs at once meanwhile)
 
 def test_worker_most_urgent_first():

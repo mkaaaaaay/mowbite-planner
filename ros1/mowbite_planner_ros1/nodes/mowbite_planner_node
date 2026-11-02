@@ -46,7 +46,11 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         choices, settable. Not settable: the skip flags of mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
                         type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r.
-                        leftovers_auto (the node's too): see below
+                        leftovers_auto (the node's too): see below. drive (forward, slope, reverse; for all areas and
+                        an area's own, which beats it): ignored with why where it's never planned (see
+                        drive_ignored), else forces {body_fit, spin_margin} with forces_why: what slope and reverse
+                        plan with whatever is set; with the setting for all areas slope or reverse body_fit and
+                        spin_margin say so too (effective, effective_why)
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
@@ -168,6 +172,7 @@ from xbot_mqtt.srv import RegisterMethodsSrv
 import mowbite_planner
 from mowbite_planner import (CoveragePlan, NothingLeft, PlannerConfig, PlanningError, Pose2D, SegmentInfo,
                              plan_coverage, quaternion_to_yaw, yaw_to_quaternion)
+from mowbite_planner import backing
 from mowbite_planner import config as limits
 from mowbite_planner.config import IGNORED
 from mowbite_planner.planner import plan_footprint, set_workers
@@ -191,7 +196,8 @@ CHOICES = {'fill_pattern': limits.FILL_PATTERNS, 'perimeter_order': limits.PERIM
            'perimeter_direction': limits.PERIMETER_DIRECTIONS, 'angle_strategy': limits.ANGLE_STRATEGIES,
            'lane_order': limits.LANE_ORDERS, 'turn_types': limits.TURN_TYPES, 'route_order': limits.ROUTE_ORDERS,
            'edges': limits.EDGES, 'narrow_parts': limits.NARROW_PARTS,
-           'lane_spacing_mode': limits.LANE_SPACING_MODES, 'headland_corners': limits.HEADLAND_CORNERS}
+           'lane_spacing_mode': limits.LANE_SPACING_MODES, 'headland_corners': limits.HEADLAND_CORNERS,
+           'drive': limits.DRIVES}
 # the value that means "the planner works it out"
 AUTO_VALUES = {'perimeter_passes': -1, 'obstacle_passes': -1}
 RAD = ('angle', 'angle_offset', 'angle_min', 'angle_max', 'angle_step', 'crosshatch_angle', 'angle_increment')
@@ -272,6 +278,9 @@ TRACK_SETTLE = 2.0
 LEFT_MOST = 0.5
 TIMING_RANGE = (0.5, 2.0)
 FTC_PARAMS = '/move_base_flex/FTCPlanner'
+# why drive slope and reverse are planned forwards: OpenMower's FTC backs up only with this (open_mower_ros PR #371)
+NO_BACKING = "OpenMower's FTC drives forwards only (no back_up_with_plan)"
+NO_BACKING_SLIC3R = 'planner slic3r plans forwards only'
 # planner.simulate: the mowers it drives (MowerModel's), at most this many runs of one (seeds), the mower's own values
 # from these parameters over a preset's (its FTC controller's from FTC_PARAMS too)
 SIM_PRESETS = {'ideal': MowerModel, 'omsim': MowerModel.omsim, 'realistic': MowerModel.realistic}
@@ -949,6 +958,19 @@ class MowbitePlannerRos1:
                 entry['choices'] = CHOICES[name]
             if name in IGNORED:  # (changes nothing since planner 2: the app hides it)
                 entry['ignored'] = IGNORED[name]
+            if name == 'drive':
+                why = self.drive_ignored() or backing.unavailable(current.base)
+                if why:
+                    entry['ignored'] = why
+                else:
+                    entry['forces'] = {'body_fit': True, 'spin_margin': limits.DRIVE_SPIN_MARGIN}
+                    entry['forces_why'] = 'slope and reverse: ' + backing.WHY
+            if name in ('body_fit', 'spin_margin') and current.base.drive != 'forward' and \
+                    not (self.drive_ignored() or backing.unavailable(current.base)):
+                forced = backing.settings(current.base)
+                entry['effective'] = getattr(forced, name)
+                if entry['effective'] != entry['value']:
+                    entry['effective_why'] = 'drive %s: %s' % (current.base.drive, backing.WHY)
             if name in ('lane_spacing_min', 'lane_spacing_max'):  # (what lane_spacing_mode 'auto' goes by)
                 k = name == 'lane_spacing_max'
                 cfg = current.base.with_overrides({'mower_width': current.mower_width})
@@ -1120,7 +1142,7 @@ class MowbitePlannerRos1:
         self.local.kept = False
         got = []
         if mowed is not None:
-            service.planner = lambda *args, **kw: got.append(plan_coverage(*args, mowed=mowed, **kw)) or got[-1]
+            service.planner = lambda *args, **kw: got.append(self.left_plan(*args, mowed=mowed, **kw)) or got[-1]
         elif keep is None and current.planner != 'slic3r':
             service.planner = lambda *args, **kw: got.append(self.plan_coverage(*args, **kw)) or got[-1]
         result = service.plan(params)
@@ -1225,7 +1247,8 @@ class MowbitePlannerRos1:
                 rospy.loginfo('MowBite Planner: area %s, no leftovers: %s', i, e)  # (the other areas still)
                 continue
             cfg = keep[-1].config
-            mowed = track_mowed(runs, cfg.mower_width, cfg.blade_ahead, cfg.blade_offset)
+            turned = -1.0 if cfg.drive == 'reverse' else 1.0  # (mowing it backs up: the blade behind on the track)
+            mowed = track_mowed(runs, cfg.mower_width, turned * cfg.blade_ahead, turned * cfg.blade_offset)
             left = sum(p.area for p in polygons(keep[-1].free_space.difference(mowed)) if p.area >= LEFT_PIECE)
             got = []
             if left > LEFT_MOST * keep[-1].free_space.area:
@@ -1529,6 +1552,8 @@ class MowbitePlannerRos1:
                 continue
             near = keep[-1].area.buffer(0.5)
             poses = [(p, on) for p, on in track if near.contains(Spot(p.x, p.y))]
+            if keep[-1].config.drive == 'reverse':  # (mowing it backs up: facing the point before)
+                poses = [(Pose2D(p.x, p.y, p.yaw + math.pi) if on else p, on) for p, on in poses]
             outs = fp.out_by([(None, p) for p, _ in poses]) if poses else []
             # (with the blade off out of it: against those too, their real edges robot_width / 2 out from the lines)
             off = [k for k, ((m, _), (_, on)) in enumerate(zip(outs, poses)) if m > DRIVE_OFF and not on]
@@ -1711,9 +1736,40 @@ class MowbitePlannerRos1:
         return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over,
                               unmowed)[0]
 
+    def drive_ignored(self):
+        """Why drive slope and reverse are planned forwards here ('' where they aren't): planner slic3r, or OpenMower's
+        FTC not backing up where a plan does (/move_base_flex/FTCPlanner/back_up_with_plan not true: after going back
+        to an OpenMower without it the mower must not get plans backing up)."""
+        if self.current.planner == 'slic3r':
+            return NO_BACKING_SLIC3R
+        if rospy.get_param(FTC_PARAMS + '/back_up_with_plan', False) is not True:
+            return NO_BACKING
+        return ''
+
+    def driven(self, cfg):
+        """(cfg, '') or, where drive slope or reverse is ignored here (drive_ignored), (cfg with drive forward, why for
+        the plan's warnings)."""
+        why = self.drive_ignored() if cfg.drive != 'forward' else ''
+        if not why:
+            return cfg, ''
+        rospy.logwarn_throttle(60, 'MowBite Planner: drive %s ignored: %s' % (cfg.drive, why))
+        return cfg.with_overrides({'drive': 'forward'}), 'drive %s ignored: %s' % (cfg.drive, why)
+
+    @staticmethod
+    def told(plan, why):
+        """plan, with why last among its warnings where there's one."""
+        return dataclasses.replace(plan, warnings=list(plan.warnings) + [why]) if why else plan
+
+    def left_plan(self, boundary, obstacles, cfg, *args, **kw):
+        """plan_coverage of what a mow left (not kept), drive as kept_plan takes it."""
+        cfg, why = self.driven(cfg)
+        return self.told(plan_coverage(boundary, obstacles, cfg, *args, **kw), why)
+
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
                   reach_over=(), unmowed=()):
-        """(plan, whether it was kept from before), see plan_coverage."""
+        """(plan, whether it was kept from before), see plan_coverage. drive slope or reverse forwards where it's
+        ignored (driven), said in its warnings."""
+        cfg, why = self.driven(cfg)
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
         # the obstacles in one order, every way there (the request, the map) gives the same, each with its margin
@@ -1730,7 +1786,7 @@ class MowbitePlannerRos1:
             if plan is not None:
                 self.plans.move_to_end(key)
                 self.local.kept = True
-                return plan, True
+                return self.told(plan, why), True
             busy = self.planning.setdefault(key, threading.Lock())
         with busy:  # (the same asked for meanwhile, planning ahead and a mow: it waits for this one's)
             try:
@@ -1757,7 +1813,7 @@ class MowbitePlannerRos1:
             finally:
                 with self.plans_lock:
                     self.planning.pop(key, None)
-        return plan, kept
+        return self.told(plan, why), kept
 
     def area_of(self, boundary):
         """The id of the map's mowing area with this outline (None: none)."""

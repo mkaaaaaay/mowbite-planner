@@ -126,6 +126,11 @@ A few worth knowing:
   passes over that mow 0.3 m² or more, it sends the mower out again once it's idle in the dock. Not in an emergency
   and, with OpenMower's `rain_mode` on, not in the rain. Once per mow. Not while the MowBite Updater holds the starts
   (`mowbite/hold` on the mower's own MQTT broker), nor when the planner can't reach that broker.
+- `drive` (for all areas, or an area's own with `planner.area.set`): `forward`; `slope`: lanes only, up forwards, an S
+  backing down to the next lane, down it backwards (no turning on a slope); `reverse`: the whole plan backwards. Only
+  where OpenMower's FTC has `back_up_with_plan` on (open_mower_ros PR #371) and the body is set, else forwards with a
+  warning. Backing up the mower feels nothing behind it: `slope` and `reverse` always plan with `body_fit` on and
+  `spin_margin` 0.05 m at least, whatever is set.
 - Body: `robot_width`, `robot_front`, `robot_rear` (m from the middle of the drive wheels) or `robot_outline`
   (`[[x, y], ...]`, x ahead, y left). Without them (or with only a part) the body isn't checked: every plan warns of
   it, in its `warnings` and the log. Blade: `blade_ahead`, `blade_offset`.
