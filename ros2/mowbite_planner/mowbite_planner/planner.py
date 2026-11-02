@@ -7,7 +7,6 @@ it needs). The settings and what a plan is made of are in config.py.
 """
 
 import dataclasses
-import math
 import multiprocessing
 import threading
 import time
@@ -23,10 +22,10 @@ from . import backing
 from .assemble import mow_parts
 from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
 from .complete import complete, leftovers
-from .config import (_BODY_SPACE, LANE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, PERIMETER, SPACING_CANDIDATES, TRACK, XY,
-                     RECORDED_CENTRE, ZERO_TURN, CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
+from .config import (_BODY_SPACE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, SPACING_CANDIDATES, TRACK, XY, RECORDED_CENTRE,
+                     ZERO_TURN, CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
 from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subtract, union
-from .handover import _blade_on, _compact, _lengths, _ring_ways
+from .handover import _blade_on, _compact, _lengths, _origins, _ring_ways, _stats, _warn
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
 from .progress import Progress, Report
@@ -283,8 +282,15 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
         # ends of lanes and turns)
         if not any(strip_between_lanes(p, plan.angles) for p in left):
             break
-    for planning in list(ahead.values()) + list(probing.values()):
-        planning[0].cancel()  # (where it isn't planned through: not begun, else the process goes on to the next)
+    return _auto_best(area, best, wide, error, t0, list(ahead.values()) + list(probing.values()))
+
+
+def _auto_best(area: _Area, best: Optional[CoveragePlan], wide, error: Optional[PlanningError], t0: float,
+               planning: list) -> CoveragePlan:
+    """_auto's plan: best or the widest asked's (_or_widest), error where there's none. planning: the plans asked
+    for, cancelled where they aren't planned through (not begun, else the process goes on to the next)."""
+    for got in planning:
+        got[0].cancel()
     best, failed = _or_widest(area, best, wide)
     error = error or failed
     if best is None:
@@ -551,73 +557,3 @@ def _net(route: _Route, planned, free) -> Tuple[list, list, Dict[str, Any]]:
                                   f'({x:.2f}, {y:.2f})' for x, y in fitted['unchecked']) + ' the body isn\'t '
                               'checked')
     return poses, segments, fitted
-
-
-# where what the safety net changes comes from: the old loops (and the drives to them), the lanes, the turns and drives
-# between lanes
-ORIGINS = ('rings', 'swaths', 'connectors')
-
-
-def _origins(poses, segments, fitted: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """{origin: {'fixed': ways in place, 'left': places left out, 'm': m of loops and lanes left out}} of
-    _fit_body's places, each by the segment of the planned path where the body sticks out the most there."""
-    out = {o: {'fixed': 0, 'left': 0, 'm': 0.0} for o in ORIGINS}
-    for k, ((a, b), (x, y, m), worst) in enumerate(zip(fitted['spans'], fitted['places'], fitted['poses'])):
-        o = min(range(max(0, a), min(b, len(poses) - 1) + 1),
-                key=lambda i: math.hypot(poses[i].x - worst[0], poses[i].y - worst[1]), default=a)
-        seg = next((s for s in segments if s.start <= o <= s.end), None)
-        origin = 'connectors' if seg is None else 'rings' if seg.kind == PERIMETER or seg.maneuver == 'ring' or \
-            seg.kind != LANE and seg.source.startswith('loop') else 'swaths' if seg.kind == LANE else 'connectors'
-        out[origin]['fixed' if k < fitted['fixed'] else 'left'] += 1
-        out[origin]['m'] = round(out[origin]['m'] + m, 2)
-    return out
-
-
-def _warn(route: _Route, cfg: PlannerConfig, done: Dict[str, Any]) -> None:
-    turning = done['turning'][0]
-    if turning:
-        route.warnings.append(f'{len(turning)} places where a drive turns in the lanes\' field, no way along the '
-                              'headland fits there: at ' + ', '.join(f'({x:.2f}, {y:.2f})' for x, y in turning))
-    if route.counts.get('lanes_shortened'):
-        route.warnings.append(f'{route.counts["lanes_shortened"]} lanes along an edge shortened or left out: with '
-                              f'blade_offset {cfg.blade_offset} m the centre runs that far off the blade\'s line, '
-                              'more perimeter loops leave room for it')
-    if route.counts.get('lanes_body'):
-        route.warnings.append(f'{route.counts["lanes_body"]} lanes shortened or left out where the body would stick '
-                              'out at their ends')
-    if done['parts'] > 1:
-        route.warnings.append(f'the area has {done["parts"]} parts with no way between them: the path '
-                              'jumps from one to the next')
-
-
-def _stats(route: _Route, cfg: PlannerConfig, space, segments, poses, passes, zones, rings_of: Rings,
-           done: Dict[str, Any], timer: _Timer) -> Dict[str, Any]:
-    stats: Dict[str, Any] = {
-        'mop_up': None,
-        'leftovers': done['leftover'],
-        **_lengths(poses, segments),
-        'perimeter_loops': len({s.source for s in segments if s.kind == PERIMETER}),
-        'loops': len(route.loops),
-        'lanes': len(route.lanes),
-        'cells': sum(len(cells) for _, cells in passes),
-        'area': space.free.area,
-        'edge_slots': len(space.slots),
-        'planning_time': time.perf_counter() - timer.t0,
-        'timings': timer.timings,
-        'chosen': {'lane_spacing': round(cfg.lane_spacing, 4), 'perimeter_passes': rings_of.count, 'mode': 'fixed'},
-    }
-    for key in ('turns_u_turn', 'turns_bulb', 'turns_detour', 'turns_pivot', 'turns_fallback'):
-        stats[key] = route.counts.get(key, 0)
-    if cfg.split_zones:
-        # the zones mowed another way than the rest: their lanes' direction, how many, their outlines
-        stats['zones'] = [{'angle': round(a, 6), 'lanes': sum(len(cell) for cell in cells),
-                           'outlines': [[[round(x, 3), round(y, 3)] for x, y in poly.exterior.coords[:-1]]
-                                        for poly in polygons(zone)]}
-                          for (a, zone), (_, cells) in zip(zones, passes[1:])]
-    if done['fitted'] is not None:
-        stats['body_fit'] = done['fitted']
-    if cfg.headland_turns:
-        turning, arcs, deepest = done['turning']
-        stats['headland_turns'] = {'turns_in_field': len(turning), 'places': turning, 'arcs_in_field': arcs,
-                                   'arc_depth': deepest, 'crossings': route.counts.get('crossings', 0)}
-    return stats
