@@ -109,8 +109,16 @@ class Drive:
         r = cfg.turn_radius
         step = cfg.waypoint_spacing
 
+        def connected(a: XY, ha: Optional[float], b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
+            # (asked again with the footprint's own check: kept in the space)
+            find = lambda: connect(a, ha, b, h, r, step, space.is_free, space.careful_path, body,  # noqa: E731
+                                   cfg.min_turn_radius)
+            if body is not None and getattr(body, '__func__', None) is not Footprint.poses_fit:
+                return find()
+            return space.kept(('connect', a, ha, b, h, r, step, body, cfg.min_turn_radius), (a, ha, b, h), find)
+
         def drive(b: XY, h: Optional[float]) -> Optional[List[Pose2D]]:
-            return connect(pos, facing, b, h, r, step, space.is_free, space.careful_path, body, cfg.min_turn_radius)
+            return connected(pos, facing, b, h)
 
         best = drive(target, heading)
         if best is not None and cfg.turn_on_spot:
@@ -118,8 +126,7 @@ class Drive:
             # more than half a turn all together where on the spot they turn it a quarter turn less: no pirouettes)
             crosses = len(best) > 3 and not LineString([(p.x, p.y) for p in best]).is_simple
             if crosses or _arcs(best) > math.pi:
-                spot = connect(pos, None, target, None, r, step, space.is_free, space.careful_path, body,
-                               cfg.min_turn_radius)
+                spot = connected(pos, None, target, None)
                 if spot is not None and (crosses or _arcs(spot) < _arcs(best) - 0.5 * math.pi):
                     best = spot
             return best

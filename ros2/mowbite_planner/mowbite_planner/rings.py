@@ -289,7 +289,7 @@ class Loops:
     def _taken(self, spacing: float):
         """taken(xs, ys) for repaired: which of the points lie within HAIR_KEEP lane spacings of the loops driven so
         far (worked out the first time it's asked)."""
-        far, kept = HAIR_KEEP * spacing, []
+        far, kept, seen = HAIR_KEEP * spacing, [], {}  # (seen: each point's answer, asked again and again)
 
         def taken(xs, ys) -> List[bool]:
             if not kept:
@@ -307,7 +307,10 @@ class Loops:
                 return [False] * len(xs)
             if covers is None:
                 return [lines.contains(Point(x, y)) for x, y in zip(xs, ys)]
-            return [bool(v) for v in dwithin(lines, points(list(zip(xs, ys))), far)]
+            new = [p for p in dict.fromkeys(zip(xs, ys)) if p not in seen]
+            if new:
+                seen.update(zip(new, (bool(v) for v in dwithin(lines, points(new), far))))
+            return [seen[p] for p in zip(xs, ys)]
 
         return taken
 

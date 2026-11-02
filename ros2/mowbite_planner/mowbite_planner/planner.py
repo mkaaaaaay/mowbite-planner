@@ -230,6 +230,9 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
                 area.plan(fixed(spacing), probe=kept.setdefault(spacing, {}))
         except PlanningError as e:  # this spacing doesn't fit (too many poses), a narrower one may not either
             error = error or e
+            if best is None and _pool():  # (the narrower ones are planned through till one fits: those at once)
+                ahead.update({s: area.later(fixed(s), probe=kept.setdefault(s, {})) for s in spacings[i + 1:]
+                              if s not in ahead})
             continue
         if best is None and i + 1 < len(spacings):
             # (the first plan, where the next spacing gains nothing: what it leaves, the whole path's swept area (slow),

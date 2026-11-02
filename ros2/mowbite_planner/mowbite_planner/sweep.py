@@ -13,7 +13,7 @@ from .mathutil import Pose2D, normalize_angle
 
 # blade's answers kept (the same poses again, to the bit: the same geometry; the safety net and the completion stage
 # ask about the same stretches again and again), cleared at this many
-BLADES_KEPT = 256
+BLADES_KEPT = 1024
 _blades: Dict[tuple, Any] = {}
 
 

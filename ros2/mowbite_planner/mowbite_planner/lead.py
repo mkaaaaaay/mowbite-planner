@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 
 from shapely.geometry import Point
 
-from .footprint import Footprint, swung
+from .footprint import Footprint
 from .maneuvers import join, sample_straight
 from .mathutil import Pose2D, angle_diff
 
@@ -35,7 +35,7 @@ def way_onto(route, poses: List[Pose2D], side: float, body: Footprint) -> Option
     where the body turns whatever way it faces (see LEAD_IN), None where it fits turned START_SWING at its start
     or no such way fits (body: the loop's). [] where it fits turned START_SWING at its start."""
     fp, step = route.footprint, route.step
-    swing = Footprint(fp.space, swung(fp.corners, START_SWING))
+    swing = fp.swung(START_SWING)
     at, k = 0.0, 1
     while k < len(poses) and at <= START_SWUNG:
         at += math.hypot(poses[k].x - poses[k - 1].x, poses[k].y - poses[k - 1].y)

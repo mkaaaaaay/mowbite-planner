@@ -38,6 +38,8 @@ MIN_REFLEX = math.radians(2.0)
 NARROW_CLEARANCE = 0.05
 # lines this close to running along a corner's edge count as touching it (sine of the angle between them)
 TANGENT_TOLERANCE = 1e-4
+# the ways found kept (the same ends again, to the bit: the same way; drives too, see kept), cleared at this many
+WAYS_KEPT = 4000
 
 
 def _cross(o: XY, a: XY, b: XY) -> float:
@@ -128,6 +130,7 @@ class TransitPlanner:
         self._polys = list(polygons(wider))
         self._parts = [prep(p) for p in self._polys]
         self._clearance = clearance
+        self._ways: Dict[tuple, Optional[List[XY]]] = {}
         self._graphs: Optional[List[_Graph]] = None
         self._visible: Dict[Tuple[int, int, int], bool] = {}
         # a way along strips (see without()) is a lot longer than straight anyway: the edge hugged only where there's
@@ -214,11 +217,30 @@ class TransitPlanner:
         graphs.append(_Graph([n for n in reflex_nodes(self._space) if self.is_free([n[0]])]))
         return graphs
 
+    def kept(self, key: tuple, ends: Sequence, find):
+        """find()'s list (or None) kept by key, a copy: asked the same again, the same answer (pure in this space).
+        Only where ends (the points and headings it depends on) are tuples of plain floats or plain floats but 0
+        (-0.0 would find 0.0's), or None."""
+        if not all(e is None or type(e) is float and e or
+                   type(e) is tuple and all(type(v) is float and v for v in e) for e in ends):
+            return find()
+        if key in self._ways:
+            got = self._ways[key]
+        else:
+            got = find()
+            if len(self._ways) >= WAYS_KEPT:
+                self._ways.clear()
+            self._ways[key] = got
+        return None if got is None else list(got)
+
     def path(self, a: XY, b: XY, wide: bool = False) -> Optional[List[XY]]:
         """Shortest polyline from a to b inside the space, None if there's no way (or a or b lie outside). wide: one
         keeping the clearance off the edge first."""
         a = (float(a[0]), float(a[1]))
         b = (float(b[0]), float(b[1]))
+        return self.kept((a, b, wide), (a, b), lambda: self._path(a, b, wide))
+
+    def _path(self, a: XY, b: XY, wide: bool) -> Optional[List[XY]]:
         if self.is_free([a, b]):
             return [a, b]
         pa = self.part(a)
@@ -252,6 +274,9 @@ class TransitPlanner:
         """Like path(), but keeping the clearance off the edge where that's not a lot longer, and a way that keeps
         edge_distance off the edge where that's cheaper (see cost()): straight from a into the shrunk space, through
         it, straight out to b."""
+        return self.kept((a, b, 'careful'), (a, b), lambda: self._careful_path(a, b))
+
+    def _careful_path(self, a: XY, b: XY) -> Optional[List[XY]]:
         best = self.path(a, b, True)
         if best is None or self._edge_distance <= 0.0 or self._edge_cost <= 0.0:
             return best
