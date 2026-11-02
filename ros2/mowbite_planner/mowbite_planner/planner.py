@@ -207,7 +207,7 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
     def quick(spacing: float) -> float:
         if spacing not in probed:
             probed[spacing] = left_alone(*kept[spacing]['alone']) if 'alone' in kept.get(spacing, {}) else \
-                area.one(fixed(spacing), probe=True)
+                _result(*probing[spacing])[0] if spacing in probing else area.one(fixed(spacing), probe=True)
         return probed[spacing]
 
     def gain(spacing: float, narrower: float) -> bool:
@@ -222,12 +222,16 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
     # (with processes for it and none for the widest's the second at once too: planned through more often than not;
     # three at once on a CM4's 4 cores took longer than two)
     ahead = {s: area.later(fixed(s), probe=kept.setdefault(s, {})) for s in spacings[1:2] if _pool() and not wide}
+    probing: Dict[float, Tuple['Future', tuple, Dict[str, Any]]] = {}
     for i, spacing in enumerate(spacings):
         try:
             if best is not None and not gain(best_spacing, spacing):
                 break
-            plan = area.got(ahead[spacing], kept[spacing]) if spacing in ahead else \
-                area.plan(fixed(spacing), probe=kept.setdefault(spacing, {}))
+            planning = ahead[spacing] if spacing in ahead else \
+                area.later(fixed(spacing), probe=kept.setdefault(spacing, {}))
+            if i == 0 and _pool():  # (what the second's loops and lanes alone leave, asked for after it: beside it)
+                probing.update({s: area.later(fixed(s), probe=True) for s in spacings[1:2]})
+            plan = area.got(planning, kept[spacing])
         except PlanningError as e:  # this spacing doesn't fit (too many poses), a narrower one may not either
             error = error or e
             if best is None and _pool():  # (the narrower ones are planned through till one fits: those at once)
@@ -261,7 +265,7 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
         # ends of lanes and turns)
         if not any(strip_between_lanes(p, plan.angles) for p in left):
             break
-    for planning in ahead.values():
+    for planning in list(ahead.values()) + list(probing.values()):
         planning[0].cancel()  # (where it isn't planned through: not begun, else the process goes on to the next)
     best, failed = _or_widest(area, best, wide)
     error = error or failed
