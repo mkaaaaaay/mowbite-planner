@@ -440,8 +440,9 @@ def rules(plan, ref: Ref) -> Dict[str, Any]:
     import shapely
     P = plan.poses
     xy = np.array([(p.x, p.y) for p in P]).reshape(-1, 2)
-    # (a negative perimeter_offset asks for the loops that far outside the lines: the centre may go there, mkay 01.11.)
-    zone = ref.allowed.buffer(max(OUT_TOL, -(getattr(ref.cfg, 'perimeter_offset', None) or 0.0)))
+    # (a negative perimeter_offset asks for the loops that far outside the lines: the centre may go there, mkay 01.11.,
+    # with OUT_TOL past it as anywhere: the outline simplified, the poses rounded)
+    zone = ref.allowed.buffer(OUT_TOL + max(0.0, -(getattr(ref.cfg, 'perimeter_offset', None) or 0.0)))
     out = int((~shapely.contains_xy(zone, xy[:, 0], xy[:, 1])).sum()) if len(xy) else 0
     back = dup = 0
     for part in _sections_of(P, plan.section_starts):

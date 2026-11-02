@@ -14,10 +14,12 @@ import uuid
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
 from mowbite_planner import PlannerConfig, mqtt_service  # noqa: E402
 from mowbite_planner.mqtt_service import MqttBridge, PlannerService, main  # noqa: E402
+from stubplan import stub_plan_coverage  # noqa: E402
 
 
 def rect(x0, y0, x1, y1):
@@ -75,11 +77,12 @@ def service():
     return s
 
 
-@pytest.fixture
-def planned(monkeypatch):
+@pytest.fixture(autouse=True)
+def planned(request, monkeypatch):
     """What plan_coverage() got: (boundary, obstacles, config, start, end, drivable, keep_out, margins) of every
-    call."""
-    calls, real = [], mqtt_service.plan_coverage
+    call. The plans the stand-in's (stubplan.py), with the mark real_planner plan_coverage's."""
+    calls = []
+    real = mqtt_service.plan_coverage if 'real_planner' in request.keywords else stub_plan_coverage
 
     def spy(*args, **more):
         calls.append(args)
@@ -157,7 +160,10 @@ def test_plan_with_report_and_trace():
     json.dumps(res, allow_nan=False)
     assert res['report']['hard'] == [] and res['report']['left_m2'] < 0.1 and 'double_mowed_pct' in res['report']
     assert [st['key'] for st in res['stages']][-2:] == ['route', 'ends']
-    assert {o['id'] for o in res['lineage']['objects']} >= {'level-0', 'lane-0', 'loop-0', 'seg-0'}
+    objects = res['lineage']['objects']
+    ids = [o['id'] for o in objects]
+    assert set(ids) >= {'level-0', 'lane-0', 'loop-0', 'seg-0'} and len(ids) == len(set(ids))
+    assert all(p in ids for o in objects for p in o['parents'])  # (every parent one of them)
     plain = result(s, 'ext.mowbite_planner.plan', {'outline': outline(rect(0, 0, 10, 6)),
                                                    'obstacles': [rect(4, 2, 5, 3)]})
     assert 'report' not in plain and 'lineage' not in plain and plain['fingerprint'] == res['fingerprint']
@@ -252,7 +258,7 @@ def test_plan_with_the_area_properties_in_the_request(planned):
                          'docking_stations': [{'id': 'd', 'position': {'x': 1.0, 'y': 1.0}, 'heading': 0.0}]}))
     s.on_params(json.dumps({'/mower_logic/tool_width': 0.15, '/mower_logic/outline_offset': 0.09}))
     plain = result(s, 'ext.mowbite_planner.plan', {'area_id': 'lawn', 'poses': True})
-    assert planned[-1][5] == [] and any('no way between them' in w for w in plain['warnings'])
+    assert planned[-1][5] == [] and plain['stats']['sections'] == 2
     for same in ({'angle': 0.0}, {'outline_count': 2}):
         res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'lawn', 'poses': True, **same})
         assert planned[-1][5] == [] and res['poses'] == plain['poses'], same

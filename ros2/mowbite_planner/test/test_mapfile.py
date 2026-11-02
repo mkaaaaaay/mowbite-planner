@@ -7,11 +7,13 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
-from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa: E402
+from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
 from mowbite_planner.mapfile import (area_job, area_settings, find_area, margins_for, match_area,  # noqa: E402
                                      mow_areas, openmower_angle, openmower_settings, settings_for)
+from stubplan import stub_plan_coverage  # noqa: E402
 
 
 def rect(x0, y0, x1, y1):
@@ -209,7 +211,7 @@ def test_broken_maps():
 def test_plan_an_area_of_the_map():
     job = area_job(MAP, 'front')
     cfg = settings_for(PlannerConfig(), None, job)
-    plan = plan_coverage(job.boundary, job.obstacles, cfg, job.dock, job.dock[:2], job.drivable)
+    plan = stub_plan_coverage(job.boundary, job.obstacles, cfg, job.dock, job.dock[:2], job.drivable)
     assert plan.warnings == [PlannerConfig().no_body]
     assert plan.angle == pytest.approx(0.5)
     for x0, y0, x1, y1 in ((4, 2, 5, 3), (7, 4, 8, 5)):  # the bed and the pond

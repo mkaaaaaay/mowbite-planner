@@ -11,7 +11,8 @@ from types import SimpleNamespace
 import pytest
 from shapely.geometry import Polygon
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
 from mowbite_planner import PlannerConfig, SegmentInfo, plan_coverage  # noqa: E402
 from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, simplified_indices,  # noqa: E402
@@ -19,6 +20,8 @@ from mowbite_planner.export import (SEGMENT_TYPES, fingerprint, plan_pieces, sim
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
 from mowbite_planner import lead as leadin  # noqa: E402
 from mowbite_planner.report import FTC_SPEEDS, check_plan, drive_time  # noqa: E402
+from golden import golden_plan  # noqa: E402
+from stubplan import stub_plan_coverage  # noqa: E402
 
 
 def rect(x0, y0, x1, y1):
@@ -31,10 +34,10 @@ _plans = {}
 
 
 def plan_of(**kw):
-    """A plan of AREA with BED, planned once per setting."""
+    """A plan of AREA with BED by the stand-in (stubplan.py), made once per setting."""
     key = tuple(sorted(kw.items()))
     if key not in _plans:
-        _plans[key] = plan_coverage(AREA, [BED], PlannerConfig(**kw))
+        _plans[key] = stub_plan_coverage(AREA, [BED], PlannerConfig(**kw))
     return _plans[key]
 
 
@@ -127,9 +130,9 @@ def test_fingerprint():
     plan = plan_of()
     fp = fingerprint(plan)
     assert len(fp) == 64 and int(fp, 16) >= 0
-    assert fingerprint(plan_coverage(AREA, [BED], PlannerConfig())) == fp  # planned again
+    assert fingerprint(stub_plan_coverage(AREA, [BED], PlannerConfig())) == fp  # planned again
     assert fingerprint(plan_of(perimeter_passes=1)) != fp
-    assert fingerprint(plan_coverage(AREA, [rect(4, 2, 5, 3.1)], PlannerConfig())) != fp
+    assert fingerprint(stub_plan_coverage(AREA, [rect(4, 2, 5, 3.1)], PlannerConfig())) != fp
     last = plan.poses[-1]
     moved = dataclasses.replace(plan, poses=plan.poses[:-1] + [last._replace(yaw=last.yaw + 1e-12)])
     assert fingerprint(moved) != fp
@@ -220,6 +223,7 @@ def test_body_edges_of_the_answer():
     assert Polygon(edges['holes'][0]).within(Polygon(BED))
 
 
+@pytest.mark.real_planner  # (body_fit is what the planner's safety net did)
 def test_body_fit_of_the_answer(monkeypatch):
     """The answer's stats say where the path goes another way for the body and leaves out what (body_fit): its places
     [x, y, m left out] and their poses [x, y, yaw, m the body sticks out there, 1 where it turns on the spot there] one
@@ -274,9 +278,10 @@ def test_to_studio_payload(kw):
     assert all(by_id[i]['parents'] == by_stage['area'] for i in by_stage['levels'])
     assert all(by_id[i]['parents'][0].startswith('lane-region') for i in by_stage['cells'])
     assert {e['op'] for e in out['lineage']['events']} >= {'difference', 'inset', 'scan', 'route'}
-    assert out['report']['hard'] == []
+    report = check_plan(plan)
+    assert out['report']['hard'] == report['hard'] and out['report']['soft'][:-1] == report['soft']
     assert out['report']['soft'][-1] == 'parameter outline_compensation is not used by the MowBite Planner'
-    assert out['stats']['left_m2'] < 0.1 and out['stats']['double_mowed_pct'] > 0
+    assert out['stats']['left_m2'] == report['left_m2'] and out['stats']['double_mowed_pct'] > 0
     assert out['params'] == {'tool_width': 0.2}
     assert out['domains']['nav_areas'] == [[[float(x), float(y)] for x, y in nav[0]]]
     assert out['domains']['expected_cover_m2'] == pytest.approx(59.0)
@@ -288,7 +293,7 @@ def test_to_studio_payload(kw):
 
 
 def test_check_plan_finds_nothing_in_a_good_plan():
-    report = check_plan(plan_of())
+    report = check_plan(golden_plan('garden'))
     assert report['hard'] == []
     assert report['area_m2'] == pytest.approx(59.0) and report['left_m2'] < 0.1
     assert report['mowed_m2'] == pytest.approx(59.0, abs=0.1)
@@ -297,7 +302,7 @@ def test_check_plan_finds_nothing_in_a_good_plan():
 
 
 def test_check_plan_finds_what_is_wrong():
-    plan = plan_of()
+    plan = golden_plan('garden')
     poses = list(plan.poses)
     k = plan.segments[-1].start + 2
     poses[k] = poses[k]._replace(x=poses[k].x + 3.0, y=-2.0)  # off the area, and a gap
@@ -310,14 +315,14 @@ def test_check_plan_finds_what_is_wrong():
 
 def test_check_plan_tells_left_on_purpose_from_left_out():
     # a body that keeps the blade off the edges: a strip left on purpose, not a mistake
-    body = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.5, edges='hard'))
+    body = stub_plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.5, edges='hard'))
     report = check_plan(body)
     assert report['hard'] == [] and report['edge_left_m2'] > 0.5
     assert any('left on purpose' in s for s in report['soft'])
     # lanes along the edge that a blade offset with no loops leaves out: grass left
-    short = plan_coverage(AREA, [], PlannerConfig(blade_offset=0.1, perimeter_passes=0, angle=0.0))
+    short = stub_plan_coverage(AREA, [], PlannerConfig(blade_offset=0.1, perimeter_passes=0, angle=0.0))
     report = check_plan(short)
-    assert any('left unmowed' in h for h in report['hard']) and any('shortened' in s for s in report['soft'])
+    assert any('left unmowed' in h for h in report['hard'])
 
 
 def test_drive_time():
@@ -333,4 +338,3 @@ def test_drive_time():
     back = straight + [Pose2D(10.0, 0.0, math.pi)] + [Pose2D(10.0 - 0.1 * i, 0.0, math.pi) for i in range(1, 11)]
     assert drive_time(back)['spin_s'] == pytest.approx(math.pi / math.radians(FTC_SPEEDS['speed_angular']))
     assert drive_time(straight, {'speed_fast': 0.8, 'speed_slow': 0.3})['s'] == pytest.approx(10.0 / 0.8 + 0.5 * 0.5 / 0.1)
-

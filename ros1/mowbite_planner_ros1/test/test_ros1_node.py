@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ['ROS_HOME'] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner'))
 sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'sim'))
+sys.path.insert(0, os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner', 'test'))
 
 
 class Msg:
@@ -156,6 +157,21 @@ def install():
 
 rospy, node_module, Request, Polygon, Point32 = install()
 
+
+from mowbite_planner import mqtt_service  # noqa: E402
+from stubplan import Spy  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def stub_planner(request, monkeypatch):
+    """The node and the preview plan with the stand-in (stubplan.py), what they asked for in its calls; with the mark
+    real_planner with plan_coverage itself."""
+    spy = Spy()
+    if 'real_planner' not in request.keywords:
+        monkeypatch.setattr(node_module, 'plan_coverage', spy)
+        monkeypatch.setattr(mqtt_service, 'plan_coverage', spy)
+    return spy
+
 from mowbite_planner.mqtt_service import PlannerService  # noqa: E402
 
 GARDEN = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)]
@@ -266,6 +282,8 @@ def test_answers_like_slic3r(planner):
     assert min(first.x, first.y, 20 - first.x, 10 - first.y) < 1e-6
     # the default for OpenMower's forward only controller: never backwards (no K-turns)
     for a, b in zip(poses(res), poses(res)[1:]):
+        if math.hypot(b.position.x - a.position.x, b.position.y - a.position.y) < 1e-6:
+            continue  # (where one path ends the next starts)
         travel = math.atan2(b.position.y - a.position.y, b.position.x - a.position.x)
         yaw = 2.0 * math.atan2(a.orientation.z, a.orientation.w)
         assert abs(math.remainder(travel - yaw, 2.0 * math.pi)) < math.pi / 2
@@ -339,7 +357,7 @@ def test_split_area(planner):
     left = {p.is_outline for p in res.paths if all(ps.pose.position.x < 9.5 for ps in p.path.poses)}
     right = {p.is_outline for p in res.paths if all(ps.pose.position.x > 10.5 for ps in p.path.poses)}
     assert left == right == {0, 1} and len(res.paths) == 4
-    assert any('2 parts with no way between them' in line for _, line in rospy.log)
+    assert any('stub: 2 sections' in line for _, line in rospy.log)  # (the plan's warnings logged)
 
 
 def test_bad_area_gives_no_paths(planner):
@@ -566,7 +584,8 @@ def mower_logic_request(props, outline, holes, params):
     ({'angle': 0.5, 'angle_min': 0.8, 'angle_max': 1.2, 'outline_count': 3}, {}, {}, (POND,), 0.0),
     # coordinates no float32 has: mower_logic sends the outline and the bed rounded, the node reads the pond
     # from the map
-    ({}, {'mow_angle_offset': 10.0}, {}, (POND,), 0.1),
+    pytest.param({}, {'mow_angle_offset': 10.0}, {}, (POND,), 0.1,
+                 marks=pytest.mark.real_planner),  # (one of the four tests with the planner itself)
 ])
 def test_preview_plans_like_the_node(planner, props, params, settings, areas, by):
     """ext.mowbite_planner.plan with the mower's map and parameters (map/json, params/json) gives the poses the
@@ -835,7 +854,7 @@ def test_rpc_settings_set_body(planner):
     assert {n: getattr(cfg, n) for n in body} == body
 
 
-def test_rpc_settings_robot_outline(planner):
+def test_rpc_settings_robot_outline(planner, stub_planner):
     """robot_outline: points [[x, y], ...] in m round base_link, set over RPC (stored as such) or in ~settings (the
     launch file), the next plan uses it: another plan than the rectangle's, kept for it; null: the rectangle again."""
     s = rpc('planner.settings')[0]['settings']['robot_outline']
@@ -852,7 +871,7 @@ def test_rpc_settings_robot_outline(planner):
         assert json.load(f)['robot_outline'] == outline
     assert planner.settings(request(), None).robot_outline == tuple(map(tuple, outline))
     cut, _ = rpc('planner.plan', {'area_id': 'a'})
-    assert cut['fingerprint'] != rectangle['fingerprint'] and not cut['kept']
+    assert stub_planner.config().robot_outline == tuple(map(tuple, outline)) and not cut['kept']
     assert rpc('planner.plan', {'area_id': 'a'})[0]['kept']
     result, _ = rpc('planner.settings.set', {'robot_outline': None})
     assert result['settings']['robot_outline']['value'] is None
@@ -945,7 +964,7 @@ def test_no_settings_file(planner):
     assert result['file'] is None and node.base.turn_radius == 0.4 and not os.path.exists(stored_file())
 
 
-def test_rpc_plan(planner):
+def test_rpc_plan(planner, stub_planner):
     send_map(the_map())
     rospy.params['/mower_logic'] = {'tool_width': 0.13, 'outline_count': 2, 'mow_angle_offset': 0.0}
     result, error = rpc('planner.plan', {'area_id': 'a'})
@@ -953,7 +972,7 @@ def test_rpc_plan(planner):
     assert result['lane_spacing'] == pytest.approx(0.13)
     # trying a setting gives what setting it gives
     tried, _ = rpc('planner.plan', {'area_id': 'a', 'settings': {'turn_radius': 0.6}})
-    assert tried['fingerprint'] != result['fingerprint']
+    assert stub_planner.config().turn_radius == 0.6 and not tried['kept']
     rpc('planner.settings.set', {'turn_radius': 0.6})
     after, _ = rpc('planner.plan', {'area_id': 'a'})
     assert after['fingerprint'] == tried['fingerprint']
@@ -965,7 +984,7 @@ def test_rpc_plan(planner):
     checked, error = rpc('planner.plan', {'area_id': 'a', 'settings': body, 'report': True})
     assert error is None and isinstance(checked['report']['body_out'], list)
     assert all(set(o) == {'x', 'y', 'yaw', 'kind'} for o in checked['report']['body_out'])
-    assert result['fingerprint'] != checked['fingerprint']
+    assert stub_planner.config().robot_width == 0.4 and not checked['kept']
     # the planner picks the lane spacing, chosen says which, without report too
     auto, error = rpc('planner.plan', {'area_id': 'a', 'settings': {'lane_spacing_mode': 'auto'}})
     assert error is None and auto['stats']['chosen']['mode'] == 'auto' and result['stats']['chosen']['mode'] == 'fixed'
@@ -1200,6 +1219,7 @@ def test_plan_ahead(planner, monkeypatch):
     assert calls == [1, 1, 1]
 
 
+@pytest.mark.real_planner  # (one of the four tests with the planner itself: the workers don't see the stand-in)
 def test_workers(planner):
     """workers: the plans in processes of their own, the areas planned ahead at once, the same plans as in the node's
     own process."""
@@ -1555,7 +1575,7 @@ def test_leftovers(planner):
     event('JOB_RESET')
     assert len(poses(planner.handle(request()))) == whole
     # an area that can't be planned: the others' leftovers still
-    send_map(the_map(areas=[area('tiny', [(30, 0), (30.2, 0), (30.2, 0.2), (30, 0.2)], type='mow')]))
+    send_map(the_map(areas=[area('tiny', [(30, 0), (30.15, 0), (30.15, 0.15), (30, 0.15)], type='mow')]))
     result, error = rpc('planner.leftovers', {'job_id': 'mown'})
     assert error is None and list(result['areas']) == ['a'] and result['areas']['a']['paths']
     assert rpc('planner.leftovers', {'job_id': 'mown', 'area_id': 'tiny'})[0] is None

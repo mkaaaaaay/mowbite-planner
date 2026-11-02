@@ -9,11 +9,13 @@ import sys
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', '..', 'ros2', 'mowbite_planner')]
+sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', '..', 'ros2', 'mowbite_planner'),
+                os.path.join(HERE, '..', '..', 'ros2', 'mowbite_planner', 'test')]
 
-from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa: E402
+from mowbite_planner import PlanningError  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner.mathutil import Pose2D  # noqa: E402
+from golden import golden_plan  # noqa: E402
 from mowbite_sim.simulate import (_FOLLOWING, APPROACH, HISTORY_DIST, PATH, MowerModel, _decimate,  # noqa: E402
                                   _Ftc, _History, _rdp, evaluate, simulate)
 
@@ -25,16 +27,13 @@ def rect(x0, y0, x1, y1):
 AREA = rect(0, 0, 10, 6)
 BED = rect(4, 2, 5, 3)
 BODY = dict(robot_width=0.4, robot_front=0.43, robot_rear=0.14)
-_plans = {}
 _runs = {}
 
 
 def plan_of(**kw):
-    """A plan of AREA with BED, planned once per setting."""
-    key = tuple(sorted(kw.items()))
-    if key not in _plans:
-        _plans[key] = plan_coverage(AREA, [BED], PlannerConfig(**dict(dict(mower_width=0.18, blade_ahead=0.18), **kw)))
-    return _plans[key]
+    """The planner's plan of AREA with BED (mower_width and blade_ahead 0.18) as it was kept (golden.py), kw: none or
+    BODY."""
+    return golden_plan('garden-sim-body' if kw == BODY else 'garden-sim')
 
 
 def run_of(model, **kw):

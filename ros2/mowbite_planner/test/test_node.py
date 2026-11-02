@@ -27,8 +27,10 @@ from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue  # noqa
 from rclpy.parameter import Parameter  # noqa: E402
 from std_srvs.srv import Trigger  # noqa: E402
 
+from mowbite_planner import node as node_module  # noqa: E402
 from mowbite_planner.mathutil import angle_diff, quaternion_to_yaw  # noqa: E402
 from mowbite_planner.node import MowbitePlannerNode, float32_warnings, pairs, parse_polygon  # noqa: E402
+from stubplan import Spy  # noqa: E402
 
 GARDEN = [(0.0, 0.0), (22.0, 0.0), (24.0, 9.0), (13.0, 9.0), (13.0, 16.0), (0.0, 16.0)]
 BED = [(15.0, 2.5), (19.0, 2.5), (19.0, 5.0), (15.0, 5.0)]
@@ -40,6 +42,16 @@ HEDGE = [(4.0, -1.0), (6.0, -1.0), (6.0, 7.0), (4.0, 7.0)]
 
 def polygon(points):
     return Polygon(points=[Point32(x=float(x), y=float(y), z=0.0) for x, y in points])
+
+
+@pytest.fixture(autouse=True)
+def planned(request, monkeypatch):
+    """The node plans with the stand-in (stubplan.py), what it asked for in planned.calls; with the mark real_planner
+    with plan_coverage itself."""
+    spy = Spy()
+    if 'real_planner' not in request.keywords:
+        monkeypatch.setattr(node_module, 'plan_coverage', spy)
+    return spy
 
 
 @pytest.fixture
@@ -87,6 +99,7 @@ def check_path(path, frame='map'):
         assert math.hypot(pb.x - pa.x, pb.y - pa.y) > 1e-7
 
 
+@pytest.mark.real_planner  # (one of the four tests with the planner itself)
 def test_plan_coverage_service(node):
     res = call_plan_coverage(node)
     assert res.success, res.message
@@ -173,6 +186,7 @@ def test_many_loops(node):
     assert node.set_parameters([Parameter('lane_overlap_passes', value=255)])[0].successful
 
 
+@pytest.mark.real_planner  # (one of the four tests with the planner itself)
 def test_far_from_the_origin(node):
     # Point32 is float32: 20 km out it has 2 mm steps
     far = [(x + 10000.0, y + 20000.0) for x, y in GARDEN]
@@ -225,7 +239,7 @@ def test_plan_coverage_bad_overrides(node, msg):
 def test_split_lawn(node):
     # no way from one half to the other: two sections, the path jumps between them
     res = call_plan_coverage(node, boundary=LAWN, obstacles=[HEDGE])
-    assert res.success and 'the area has 2 parts with no way between them' in res.message, res.message
+    assert res.success and 'stub: 2 sections' in res.message, res.message  # (the plan's warnings)
     k = res.section_start[1]
     assert list(res.section_start) == [0, k] and 0 < k < len(res.path.poses)
     pts = xy(res.path)
