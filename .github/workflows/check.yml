@@ -18,3 +18,47 @@ jobs:
       - run: /tmp/venv/bin/python -m pytest ros2/mowbite_planner/test -q -p no:cacheprovider -n auto
       - run: /tmp/venv/bin/python -m pytest ros1/mowbite_planner_ros1/test -q -p no:cacheprovider -n auto
       - run: /tmp/venv/bin/python -m pytest sim/test -q -p no:cacheprovider
+
+  # the same on arm64, as the mowers are (GEOS and numpy fuse multiplies and adds there); its runners cost nothing in
+  # the public repository only
+  planner-arm64:
+    if: github.repository == 'mkaaaaaay/mowbite-planner'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q shapely pytest pytest-xdist
+      - run: /tmp/venv/bin/python -m pytest ros2/mowbite_planner/test -q -p no:cacheprovider -n auto
+      - run: /tmp/venv/bin/python -m pytest ros1/mowbite_planner_ros1/test -q -p no:cacheprovider -n auto
+      - run: /tmp/venv/bin/python -m pytest sim/test -q -p no:cacheprovider
+
+  # the plans of the tests' matrix in OpenMower's image (Python 3.8, shapely 2.0.7, as the node plans) on amd64 and on
+  # arm64 (tools/fingerprints.py): what the simulation and the acceptance plan on a PC is what the mower plans
+  fingerprints:
+    if: github.repository == 'mkaaaaaay/mowbite-planner'
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: >-
+          docker run --rm --user root --entrypoint bash -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD:/s" -w /s
+          ghcr.io/clemenselflein/open_mower_ros:edge@sha256:775830292390f3b517a384d33c6251b57aae1b2a4c722c8e04ee5011f4494be8
+          -c "python3 -m pip install -q shapely==2.0.7 pytest && python3 ros2/mowbite_planner/tools/fingerprints.py"
+          > fingerprints-${{ runner.arch }}.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fingerprints-${{ runner.arch }}
+          path: fingerprints-${{ runner.arch }}.json
+          retention-days: 7
+
+  fingerprints-compare:
+    needs: fingerprints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: fingerprints-*
+          merge-multiple: true
+      - run: python3 ros2/mowbite_planner/tools/fingerprints.py fingerprints-X64.json fingerprints-ARM64.json
