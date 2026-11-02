@@ -626,15 +626,27 @@ def test_preview_plans_like_the_node(planner, props, params, settings, areas, by
 
 # OpenMower RPCs (planner.settings, planner.settings.set, planner.plan)
 
+ANSWERS = ('/xbot/rpc/response', '/xbot/rpc/error')
+
+
+def answers():
+    """The RPC answers published (not the progress)."""
+    return [(topic, m) for topic, m in rospy.published if topic in ANSWERS]
+
+
 def rpc(method, params=None, rid='1'):
-    """Hands the node a request like xbot_monitoring does, gives (result, None) or (None, (code, message))."""
+    """Hands the node a request like xbot_monitoring does, gives (result, None) or (None, (code, message)); a method
+    answered on a thread of its own (node_module.BACKGROUND) once it's there."""
     rospy.published.clear()
     raw = '' if params is None else params if isinstance(params, str) else json.dumps(params)
     rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method=method, params=raw, id=rid))
-    assert len(rospy.published) <= 1
-    if not rospy.published:
+    for t in threading.enumerate():
+        if t.name == 'rpc %s' % method:
+            t.join(300.0)
+    assert len(answers()) <= 1
+    if not answers():
         return None, None
-    topic, m = rospy.published[0]
+    topic, m = answers()[0]
     assert m.id == rid
     if topic == '/xbot/rpc/response':
         return json.loads(m.result), None
@@ -1049,8 +1061,8 @@ def rpc_waited(method, params=None, rid='1'):
     for t in threading.enumerate():
         if t.name == 'rpc %s' % method:
             t.join(300.0)
-    assert len(rospy.published) == 1
-    topic, m = rospy.published[0]
+    assert len(answers()) == 1
+    topic, m = answers()[0]
     if topic == '/xbot/rpc/response':
         return json.loads(m.result), None
     return None, (m.code, m.message)
@@ -1119,8 +1131,8 @@ def test_rpc_simulate_status_and_cancel(planner):
     for t in threading.enumerate():
         if t.name == 'rpc planner.simulate':
             t.join(300.0)
-    answers = [m for topic, m in rospy.published if m.id == 'long']
-    assert len(answers) == 1 and answers[0].code == -32602 and 'cancelled' in answers[0].message
+    long = [m for _, m in answers() if m.id == 'long']
+    assert len(long) == 1 and long[0].code == -32602 and 'cancelled' in long[0].message
     assert planner.rpc_simulate_status({})['running'] is False
     done, error = rpc_waited('planner.simulate', {'outline': [[0, 0], [4, 0], [4, 3], [0, 3]], 'model': 'ideal'})
     assert error is None and done['duration']['min'] > 0
@@ -1760,3 +1772,132 @@ def test_body_reaches_over_into_navigation_areas(planner):
     from shapely.geometry import Point as Spot
     assert space.contains(Spot(20.5, 1.5)) and not space.contains(Spot(20.5, 5.0))
     assert not space.contains(Spot(-0.5, 7.5))
+
+
+# the worker and the progress (one planning at a time, the quick RPCs at once meanwhile)
+
+def test_worker_most_urgent_first():
+    """The worker's jobs one at a time, the most urgent first (of those the one asked for first); a job a job asks for
+    runs at once, an exception goes to whoever waits."""
+    worker = node_module.Worker()
+    go, order = threading.Event(), []
+    first = threading.Thread(target=worker.run, args=(node_module.AHEAD, go.wait, 30))
+    first.start()
+    time.sleep(0.2)
+    waiting = []
+    for urgency, name in ((node_module.AHEAD, 'ahead'), (node_module.ASKED, 'asked'), (node_module.MOWER, 'mower'),
+                          (node_module.ASKED, 'asked 2'), (node_module.AFTER_MOW, 'after the mow')):
+        waiting.append(threading.Thread(target=worker.run, args=(urgency, order.append, name)))
+        waiting[-1].start()
+        time.sleep(0.05)
+    go.set()
+    for t in [first] + waiting:
+        t.join(30)
+    assert order == ['mower', 'asked', 'asked 2', 'after the mow', 'ahead']
+    assert worker.run(node_module.ASKED, lambda: worker.run(node_module.AHEAD, lambda: 7)) == 7
+    with pytest.raises(ZeroDivisionError):
+        worker.run(node_module.ASKED, lambda: 1 / 0)
+
+
+def test_quick_rpcs_answer_while_it_plans(planner, stub_planner, monkeypatch):
+    """While a planning runs, planner.settings and planner.log answer at once; planner.plan once it's planned."""
+    send_map(the_map())
+    go, began = threading.Event(), threading.Event()
+
+    def slow(*args, **kw):
+        began.set()
+        assert go.wait(60)
+        return stub_planner(*args, **kw)
+
+    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    rospy.published.clear()
+    rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method='planner.plan',
+                                                                  params=json.dumps({'area_id': 'a'}), id='plan'))
+    assert began.wait(60)
+    t0 = time.time()
+    settings, error = rpc('planner.settings')
+    assert error is None and 'turn_radius' in settings['settings']
+    assert rpc('planner.log', {'limit': 1})[1] is None and time.time() - t0 < 5.0
+    go.set()
+    for t in threading.enumerate():
+        if t.name == 'rpc planner.plan':
+            t.join(60)
+    assert 'plan' in [m.id for _, m in answers()]
+
+
+def test_one_planning_at_a_time(planner, stub_planner, monkeypatch):
+    """mower_logic's plan_path, planner.plan and a preview asked for at once: planned one after the other (two threads at
+    one plan's shapes can crash GEOS), each gets its answer."""
+    send_map(the_map())
+    lock, now, most = threading.Lock(), [0], [0]
+
+    def counted(*args, **kw):
+        with lock:
+            now[0] += 1
+            most[0] = max(most[0], now[0])
+        try:
+            time.sleep(0.2)
+            return stub_planner(*args, **kw)
+        finally:
+            with lock:
+                now[0] -= 1
+
+    monkeypatch.setattr(node_module, 'plan_coverage', counted)
+    got = {}
+    asks = {'plan_path': lambda: rospy.services['/slic3r_coverage_planner/plan_path'](request()),
+            'plan': lambda: planner.methods['planner.plan']({'area_id': 'a', 'settings': {'turn_radius': 0.5}}),
+            'preview': lambda: planner.methods['planner.plan']({'outline': [[0, 0], [6, 0], [6, 4], [0, 4]]})}
+    threads = [threading.Thread(target=lambda n=n, f=f: got.update({n: f()})) for n, f in asks.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(120)
+    assert most[0] == 1 and len(stub_planner.calls) == 3 and set(got) == set(asks) and got['plan_path'].paths
+
+
+def progress_messages():
+    return [json.loads(m.payload) for topic, m in rospy.published if topic == '/xbot_monitoring/mqtt_publish'
+            and m.topic == node_module.PROGRESS_TOPIC and m.retain]
+
+
+def test_progress(planner, stub_planner, monkeypatch):
+    """How far a planning got on mowbite/planner/progress (retained, through xbot_monitoring): from its start to done,
+    done growing, at most one message a second and one more at its end, the next planning of the area with what this
+    one took as estimate_s; a plan kept from before none."""
+    send_map(the_map())
+
+    def slow(*args, **kw):
+        time.sleep(2.6)
+        return stub_planner(*args, **kw)
+
+    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    rospy.published.clear()
+    result, error = rpc('planner.plan', {'area_id': 'a'})
+    seen = progress_messages()
+    assert error is None and len(seen) >= 3
+    first, last = seen[0], seen[-1]
+    assert set(last) == {'area_id', 'key', 'running', 'stage', 'done', 'of', 'started', 'elapsed_s', 'estimate_s',
+                         'error'}
+    assert first['area_id'] == 'a' and first['running'] and first['stage'] == 'angles' and first['estimate_s'] is None
+    assert last == dict(last, area_id='a', key=first['key'], running=False, stage='done', done=last['of'], error=None)
+    assert [m['done'] for m in seen] == sorted(m['done'] for m in seen) and seen[-2]['done'] > 0
+    times = [m['started'] + m['elapsed_s'] for m in seen[:-1]]
+    assert all(b - a >= 0.9 for a, b in zip(times, times[1:]))
+    rospy.published.clear()
+    assert rpc('planner.plan', {'area_id': 'a'})[0]['kept'] and not progress_messages()
+    rpc('planner.plan', {'area_id': 'a', 'settings': {'turn_radius': 0.5}})
+    assert 2.0 < progress_messages()[0]['estimate_s'] < 10.0
+
+
+def test_progress_of_a_failed_planning(planner, monkeypatch):
+    """A planning that fails: its last progress message says why."""
+    send_map(the_map())
+
+    def failing(*args, **kw):
+        raise node_module.PlanningError('no lanes fit')
+
+    monkeypatch.setattr(node_module, 'plan_coverage', failing)
+    rospy.published.clear()
+    assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'no lanes fit'
+    last = progress_messages()[-1]
+    assert last['running'] is False and last['error'] == 'no lanes fit' and last['stage'] != 'done'

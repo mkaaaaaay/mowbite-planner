@@ -29,9 +29,12 @@ STATS_KEYS = ('sections', 'path_length', 'perimeter_length', 'lane_length', 'tur
 
 def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] = None, start=None, end=None,
                        drivable=(), keep_out=(), margins=(), mowed=None, reach_over=(), unmowed=(),
-                       arrives=None) -> CoveragePlan:
+                       arrives=None, progress=None) -> CoveragePlan:
     cfg = config or PlannerConfig()
     cfg.validate()
+    if progress is not None:  # (like plan_coverage: from angles to done, here in two steps)
+        progress('angles', 0, 2)
+        progress('route', 1, 2)
     # the planner's checks of the input (a point 1e39 m out would be poses all the way) and its spaces
     reach_over = list(reach_over) + list(unmowed)
     margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
@@ -147,6 +150,8 @@ def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] =
         stats['leftovers'] = {'left_m2': round(left_space.area, 3), 'pieces': len(left), 'passes': len(lanes),
                               'area': round(swept.area, 3)}
     warnings = [w for w in [cfg.no_body] if w] + (['stub: %d sections' % len(starts)] if len(starts) > 1 else [])
+    if progress is not None:
+        progress('done', 2, 2)
     return CoveragePlan(poses=out, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=loops,
                         lanes=lanes, stats=stats, warnings=warnings, area=area, free_space=free,
                         robot_space=space.drive_space, lane_region=robot, remaining=robot, angles=angles,

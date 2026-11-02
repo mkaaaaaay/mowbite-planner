@@ -28,6 +28,7 @@ from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subt
 from .handover import _blade_on, _compact, _lengths, _ring_ways
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
+from .progress import Progress, Report
 from .levels import Rings, narrow_left, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
@@ -118,7 +119,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   keep_out: Sequence[Sequence[Sequence[float]]] = (),
                   margins: Sequence[Optional[float]] = (), mowed=None,
                   reach_over: Sequence[Sequence[Sequence[float]]] = (),
-                  unmowed: Sequence[Sequence[Sequence[float]]] = (), arrives: Optional[Arrives] = None) -> CoveragePlan:
+                  unmowed: Sequence[Sequence[Sequence[float]]] = (), arrives: Optional[Arrives] = None,
+                  progress: Optional[Report] = None) -> CoveragePlan:
     """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
     SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
     lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
@@ -126,17 +128,23 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     own. The slots by the edge stay open (the loops go round one too narrow for the body, levels.body_free): the plan's
     free_space, robot_space and transit_space are the map's as drawn. arrives(pose) (a robot that drives to the plan's
     sections itself, MowBite OS: whether it gets to the pose facing its heading): every section starts where it does,
-    see starts.reached_starts."""
+    see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress)."""
     cfg = config or PlannerConfig()
     cfg.validate()
     area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed)
+    auto = mowed is None and cfg.lane_spacing_mode == 'auto'
+    area.progress, area.stage = Progress(progress, 1 if mowed is not None else SPACING_CANDIDATES + 3 if auto else 3), \
+        'spacing' if auto else 'route'
+    area.progress.at('angles', 0)
     if mowed is not None:
         plan = _compact(area.one(cfg, mowed=mowed))
-    elif cfg.lane_spacing_mode != 'auto':
+    elif not auto:
         plan = _final(area, _completed(area, area.plan(cfg)))
     else:
         plan = _auto(area, cfg)
-    return plan if arrives is None else reached_starts(plan, arrives)
+    plan = plan if arrives is None else reached_starts(plan, arrives)
+    area.progress.at('done', area.progress.of)
+    return plan
 
 
 class _Area:
@@ -147,6 +155,7 @@ class _Area:
         self.drivable, self.keep_out, self.margins, self.reach_over = drivable, keep_out, margins, reach_over
         self.unmowed = unmowed
         self._lawn = None
+        self.progress, self.stage = Progress(None, 1), 'route'  # (plan_coverage's, a plan planned through a step)
 
     def lawn(self):
         """The lawn as drawn: the area but its obstacles and the areas to keep out of or not to mow."""
@@ -164,11 +173,11 @@ class _Area:
         kw = dict(reach_over=self.reach_over, unmowed=self.unmowed, **more)
         return _later(args, kw), args, kw
 
-    @staticmethod
-    def got(planning: Tuple['Future', tuple, Dict[str, Any]], probe: Any) -> CoveragePlan:
+    def got(self, planning: Tuple['Future', tuple, Dict[str, Any]], probe: Any) -> CoveragePlan:
         plan, filled = _result(*planning)
         if isinstance(probe, dict) and filled is not probe:  # (filled in another process)
             probe.update(filled)
+        self.progress.at(self.stage)
         return plan
 
     def plan(self, c: PlannerConfig, probe: Any = False) -> CoveragePlan:
@@ -284,6 +293,7 @@ def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
     cfg = plan.config
     if not cfg.mop_up or plan.body_space is None or not plan.poses:
         return plan
+    area.progress.at('mop_up', area.progress.of - 2)
     t0 = time.perf_counter()
     fp = _footprint(plan)
     edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
@@ -304,6 +314,7 @@ def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
 def _final(area: _Area, plan: CoveragePlan) -> CoveragePlan:
     """The plan as it's handed out: the drives between pieces of loops of their kind, the blade on along them where it
     stays on the lawn, the poses compacted (handover)."""
+    area.progress.at('route', area.progress.of - 1)
     lawn = area.lawn()
     return _compact(_blade_on(_ring_ways(plan, lawn), lawn))
 
