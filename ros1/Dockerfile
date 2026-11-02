@@ -14,7 +14,8 @@ COPY sim/mowbite_sim /opt/mowbite/sim/mowbite_sim
 USER openmower
 
 # OpenMower's entrypoint sets up ROS and its workspace, the node comes from here (no catkin build: python only).
-# --wait: OpenMower's master, never one of its own (it would take OpenMower's port)
-CMD ["bash", "-c", "export ROS_PACKAGE_PATH=/opt/mowbite/ros1:$ROS_PACKAGE_PATH \
+# --wait: OpenMower's master, never one of its own (it would take OpenMower's port). No core dumps: the mower's
+# core_pattern writes them where the node works (its ROS data), a crash's took a gigabyte of a nearly full disk
+CMD ["bash", "-c", "ulimit -c 0 && export ROS_PACKAGE_PATH=/opt/mowbite/ros1:$ROS_PACKAGE_PATH \
      PYTHONPATH=/opt/mowbite/ros2:/opt/mowbite/sim:$PYTHONPATH && exec roslaunch --wait mowbite_planner_ros1 mowbite_planner.launch \
      own_container:=true"]
