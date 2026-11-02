@@ -245,14 +245,15 @@ def lane_poses(run: Run, cut_start: float, cut_end: float, step: float) -> List[
 
 def kept_runs(cfg: PlannerConfig, angle: float, area: TransitPlanner, fp: Optional[Footprint]) -> Runs:
     """run_of for every lane, direction and side of the turns, worked out once."""
-    known: Dict[Tuple[int, int, float, float], Tuple[Optional[Run], str]] = {}
-    ends: Dict[Tuple[int, int], Dict[Tuple[float, float], bool]] = {}  # (body_ends' of each lane and direction)
+    known: Dict[tuple, Tuple[Optional[Run], str]] = {}
+    ends: Dict[tuple, Dict[Tuple[float, float], bool]] = {}  # (body_ends' of each lane and direction)
 
     def runs(lane: Lane, direction: int, arrive: float, leave: float) -> Tuple[Optional[Run], str]:
-        key = (id(lane), direction, arrive, leave)
+        # (by what the lane is, not its id: a lane made later may get a freed one's)
+        it = (lane.row, lane.x0, lane.x1, lane.y, lane.bends, direction)
+        key = it + (arrive, leave)
         if key not in known:
-            known[key] = run_of(lane, direction, angle, cfg, area, fp, arrive, leave,
-                                ends.setdefault((id(lane), direction), {}))
+            known[key] = run_of(lane, direction, angle, cfg, area, fp, arrive, leave, ends.setdefault(it, {}))
         return known[key]
 
     return runs

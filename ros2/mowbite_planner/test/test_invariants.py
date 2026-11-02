@@ -259,3 +259,17 @@ def test_random_gardens_with_the_body(seed):
     keeps_the_rules(plan, r)
     stats_tell_what_the_poses_do(plan)
     labels_fit_the_geometry(plan)
+
+
+def test_same_plan_every_time():
+    """A garden of simbench with the blade off the middle (the loops it drives with the blade inside were known by
+    their id, a ring made later could get a freed one's and go the other way round): the same plan every time."""
+    import gardens
+    import simbench
+    case = 'model/0@rect+perimeter_passes=3+obstacle_passes=-1+pairs=28'
+    name, index, mower_name, _, settings = simbench.parse(case)
+    garden = gardens.garden(name)
+    area_id = garden.areas[index]
+    garden, mower = simbench.with_settings(garden, area_id, settings), gardens.mower_of(mower_name, garden)
+    got = {fingerprint(simbench.plan_area(garden, area_id, mower)) for _ in range(12)}
+    assert len(got) == 1

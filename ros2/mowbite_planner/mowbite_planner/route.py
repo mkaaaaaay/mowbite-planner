@@ -52,8 +52,8 @@ class Route:
         self.end = end
         self.started = False
         self.section = 0
-        # rings (by id) the centre drives with the blade on their inner side, see centre_rings
-        self.blade_in: set = set()
+        # rings (by id, each kept with it) the centre drives with the blade on their inner side, see centre_rings
+        self.blade_in: dict = {}
         # with the body checked: whether the outline was recorded ccw, its outermost loop goes that way (see drive_ring)
         self.recorded: Optional[bool] = None
         # what the segments added now mow or lead to, and where every loop and lane comes from

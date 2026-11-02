@@ -64,7 +64,7 @@ class Loops:
             for kind, ring in rings(inset(part, -off)):
                 if self.area.is_free(ring + ring[:1]):
                     found.append((kind, ring))
-                    self.blade_in.add(id(ring))
+                    self.blade_in[id(ring)] = ring  # (kept: a list made later may get a freed one's id)
         return found
 
     def left_out(self, kind: str, depth: float) -> bool:
@@ -145,7 +145,7 @@ class Loops:
         if self.cfg.blade_offset != 0:
             # rings come with the mowable side on the left: the blade goes on the other side, but for the rings
             # driven with the blade on the inner one
-            return (self.cfg.blade_offset > 0) != (id(ring) in self.blade_in)
+            return (self.cfg.blade_offset > 0) != (self.blade_in.get(id(ring)) is ring)
         if self.recorded is not None and self.cfg.perimeter_direction in ('auto', 'random') and kind == PERIMETER \
                 and not hole and level == 0:
             # the outermost loop the way the outline was recorded: the body where it was then (its real edges), the
