@@ -405,8 +405,10 @@ def plan_body(plan, ref: Ref) -> Dict[str, Any]:
     (ring_rm). rm_turn_rule: rm_turn_out's places as mkay counts them (31.10.): on the loops (and the ways between
     their pieces) only those turning on the spot, of the others (rm_turn_arc) none."""
     from mowbite_planner.footprint import Footprint
+    from mowbite_planner.sweep import _backwards
     if ref.rm is None:
         return {}
+    backing = _backwards(plan.segments, len(plan.poses))  # (drive slope, reverse: turning on the spot backed up)
     fp = Footprint(ref.rm, ref.cfg.body_outline, ref.cfg.spin_margin)
     rec = Footprint(ref.rec, ref.cfg.body_outline, 0.0)
     ring = outer_ring(plan)
@@ -416,11 +418,12 @@ def plan_body(plan, ref: Ref) -> Dict[str, Any]:
         found, where = [], {}
         for a, part in zip(plan.section_starts, _sections_of(plan.poses, plan.section_starts)):
             turn = _turning(part) if geometric else False
-            bad = [i for i in space.bad_poses(part, turn) if ring[a + i] == mine]
+            back = backing[a:a + len(part)] if any(backing[a:a + len(part)]) else None
+            bad = [i for i in space.bad_poses(part, turn, back) if ring[a + i] == mine]
             if bad:
                 on = [turn[i] for i in bad] if geometric else False
                 for i, (d, xy) in zip(bad, space.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
-                                                        on_turn=on)):
+                                                        on_turn=on, backwards=back and [back[i] for i in bad])):
                     if xy is not None and d > BODY_PLAN:
                         found.append((d, xy))
                         where.setdefault((d, xy), a + i)
@@ -437,24 +440,32 @@ def plan_body(plan, ref: Ref) -> Dict[str, Any]:
 
 
 def rules(plan, ref: Ref) -> Dict[str, Any]:
+    """The fixed rules: centre_out, backwards (steps against the heading but in segments driven backwards, and along
+    it in those), reverse_segs (segments driven backwards where the plan's drive is forward), dup_steps, ..."""
     import shapely
+    from mowbite_planner.sweep import _backwards
     P = plan.poses
+    backing = _backwards(plan.segments, len(P))
     xy = np.array([(p.x, p.y) for p in P]).reshape(-1, 2)
     # (a negative perimeter_offset asks for the loops that far outside the lines: the centre may go there, mkay 01.11.,
     # with OUT_TOL past it as anywhere: the outline simplified, the poses rounded)
     zone = ref.allowed.buffer(OUT_TOL + max(0.0, -(getattr(ref.cfg, 'perimeter_offset', None) or 0.0)))
     out = int((~shapely.contains_xy(zone, xy[:, 0], xy[:, 1])).sum()) if len(xy) else 0
     back = dup = 0
-    for part in _sections_of(P, plan.section_starts):
-        for a, b in zip(part, part[1:]):
+    for k, part in zip(plan.section_starts, _sections_of(P, plan.section_starts)):
+        for j, (a, b) in enumerate(zip(part, part[1:])):
             d = math.hypot(b.x - a.x, b.y - a.y)
             if d < DUP:
                 dup += 1
             elif d > 1e-3:  # (against the heading at both ends: a turn on the spot at b has b's yaw already)
                 h = math.atan2(b.y - a.y, b.x - a.x)
-                back += all(abs(math.remainder(h - y, 2 * math.pi)) > math.pi / 2 for y in (a.yaw, b.yaw))
-    got = {'centre_out': out, 'backwards': back, 'reverse_segs': sum(1 for s in plan.segments if s.reverse),
-           'dup_steps': dup}
+                if backing[k + j + 1]:  # (along the heading at both ends where it backs up)
+                    back += all(abs(math.remainder(h - y, 2 * math.pi)) < math.pi / 2 for y in (a.yaw, b.yaw))
+                else:
+                    back += all(abs(math.remainder(h - y, 2 * math.pi)) > math.pi / 2 for y in (a.yaw, b.yaw))
+    forward = plan.config is None or plan.config.drive == 'forward'
+    got = {'centre_out': out, 'backwards': back,
+           'reverse_segs': sum(1 for s in plan.segments if s.reverse) if forward else 0, 'dup_steps': dup}
     if ref.rm is not None and plan.body_space is not None:
         got['rm_diff_m2'] = round(plan.body_space.symmetric_difference(ref.rm).area, 4)
     if plan.config is not None:

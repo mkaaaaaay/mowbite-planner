@@ -58,6 +58,7 @@ def blade_over(plan: CoveragePlan) -> List[Dict[str, Any]]:
     if blade is None:
         return []
     kind_at: Dict[int, str] = {}
+    backwards = _backwards(plan.segments, len(plan.poses))
     for seg in plan.segments:
         kind = {TURN: 'turn', TRANSIT: 'transit', PERIMETER: 'loop'}.get(seg.kind, 'loop' if seg.maneuver == 'ring'
                                                                          else 'lane')
@@ -68,11 +69,21 @@ def blade_over(plan: CoveragePlan) -> List[Dict[str, Any]]:
     for i, p in enumerate(plan.poses):
         before = plan.poses[i - 1] if i and i not in starts else None
         spin = before is not None and abs(normalize_angle(p.yaw - before.yaw)) > SPIN
-        d, at = blade.depth(p.x, p.y, before.yaw, p.yaw, back * math.cos(before.yaw), back * math.sin(before.yaw)) \
+        way = -back if backwards[i] else back
+        d, at = blade.depth(p.x, p.y, before.yaw, p.yaw, way * math.cos(before.yaw), way * math.sin(before.yaw)) \
             if spin else blade.depth(p.x, p.y, p.yaw)
         if at is not None and d > 0.0:
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
                         'kind': 'spin' if spin else kind_at.get(i, 'transit'), 'm': round(d + BLADE_SLACK, 3)})
+    return out
+
+
+def _backwards(segments: List[SegmentInfo], n: int) -> List[bool]:
+    """For each of n poses whether the mower came to it backing up (the step to it in a segment driven backwards)."""
+    out = [False] * n
+    for seg in segments:
+        if seg.reverse:
+            out[seg.start + 1:seg.end + 1] = [True] * (seg.end - seg.start)
     return out
 
 
@@ -89,7 +100,8 @@ def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: L
              footprint: Footprint, recorded: Optional[Tuple[Footprint, Set[str]]] = None) -> List[Dict[str, Any]]:
     """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
     'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
-    (footprint.OnTurn). recorded (recorded_footprint): those loops' poses in where the body was then instead."""
+    (footprint.OnTurn). recorded (recorded_footprint): those loops' poses in where the body was then instead. Turning
+    on the spot where it came backing up, the way in is ahead of it (segments driven backwards)."""
     kind_at: Dict[int, str] = {}
     on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
     lenient = [False] * len(poses)
@@ -106,14 +118,16 @@ def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: L
         if seg.maneuver == 'body' and lenient[seg.start] and lenient[seg.end]:
             lenient[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
     out = []
+    backwards = _backwards(segments, len(poses))
     for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
         part = poses[a:b]
-        bad = footprint.bad_poses(part, on_turn[a:b])
+        bad = footprint.bad_poses(part, on_turn[a:b], backwards[a:b] if any(backwards[a:b]) else None)
         mild = [i for i in range(len(part)) if lenient[a + i]]
         if mild:
             rec = recorded[0]
             fit = dict(zip(mild, rec.fit([part[i] for i in mild])))
-            mine = {i for i in mild if not (rec.fits_turn(part[i].x, part[i].y, part[i - 1].yaw, part[i].yaw)
+            mine = {i for i in mild if not (rec.fits_turn(part[i].x, part[i].y, part[i - 1].yaw, part[i].yaw,
+                                                          backwards[a + i])
                                             if rec.spins(part, i) else fit[i])}
             bad = sorted(mine.union(i for i in bad if not lenient[a + i]))
         for i in bad:

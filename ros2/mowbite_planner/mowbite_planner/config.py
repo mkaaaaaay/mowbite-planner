@@ -27,6 +27,12 @@ ROUTE_ORDERS = ('nearest', 'optimized')
 # orders route_order 'optimized' tries at most for one set of cells, so it doesn't take long with many
 ORDER_BUDGET = 4000
 LANE_ORDERS = ('snake', 'skip')
+# how the mower drives an area (backing.py, with OpenMower's FTC back_up_with_plan): forward; slope: lanes only, up
+# forwards, down backwards (no turning on a slope); reverse: the whole plan backwards
+DRIVES = ('forward', 'slope', 'reverse')
+# m, slope and reverse turn on the spot at least this far off the edges, with the body checked (backing up the mower
+# feels nothing behind it, no bumper there)
+DRIVE_SPIN_MARGIN = 0.05
 # lanes: parallel lanes; crosshatch: lanes, then lanes across them; concentric: loops further and further in
 FILL_PATTERNS = ('lanes', 'crosshatch', 'concentric')
 PERIMETER_ORDERS = ('first', 'last')
@@ -205,6 +211,7 @@ class PlannerConfig:
     # the kinds of turns allowed between lanes ('u_turn', 'bulb', 'detour', 'pivot', see turns.py): pivot only with
     # turn_on_spot or where it's the only one
     turn_types: Tuple[str, ...] = TURN_TYPES
+    drive: str = 'forward'  # see DRIVES
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
     # mowing areas of the map lying in the one planned (an area of its own with another angle or pattern): left out
     # and mowed round like an obstacle, they get their own plan. For the map's areas (mapfile.area_job), not here
@@ -556,6 +563,8 @@ class PlannerConfig:
                 raise PlanningError(f'{name} must be a whole number {lo}..{MAX_PASSES}, got {v!r}')
         if self.route_order not in ROUTE_ORDERS:
             raise PlanningError(f'route_order must be one of {", ".join(ROUTE_ORDERS)}, got {self.route_order!r}')
+        if self.drive not in DRIVES:
+            raise PlanningError(f'drive must be one of {", ".join(DRIVES)}, got {self.drive!r}')
         if self.lane_order not in LANE_ORDERS:
             raise PlanningError(f'lane_order must be one of {", ".join(LANE_ORDERS)}, got {self.lane_order!r}')
         for name, allowed in (('angle_strategy', ANGLE_STRATEGIES), ('fill_pattern', FILL_PATTERNS),

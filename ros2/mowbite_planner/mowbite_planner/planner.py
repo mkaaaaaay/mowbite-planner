@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 from shapely.geometry import Polygon
 from shapely.prepared import prep
 
+from . import backing
 from .assemble import mow_parts
 from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
 from .complete import complete, leftovers
@@ -128,9 +129,26 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     own. The slots by the edge stay open (the loops go round one too narrow for the body, levels.body_free): the plan's
     free_space, robot_space and transit_space are the map's as drawn. arrives(pose) (a robot that drives to the plan's
     sections itself, MowBite OS: whether it gets to the pose facing its heading): every section starts where it does,
-    see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress)."""
+    see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
+    see backing.py; without the body set forwards, said in the warnings."""
     cfg = config or PlannerConfig()
     cfg.validate()
+    if cfg.drive != 'forward':
+        why = backing.unavailable(cfg)
+        if why:
+            plan = plan_coverage(boundary, obstacles, cfg.with_overrides({'drive': 'forward'}), start, end, drivable,
+                                 keep_out, margins, mowed, reach_over, unmowed, arrives, progress)
+            return dataclasses.replace(plan, warnings=plan.warnings + ['drive %s ignored: %s' % (cfg.drive, why)])
+        return backing.planned(lambda c: _coverage(boundary, obstacles, c, start, end, drivable, keep_out, margins,
+                                                   mowed, reach_over, unmowed, arrives, progress), cfg, mowed)
+    return _coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, mowed, reach_over, unmowed,
+                     arrives, progress)
+
+
+def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, keep_out, margins, mowed, reach_over,
+              unmowed, arrives: Optional[Arrives], progress: Optional[Report]) -> CoveragePlan:
+    """plan_coverage with cfg checked, every pose forwards (drive reverse: the outermost loop as recorded goes the
+    other way round, see _as_recorded)."""
     area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed)
     auto = mowed is None and cfg.lane_spacing_mode == 'auto'
     area.progress, area.stage = Progress(progress, 1 if mowed is not None else SPACING_CANDIDATES + 3 if auto else 3), \
@@ -353,6 +371,9 @@ def _as_recorded(route: _Route, cfg: PlannerConfig, footprint, outlines, away_fr
     """The outermost loop the way the outline was recorded (rings.drive_ring): the body where it was then, the centre
     no further than RECORDED_CENTRE past the lines, a negative perimeter_offset that far (drive_space reaches
     body_tolerance past the first loop, with edge_margin 0 past the lines: rounding a corner cut it out)."""
+    if cfg.drive == 'reverse':
+        # (the body turned round going the other way: where the mower's was recording them, see route.recorded)
+        outlines, away_from = [list(o)[::-1] for o in outlines], [list(o)[::-1] for o in away_from]
     route.recorded_fp = Footprint(recorded_space(outlines, away_from, margin_of, cfg), cfg.body_outline, 0.0,
                                   blade=footprint.blade)
     out = max(RECORDED_CENTRE, -(cfg.perimeter_offset or 0.0))
@@ -455,7 +476,9 @@ def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, st
     route = _Route(cfg, transit, area_space, start_xy, start_heading, _point(end), footprint)
     if cfg.body:  # (the way the outline's points go; mkay 31.10.: also without robot_outline)
         ring = list(boundary)
-        route.recorded = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(ring, ring[1:] + ring[:1])) > 0
+        # (drive reverse: the body turned round goes round the other way, the mower backing up the way it recorded)
+        route.recorded = (sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(ring, ring[1:] + ring[:1])) > 0) != \
+            (cfg.drive == 'reverse')
     if not cfg.body:
         route.warnings.append(cfg.no_body)
     route.loop_counts = (rings_of.count, rings_of.islands) if rings_of.islands != rings_of.count else None

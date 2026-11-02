@@ -412,25 +412,26 @@ class Footprint:
             fit[k] = off
         return fit
 
-    def fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
+    def fits_turn(self, x: float, y: float, yaw0: float, yaw1: float, backwards: bool = False) -> bool:
         """Turning on the spot here from yaw0 to yaw1, the shorter way round (body poses TURN_STEP apart), both ways
         round where they're within TURN_STEP as long (about a half turn: the mower may take either). With a
         spin_margin the body keeps that much further off the edges, turning anywhere on the last SPIN_BACK of the way
-        in (facing yaw0), checked from one of those poses to the next (the hull of both: between them a corner may
-        get closer to an edge than at either)."""
-        key = (x, y, yaw0, yaw1)
+        in (facing yaw0; backwards: it came backing up, from ahead), checked from one of those poses to the next (the
+        hull of both: between them a corner may get closer to an edge than at either)."""
+        key = (x, y, yaw0, yaw1, True) if backwards else (x, y, yaw0, yaw1)
         got = self._turns_kept.get(key)
         if got is None:
             if len(self._turns_kept) >= TURNS_KEPT:
                 self._turns_kept.clear()
-            got = self._turns_kept[key] = self._fits_turn(x, y, yaw0, yaw1)
+            got = self._turns_kept[key] = self._fits_turn(x, y, yaw0, yaw1, backwards)
         return got
 
-    def _fits_turn(self, x: float, y: float, yaw0: float, yaw1: float) -> bool:
+    def _fits_turn(self, x: float, y: float, yaw0: float, yaw1: float, backwards: bool = False) -> bool:
         fp = self.turning
         if fp._safe_at(x, y):
             return True
-        dx, dy = fp.back * math.cos(yaw0), fp.back * math.sin(yaw0)
+        back = -fp.back if backwards else fp.back
+        dx, dy = back * math.cos(yaw0), back * math.sin(yaw0)
         if self.blade is not None and not self.blade.off_turning(x, y, yaw0, yaw1, dx, dy):
             return False
         for yaws in self._turns(yaw0, yaw1):
@@ -454,38 +455,40 @@ class Footprint:
             return [on_turn and i > 0 for i in range(len(poses))]
         return [bool(t) for t in on_turn]
 
-    def _bad(self, poses: Sequence, last_first: bool = False, on_turn: OnTurn = False):
+    def _bad(self, poses: Sequence, last_first: bool = False, on_turn: OnTurn = False,
+             backwards: Optional[Sequence[bool]] = None):
         # (shapely 1.7 one at a time: poses_fit stops at the first that doesn't fit)
         turn = self._on_turn(poses, on_turn)
         fit = self.fit(poses, turn) if contains_xy is not None else None
         for i in range(len(poses) - 1, -1, -1) if last_first else range(len(poses)):
             p = poses[i]
             if self.spins(poses, i):
-                ok = self.fits_turn(p.x, p.y, poses[i - 1].yaw, p.yaw)
+                ok = self.fits_turn(p.x, p.y, poses[i - 1].yaw, p.yaw, bool(backwards and backwards[i]))
             else:
                 ok = fit[i] if fit is not None else (self.turning if turn[i] else self).fits_pose(p.x, p.y, p.yaw)
             if not ok:
                 yield i
 
-    def bad_poses(self, poses: Sequence, on_turn: OnTurn = False) -> list:
+    def bad_poses(self, poses: Sequence, on_turn: OnTurn = False, backwards: Optional[Sequence[bool]] = None) -> list:
         """Indices of the poses (with .x, .y, .yaw) where the body sticks out: facing the pose's way (on a turn
         between lanes, on_turn, spin_margin further in), or turning on the spot where the heading jumps by more than
-        SPIN from the pose before."""
-        return list(self._bad(poses, on_turn=on_turn))
+        SPIN from the pose before (backwards: one for each pose, whether it came there backing up)."""
+        return list(self._bad(poses, on_turn=on_turn, backwards=backwards))
 
     def out_by(self, turns: Sequence, step: float = OUT_STEP, around: Optional[Sequence[float]] = None,
-               on_turn: OnTurn = False) -> List[Tuple]:
+               on_turn: OnTurn = False, backwards: Optional[Sequence[bool]] = None) -> List[Tuple]:
         """(m, (x, y)) for each pose of turns ((the pose before, None where a section starts, the pose)): how far the
         body's farthest point lies out of the space and where (0, None: it's in it), turning on the spot where the
         heading jumps by more than SPIN: out of the space spin_margin smaller, anywhere on the last SPIN_BACK of the way
-        in (like fits_turn), on a turn between lanes (on_turn: all, none, or one for each of turns) out of that space
-        at the pose. Of points `step` apart along its edges (turning: facing the way in and out, at the point and back,
-        its corners every OUT_ARC round at least), step / 2 short of the farthest at most; around (x, y, r): of those
-        within r of there only. Where none of those lies out of it (or without numpy) of the corners and the middle of
-        what does."""
+        in (like fits_turn; backwards: one for each of turns, whether it came backing up), on a turn between lanes
+        (on_turn: all, none, or one for each of turns) out of that space at the pose. Of points `step` apart along its
+        edges (turning: facing the way in and out, at the point and back, its corners every OUT_ARC round at least),
+        step / 2 short of the farthest at most; around (x, y, r): of those within r of there only. Where none of those
+        lies out of it (or without numpy) of the corners and the middle of what does."""
         got: List[Tuple] = [(0.0, None)] * len(turns)
         spin = [before is not None and angle_diff(p.yaw, before.yaw) > SPIN for before, p in turns]
         turn = [bool(on_turn)] * len(turns) if on_turn is True or on_turn is False else [bool(t) for t in on_turn]
+        sign = [-1.0 if backwards and backwards[k] else 1.0 for k in range(len(turns))]
         if contains_xy is not None or contains_points is not None:
             # (the ends of the edges the points lie on, whose: the bodies not turning all at once)
             still = [k for k, turning in enumerate(spin) if not turning]
@@ -496,7 +499,8 @@ class Footprint:
             ends, owner = [(c.reshape(-1, 2), numpy.roll(c, -1, 1).reshape(-1, 2))], [numpy.repeat(still, m)]
             for k in (k for k, turning in enumerate(spin) if turning):
                 (before, p), yaw0 = turns[k], turns[k][0].yaw
-                dx, dy = self.turning.back * math.cos(yaw0), self.turning.back * math.sin(yaw0)
+                back = sign[k] * self.turning.back
+                dx, dy = back * math.cos(yaw0), back * math.sin(yaw0)
                 for c in (self._corners_at(p.x, p.y, [yaw0], dx, dy), self._corners_at(p.x, p.y, [p.yaw], dx, dy)):
                     ends += [(c[:m], numpy.roll(c[:m], -1, 0)), (c[m:], numpy.roll(c[m:], -1, 0)), (c[:m], c[m:])]
                 for t in self._turns(yaw0, p.yaw):  # (its corners turning either way it may)
@@ -544,7 +548,8 @@ class Footprint:
             if got[k][1] is None:  # (the corners and the middle of what lies out of the space)
                 fp = self.turning if turning or turn[k] else self
                 shape = unary_union([h for t in self._turns(before.yaw, p.yaw) for h in self._hulls(
-                    p.x, p.y, list(zip(t, t[1:])), fp.back * math.cos(before.yaw), fp.back * math.sin(before.yaw))]) \
+                    p.x, p.y, list(zip(t, t[1:])), sign[k] * fp.back * math.cos(before.yaw),
+                    sign[k] * fp.back * math.sin(before.yaw))]) \
                     if turning else self.body(p.x, p.y, p.yaw)
                 for piece in pieces(shape.difference(fp.space)):
                     if contains_xy is None:

@@ -6,6 +6,7 @@ import math
 from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.prepared import prep
 
+from mowbite_planner.backing import CORNER_STEP
 from mowbite_planner.config import LANE, TRANSIT
 from mowbite_planner.mathutil import angle_diff
 
@@ -47,12 +48,21 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
     for s, t in zip(segs, segs[1:]):
         assert s.start < s.end
         assert t.start in (s.end, s.end + 1)
-    # every pose faces the way it's driven to the next one, never backwards
-    assert not any(s.reverse for s in segs)
+    # every pose faces the way it's driven to the next one, never backwards (drive slope or reverse: against it in the
+    # segments driven backwards)
+    back = [False] * len(poses)
+    for s in segs:
+        back[s.start:s.end] = [s.reverse] * (s.end - s.start)
+    assert plan.config.drive != 'forward' or not any(back)
     for i, (a, b) in enumerate(zip(poses, poses[1:])):
         if i in jumps:
             continue
-        travel = math.atan2(b.y - a.y, b.x - a.x)
+        travel = math.atan2(b.y - a.y, b.x - a.x) + (math.pi if back[i] else 0.0)
+        if back[i] and math.hypot(b.x - a.x, b.y - a.y) < 2 * CORNER_STEP and i:
+            # (a sharp corner's turn pose backing up, backing.corners: facing against the ways in and out)
+            before = math.atan2(a.y - poses[i - 1].y, a.x - poses[i - 1].x) + math.pi
+            assert angle_diff(travel, a.yaw) < math.pi / 2 and angle_diff(before, a.yaw) < math.pi / 2, i
+            continue
         assert angle_diff(travel, a.yaw) <= arc_tol, f'pose {i} {a} faces {a.yaw}, drives {travel}'
     # straight lanes keep exactly one heading, along one of the sets of lanes (concentric rings bend)
     for s in segs:

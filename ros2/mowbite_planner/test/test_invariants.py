@@ -86,6 +86,8 @@ SETTINGS = {
     'optimized': dict(route_order='optimized'),
     'margins0': dict(edge_margin=0.0, spin_margin=0.0),
     'outside': dict(perimeter_offset=-0.03),
+    # (backing.py: the body turned round, every pose turned round after; without the body forwards)
+    'reverse': dict(drive='reverse'),
 }
 CASES = [(s, b, '') for s in SHAPES for b in BODIES if (s, b) != ('keep', 'bare')] + \
     [('garden', b, k) for k in SETTINGS for b in BODIES]

@@ -108,12 +108,16 @@ def piece_poses(plan: CoveragePlan, start: int, end: int) -> List[Pose2D]:
 
 
 def fingerprint(plan: CoveragePlan) -> str:
-    """SHA-256 of all poses (x, y, yaw as little endian doubles). The planner is deterministic, the same
+    """SHA-256 of all poses (x, y, yaw as little endian doubles), then the first and last pose of every segment driven
+    backwards (little endian uint32; a plan only forwards: the poses' alone). The planner is deterministic, the same
     request gives the same fingerprint, a changed map or setting a different one (OpenMower compares a
     digest like this to decide whether a saved checkpoint still fits the plan)."""
     h = hashlib.sha256()
     for p in plan.poses:
         h.update(struct.pack('<3d', p.x, p.y, p.yaw))
+    for s in plan.segments:
+        if s.reverse:
+            h.update(struct.pack('<2I', s.start, s.end))
     return h.hexdigest()
 
 

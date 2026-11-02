@@ -134,7 +134,7 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     if gaps:
         hard.append(f'{len(gaps)} gaps between poses wider than waypoint_spacing {step} m, the first after pose '
                     f'{gaps[0]}')
-    if any(s.reverse for s in plan.segments):
+    if any(s.reverse for s in plan.segments) and (cfg is None or cfg.drive == 'forward'):
         hard.append('drives backwards')
     footprint = plan_footprint(plan, blade=False)
     body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
