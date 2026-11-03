@@ -1,8 +1,12 @@
-# MowBite Planner on a computer in the house (the planner setting remote_planning): plans for the mower over its MQTT
-# broker, the mower checks every plan itself and plans on its own where this isn't there. Built here from the planner's
-# repository (house/Dockerfile); the code it plans with it fetches from there by itself, the one the mower runs.
-#   MOWER_HOST=<the mower's address> docker compose up -d --build
-# HOUSE_WORKERS: processes that plan at once (3), MOWER_MQTT_USER and MOWER_MQTT_PASSWORD where the broker wants them
+# MowBite Planner on a computer in the house: plans for the mower over its MQTT broker, quicker than the mower. The
+# mower checks every plan itself before it drives it and plans on its own whenever this isn't there.
+# Needs Linux with Docker and Docker Compose, 64-bit (amd64 or arm64, not 32-bit ARM), and the mower's broker
+# reachable on port 1883 (open on OpenMowerOS by default). In an empty folder with this file and a file .env with the
+# line MOWER_HOST=<the mower's address>:
+#   docker compose up -d --build
+# In .env too: MOWER_MQTT_USER and MOWER_MQTT_PASSWORD where the broker wants a login, HOUSE_WORKERS how many processes
+# a plan uses (3). It gets the planner code the mower runs from the planner's repository by itself, also after updates.
+# Then on the mower: http://<mower>:8090, Extras, "Plan on a computer in the house". More in the planner's README.md.
 services:
   mowbite_house:
     build:

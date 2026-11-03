@@ -56,6 +56,33 @@ free the space old versions take: `docker image prune -f && docker builder prune
 **Back to OpenMower's planner:** on the settings page set "Planner" to `slic3r`. For good: take `OM_PLANNER` out of
 OpenMower's `.env`, restart OpenMower, then stop the planner's stack.
 
+### Planning on a computer in the house (optional)
+
+A big area can take a minute to plan on the mower. A computer in the house that runs anyway (home server, NAS, PC,
+Raspberry Pi 5) is usually several times quicker. The mower still checks every plan itself before it drives it,
+and plans on its own whenever the house computer isn't there or too slow.
+
+You need Linux with Docker and Docker Compose, 64-bit: amd64 or arm64 (a Raspberry Pi with a 64-bit OS; 32-bit ARM
+doesn't work). It has to reach the mower's MQTT broker on port 1883, OpenMowerOS has that open by default.
+
+1. **Start it on that computer.** Copy [`house/compose.yaml`](house/compose.yaml) into an empty folder there, next
+   to it a file `.env` with the line `MOWER_HOST=<the mower's address>`, and run `docker compose up -d --build` in that
+   folder. The first start builds it, a few minutes. Does your broker want a login: add the lines
+   `MOWER_MQTT_USER=...` and `MOWER_MQTT_PASSWORD=...` to `.env`. `HOUSE_WORKERS=...` there sets how many processes a
+   plan uses (3, fewer on a small computer). It gets the planner code the mower runs from this repository by itself,
+   also after every planner update.
+2. **Turn it on.** Open `http://<mower>:8090`, under "Extras" switch on "Plan on a computer in the house". Says it
+   "not in use" there, the reason is next to it: "no house computer" means the mower doesn't hear from it (address,
+   port 1883, is it running?). "house computer out of date": it's still getting the mower's code, give it a minute;
+   if it stays, run the command from step 1 again. It only plans for planner code from this repository, not a fork.
+3. **Check it.** Plans the mower already has stay as they are, new ones (after a change to the map or the settings)
+   come from the house computer: the preview on that page says "planned on the house computer" then. On the house
+   computer `docker logs mowbite_house` has a line for every plan (`request ... planned in ... s`). Where the mower
+   planned on its own after all, the planner's log on the mower says why (`planned here, not on the house computer:
+   ...`); with MQTT at hand, `planned_on` and `remote_why` in `mowbite/planner/progress` say the same.
+
+To stop it: `docker compose down` in that folder, and switch the setting off again.
+
 ## Good to know
 
 - A new plan takes a few seconds up to a minute per area on the mower. Plans are made ahead, so you rarely wait.
