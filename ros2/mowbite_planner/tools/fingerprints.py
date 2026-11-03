@@ -5,6 +5,8 @@ and the acceptance planned on a PC, to the bit.
 
   fingerprints.py [processes]   {case: fingerprint or the error} as JSON
   fingerprints.py A.json B.json the cases planned differently, exit 1 then
+  fingerprints.py --plans case... those cases' plans (poses, segments) and check_plan's report as JSON, to see where
+                                  two machines part
 """
 import json
 import os
@@ -36,7 +38,25 @@ def compare(a: str, b: str) -> int:
     return 1 if differ else 0
 
 
+def plans(names) -> dict:
+    import test_invariants
+    from mowbite_planner.report import check_plan
+    got = {}
+    for case in test_invariants.CASES:
+        name = '-'.join(c for c in case if c)
+        if name in names:
+            plan = test_invariants.plan_of(*case)
+            got[name] = {'poses': [list(p) for p in plan.poses],
+                         'segments': [[s.kind, s.start, s.end, s.reverse] for s in plan.segments],
+                         'report': check_plan(plan)}
+    return got
+
+
 def main() -> int:
+    if sys.argv[1:2] == ['--plans']:
+        json.dump(plans(sys.argv[2:]), sys.stdout, default=str)
+        print()
+        return 0
     if len(sys.argv) == 3:
         return compare(*sys.argv[1:])
     import test_invariants
