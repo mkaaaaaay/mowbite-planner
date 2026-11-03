@@ -3,12 +3,14 @@
     python3 -m pytest ros1/mowbite_planner_ros1/test   (shapely is enough)
 """
 
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
 import logging
 import math
 import os
+import queue
 import re
 import shutil
 import struct
@@ -258,6 +260,8 @@ def planner():
     node_module.PLAN_AHEAD_DELAY = 1e6
     # no mowbite/hold read (no broker here: it would hold leftovers_auto's mower in), test_hold does that itself
     node_module.HOLD = False
+    # nor the house computer's broker (remote_planning): the tests of it hand the node one of their own
+    node_module.REMOTE = False
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
     node_module.TRACK_WAIT = 0.0
     # (the progress of the tests' nodes before off: a change of what waits is sent a while after, into this test)
@@ -808,9 +812,14 @@ def test_rpc_settings(planner):
     result, error = rpc('planner.settings')
     assert error is None and result['file'] == stored_file() and result['own_angle'] is False
     s = result['settings']
-    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner', 'leftovers_auto'}
+    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner', 'leftovers_auto', 'remote_planning'}
     assert s['leftovers_auto'] == {'value': False, 'default': False, 'stored': False, 'type': 'boolean',
                                    'settable': True}
+    # (no house computer here: see test_remote_planning)
+    assert s['remote_planning'] == {'value': False, 'default': False, 'stored': False, 'type': 'boolean',
+                                    'settable': True, 'ignored': 'no house computer'}
+    assert result['remote'] == {'reachable': False, 'arch': None, 'code_match': False, 'stack_match': False,
+                                'why': 'no house computer'}
     assert s['planner'] == {'value': 'mowbite', 'default': 'mowbite', 'stored': False, 'type': 'string',
                             'settable': True, 'choices': ['mowbite', 'slic3r']}
     assert s['turn_radius'] == {'value': 0.25, 'default': 0.25, 'stored': False, 'type': 'number', 'settable': True,
@@ -2028,7 +2037,8 @@ def test_progress(planner, stub_planner, monkeypatch):
     assert error is None and len(seen) >= 3
     first, last = seen[0], seen[-1]
     assert set(last) == {'area_id', 'key', 'running', 'stage', 'done', 'of', 'started', 'elapsed_s', 'estimate_s',
-                         'error', 'waiting_n', 'waiting'}
+                         'error', 'waiting_n', 'waiting', 'planned_on', 'remote_why'}
+    assert last['planned_on'] == 'mower' and last['remote_why'] is None
     assert last['waiting_n'] == 0 and last['waiting'] == []
     assert first['area_id'] == 'a' and first['running'] and first['stage'] == 'angles' and first['estimate_s'] is None
     assert last == dict(last, area_id='a', key=first['key'], running=False, stage='done', done=last['of'], error=None)
@@ -2328,3 +2338,260 @@ def test_calib_evaluated_after_a_restart(planner):
     assert any(w.startswith('the recording stops in the middle') for w in result['warnings'])
     assert [v['name'] for v in result['values'] if v['ok']] == ['ticks_per_m', 'wheel_distance_m',
                                                                  'antenna_offset_x', 'antenna_offset_y']
+
+
+# remote_planning ---------------------------------------------------------------------------------------------------
+
+class Broker:
+    """A broker for the tests: what a client publishes goes to whoever subscribed to its topic (+: one level), in order
+    on a thread of the broker's (like paho's network loop); the retained messages come to a subscription at once."""
+
+    def __init__(self):
+        self.subs, self.retained = [], {}
+        self.queue = queue.Queue()
+        threading.Thread(target=self.deliver, daemon=True).start()
+
+    @staticmethod
+    def matches(pattern, topic):
+        a, b = pattern.split('/'), topic.split('/')
+        return len(a) == len(b) and all(x in ('+', y) for x, y in zip(a, b))
+
+    def publish(self, topic, payload, retain=False):
+        payload = payload.encode() if isinstance(payload, str) else bytes(payload)
+        if retain:
+            self.retained[topic] = payload
+        for client, pattern in list(self.subs):
+            if self.matches(pattern, topic):
+                self.queue.put((client, topic, payload, False))
+
+    def subscribe(self, client, pattern):
+        self.subs.append((client, pattern))
+        for topic, payload in self.retained.items():
+            if payload and self.matches(pattern, topic):
+                self.queue.put((client, topic, payload, True))
+
+    def deliver(self):
+        while True:
+            client, topic, payload, retain = self.queue.get()
+            client.on_message(client, None, types.SimpleNamespace(topic=topic, payload=payload, retain=retain))
+            self.queue.task_done()
+
+
+class Client:
+    """paho-mqtt's client as RemotePlanning uses it, on a Broker."""
+
+    def __init__(self, broker, on_message=None):
+        self.broker, self.on_message = broker, on_message
+
+    def reconnect_delay_set(self, *a):
+        pass
+
+    def connect_async(self, *a):
+        pass
+
+    def loop_start(self):
+        self.on_connect(self, None, {}, code())
+
+    def subscribe(self, topics, qos=None):
+        for topic in [topics] if isinstance(topics, str) else [t for t, _ in topics]:
+            self.broker.subscribe(self, topic)
+
+    def publish(self, topic, payload, qos=0, retain=False):
+        self.broker.publish(topic, payload, retain)
+
+
+SMALL = [(0.0, 0.0), (6.0, 0.0), (6.0, 4.0), (0.0, 4.0)]
+SMALL_MAP = {'areas': [area('s', SMALL + [SMALL[0]], name='Small', type='mow')]}
+
+
+def a_house(broker, answer=None):
+    """A house computer on broker (mowbite_planner.house, planning on threads of its own; answer(house, request):
+    answers in its place), stopped by the event it gives."""
+    from mowbite_planner.house import House
+    house = House(lambda topic, payload, retain: broker.publish(topic, payload, retain))
+    got = (lambda raw: answer(house, json.loads(raw))) if answer else house.on_request
+    broker.subscribe(Client(broker, lambda client, userdata, msg: got(msg.payload)), node_module.TOPIC + 'request')
+    stop = threading.Event()
+    threading.Thread(target=house.work, daemon=True).start()
+
+    def tick():
+        while not stop.wait(0.2):
+            house.tick()
+
+    threading.Thread(target=tick, daemon=True).start()
+    house.hello()
+    return house, stop
+
+
+def with_house(planner, broker):
+    planner.remote = node_module.RemotePlanning(planner.code, Client(broker))
+    broker.queue.join()
+
+
+@pytest.mark.real_planner
+def test_remote_planning(planner):
+    """remote_planning on: the plan made on the house computer, the same as here to the bit, taken where the mower's
+    own geometry and body find nothing wrong with it; planned_on says where (planner.plan, the progress), kept with
+    that in memory and on disk. planner.settings tells the house computer's state."""
+    broker = Broker()
+    house, stop = a_house(broker)
+    try:
+        with_house(planner, broker)
+        assert json.loads(broker.retained[node_module.TOPIC + 'want']) == {'code': planner.code,
+                                                                           'stack': house.stack}
+        result, error = rpc('planner.settings.set', {'remote_planning': True})
+        assert error is None and result['settings']['remote_planning'] == {
+            'value': True, 'default': False, 'stored': True, 'type': 'boolean', 'settable': True}
+        assert result['remote'] == {'reachable': True, 'arch': house.arch, 'code_match': True, 'stack_match': True,
+                                    'why': None}
+        send_map(SMALL_MAP)
+        rospy.published.clear()
+        got, error = rpc('planner.plan', {'area_id': 's'})
+        assert error is None and got['planned_on'] == 'house' and got['kept'] is False
+        seen = progress_messages()
+        assert seen[-1]['planned_on'] == 'house' and seen[-1]['remote_why'] is None and seen[-1]['stage'] == 'done'
+        again, _ = rpc('planner.plan', {'area_id': 's'})
+        assert again['kept'] and again['planned_on'] == 'house' and again['fingerprint'] == got['fingerprint']
+        restarted = node_module.MowbitePlannerRos1()  # (the RPCs go to it from now on)
+        send_map(SMALL_MAP)
+        kept = restarted.rpc_plan({'area_id': 's'})
+        assert kept['kept'] and kept['planned_on'] == 'house' and kept['fingerprint'] == got['fingerprint']
+        # here: the same plan
+        rpc('planner.settings.set', {'remote_planning': False})
+        restarted.plans.clear()
+        shutil.rmtree(restarted.plans_dir)
+        here, _ = rpc('planner.plan', {'area_id': 's'})
+        assert here['planned_on'] == 'mower' and here['fingerprint'] == got['fingerprint']
+    finally:
+        stop.set()
+
+
+def test_remote_planning_falls_back(planner, monkeypatch):
+    """Planned here where the house computer isn't there, plans with other code, sends a plan broken or one the
+    checks here refuse, or says nothing for REMOTE_STALL s (then not asked for REMOTE_QUIET s); the planner's no there
+    is the no here. Why: planner.settings (ignored), the log (once) and the progress (remote_why)."""
+    monkeypatch.setattr(node_module, 'REMOTE_CATCH_UP', 0.0)
+    monkeypatch.setattr(node_module, 'REMOTE_SETTLE', 0.0)
+    monkeypatch.setattr(node_module, 'REMOTE_STALL', 0.3)
+    broker = Broker()
+    with_house(planner, broker)
+    result, _ = rpc('planner.settings.set', {'remote_planning': True})
+    assert result['settings']['remote_planning']['ignored'] == 'no house computer'
+    assert result['remote'] == {'reachable': False, 'arch': None, 'code_match': False, 'stack_match': False,
+                                'why': 'no house computer'}
+    send_map(the_map())
+
+    def planned(**settings):
+        rospy.published.clear()
+        got, error = rpc('planner.plan', {'area_id': 'a', 'settings': settings})
+        assert error is None
+        return got['planned_on'], progress_messages()[-1]['remote_why']
+
+    assert planned() == ('mower', 'no house computer')
+    old = dict(json.loads(broker.retained.get(node_module.TOPIC + 'want')), code='other', at=time.time())
+    broker.publish(node_module.TOPIC + 'hello', json.dumps(old), retain=True)
+    broker.queue.join()
+    assert rpc('planner.settings')[0]['settings']['remote_planning']['ignored'] == 'house computer out of date'
+    assert planned(turn_radius=0.3) == ('mower', 'house computer out of date')
+    assert sum('not on the house computer' in line for _, line in rospy.log) == 2
+
+    def answering(how):
+        def answer(house, request):
+            rid, key = request['id'], request['key']
+
+            def say(**more):
+                broker.publish(node_module.TOPIC + 'answer/' + rid, json.dumps(dict(id=rid, key=key, code=house.code,
+                                                                                    **more)))
+
+            if how == 'broken':
+                say(ok=True, parts=1, bytes=3, sha256='0' * 64)
+                broker.publish(node_module.TOPIC + 'answer/%s/0' % rid, b'abc')
+            elif how == 'no':
+                say(ok=False, error='the area is too small', refused=True)
+            elif how == 'wrong':  # (a plan of another area, beside this one: refused by the checks here)
+                plan = node_module.plan_coverage([(x + 30.0, y) for x, y in SMALL], [],
+                                                 node_module.PlannerConfig(mower_width=0.18))
+                from mowbite_planner.remote import pack, plan_json
+                data = pack(dict(plan_json(plan, plan.config), spacing=None))
+                say(ok=True, parts=1, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                broker.publish(node_module.TOPIC + 'answer/%s/0' % rid, data)
+        return answer
+
+    for how, why in (('broken', 'its answer is broken'), ('wrong', 'its plan')):
+        broker = Broker()
+        a_house(broker, answering(how))
+        with_house(planner, broker)
+        on, said = planned(turn_radius=0.3 + len(how) / 100.0)
+        assert on == 'mower' and said.startswith(why), said
+    broker = Broker()
+    a_house(broker, answering('no'))
+    with_house(planner, broker)
+    for _ in range(2):
+        assert rpc('planner.plan', {'area_id': 'a', 'settings': {'turn_radius': 0.4}})[1][1] == 'the area is too small'
+    broker = Broker()
+    a_house(broker, lambda house, request: None)  # (says nothing)
+    with_house(planner, broker)
+    assert planned(turn_radius=0.5) == ('mower', 'no word from it for 0 s')
+    t0 = time.time()
+    on, said = planned(turn_radius=0.6)
+    assert on == 'mower' and said.startswith('it didn\'t answer, asked again from ') and time.time() - t0 < 5.0
+
+
+def test_remote_answers_of_others_dropped(planner):
+    """Only what comes for the request waiting counts: progress and answers of another id, a header of another key
+    or code or not readable, a part too big are dropped (no word from the house: REMOTE_STALL s later it's planned
+    here)."""
+    broker = Broker()
+    remote = node_module.RemotePlanning('c' * 40, Client(broker))
+    asked = {'id': 'a' * 32, 'key': 'k' * 40, 'heard': 0.0, 'answer': None, 'parts': {}, 'step': lambda *a: None}
+    remote.open = asked
+
+    def message(topic, payload):
+        remote.on_message(None, None, types.SimpleNamespace(
+            topic=node_module.TOPIC + topic, payload=payload.encode() if isinstance(payload, str) else payload,
+            retain=False))
+
+    message('answer/' + 'b' * 32, json.dumps({'key': 'k' * 40, 'code': 'c' * 40, 'ok': False, 'error': 'x'}))
+    message('progress/' + 'b' * 32, json.dumps({'stage': 'route', 'done': 1, 'of': 2}))
+    assert asked['answer'] is None and asked['heard'] == 0.0
+    message('answer/%s/0' % ('a' * 32), b'x' * (node_module.PART + 1))
+    for header in ({'key': 'other', 'code': 'c' * 40, 'ok': True}, {'key': 'k' * 40, 'code': 'other', 'ok': True},
+                   {'key': 'k' * 40, 'code': 'c' * 40, 'ok': True, 'parts': 99, 'bytes': 3, 'sha256': '0' * 64},
+                   'not json'):
+        message('answer/' + 'a' * 32, header if isinstance(header, str) else json.dumps(header))
+    assert asked['answer'] is None and asked['parts'] == {} and asked['heard'] == 0.0
+    message('progress/' + 'a' * 32, json.dumps({'stage': 'route', 'done': 1, 'of': 2}))
+    assert asked['heard'] > 0.0
+    # a hello retained long ago: no house; one sent now: there
+    message('hello', json.dumps({'code': 'c' * 40, 'stack': remote.stack, 'at': time.time()}))
+    assert remote.state()[0] == ''
+    remote.on_message(None, None, types.SimpleNamespace(topic=node_module.TOPIC + 'hello', retain=True, payload=(
+        json.dumps({'code': 'c' * 40, 'stack': remote.stack, 'at': time.time() - 3600}).encode())))
+    assert remote.state()[0] == 'no house computer'
+    message('hello', b'')
+    assert remote.state()[0] == 'no house computer'
+
+
+def test_the_jobs_plans_kept(planner, monkeypatch):
+    """The plans mower_logic got are kept (in memory, in plans_dir, over a restart) till the job ends (JOB_COMPLETE,
+    JOB_RESET), however many are planned meanwhile; then they go like any other."""
+    monkeypatch.setattr(node_module, 'CACHED_PLANS', 2)
+    monkeypatch.setattr(node_module, 'DISK_PLANS', 2)
+    send_map(the_map())
+    planner.handle(request())
+    key, = planner.pinned
+
+    def others(*angles):
+        for angle in angles:
+            planner.plan_coverage(SMALL, [], planner.current.base.with_overrides({'angle': angle}))
+
+    others(0.1, 0.2, 0.3)
+    assert key in planner.plans and os.path.exists(planner.plan_file(key))
+    event('JOB_COMPLETE')
+    others(0.4, 0.5)
+    assert key not in planner.plans and not os.path.exists(planner.plan_file(key)) and planner.pinned == set()
+    planner.handle(request())
+    restarted = node_module.MowbitePlannerRos1()  # (the events go to it from now on)
+    assert restarted.pinned == {key}
+    event('JOB_RESET')
+    assert restarted.pinned == set() and node_module.MowbitePlannerRos1().pinned == set()

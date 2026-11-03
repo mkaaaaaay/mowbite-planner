@@ -129,6 +129,11 @@ A few worth knowing:
   passes over that mow 0.3 m² or more, it sends the mower out again once it's idle in the dock. Not in an emergency
   and, with OpenMower's `rain_mode` on, not in the rain. Once per mow. Not while the MowBite Updater holds the starts
   (`mowbite/hold` on the mower's own MQTT broker), nor when the planner can't reach that broker.
+- `remote_planning`: plans on a computer in the house where one runs the planner's house service
+  (`house/compose.yaml` there: `MOWER_HOST=<the mower's address> docker compose up -d --build`; it fetches the planner
+  code the mower runs by itself). The mower builds each plan's geometry itself, checks the plan with its own body and
+  plans itself where the house computer isn't there, runs other code, is too slow or sends a plan that doesn't pass.
+  `planner.settings` says `ignored` with why while there's none to plan on.
 - `drive` (for all areas, or an area's own with `planner.area.set`): `forward`; `slope`: lanes only, up forwards, an S
   backing down to the next lane, down it backwards (no turning on a slope); `reverse`: the whole plan backwards. Only
   where OpenMower's FTC has `back_up_with_plan` on (open_mower_ros PR #371) and the body is set, else forwards with a

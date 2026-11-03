@@ -33,7 +33,8 @@ until the next start only), plans_dir (where the plans are kept, the last DISK_P
 $ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
 map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none), workers (processes of their own that
 plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once too; 0: all in this one), calib_dir
-(planner.calib's recording and result, default $ROS_HOME/mowbite_calib). The request always gives the lane
+(planner.calib's recording and result, default $ROS_HOME/mowbite_calib), remote (the house computer's messages on the
+mower's broker, see remote_planning; default true). The request always gives the lane
 spacing (with mower_width the overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a
 concentric fill_pattern; settings beat the first four (an area's own outline_count, ... beat those), not the others
 (an area's planner property can). The angle too, unless
@@ -46,7 +47,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         choices, settable. Not settable: the skip flags of mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
                         type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r.
-                        leftovers_auto (the node's too): see below. drive (forward, slope, reverse; for all areas and
+                        leftovers_auto (the node's too): see below. remote_planning (the node's): see below, ignored
+                        with why while there's no house computer with the code of here (no house computer, house
+                        computer out of date); the block remote: {reachable, arch, code_match, stack_match, why}. drive (forward, slope, reverse; for all areas and
                         an area's own, which beats it): ignored with why where it's never planned (see
                         drive_ignored), else forces {body_fit, spin_margin} with forces_why: what slope and reverse
                         plan with whatever is set; with the setting for all areas slope or reverse body_fit and
@@ -110,7 +113,7 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         plan was there already (planned ahead or asked for before). duration: {min, model_min, factor,
                         runs}, how long mowing it takes, see TIMING_RUNS. ahead: true, it waits behind what's asked
                         for and the checks after a mow (with the node's own planning ahead: the app's preview of the
-                        areas not looked at). The same request (but ahead and slot) waiting or planned meanwhile is
+                        areas not looked at). planned_on: mower or house (remote_planning). The same request (but ahead and slot) waiting or planned meanwhile is
                         planned once, the same answer for each (kept: true for those that joined it), one without
                         ahead takes such a request planned ahead on before the others. slot (a string the app picks):
                         a request with that slot still waiting is answered with the error SUPERSEDED instead
@@ -138,7 +141,16 @@ stage (angles, spacing, route, mop_up, done; only to show), done of of (growing)
 estimate_s (what that area's last planning took, null before one), error, waiting_n (the jobs waiting in the worker),
 waiting (the first WAITING_SHOWN of them in the order they'll run: [{area_id (null: none, or mower_logic's), job (plan,
 drive, leftovers, mower, after_mow), rank (mower, asked, after_mow, ahead), ids (the RPC requests waiting for it, none
-for the node's own)}])}, also as the queue changes when nothing plans.
+for the node's own)}]), planned_on (mower, house), remote_why (why not on the house computer after all, null)}, also as
+the queue changes when nothing plans.
+
+remote_planning: plans (mower_logic's, planner.plan's, planned ahead; not the leftovers') are asked of a computer in
+the house first (mowbite_planner.house, see RemotePlanning): over the mower's own broker, where its hello says it plans
+with this code on this stack. The node builds the plan's geometry itself and takes it only where its own checks
+(mowbite_planner.remote.refused: its form, check_plan's rules with this body) find nothing; else, when the house
+computer says nothing for REMOTE_STALL s or has no plan in REMOTE_TIMES what the area's last planning took, it plans
+itself (why in the log and the progress). The planner's no there is its no. The plans mower_logic got stay kept (in
+memory and plans_dir) till its job ends (JOB_COMPLETE, JOB_RESET): resuming finds them, wherever they were planned.
 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
@@ -172,6 +184,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import weakref
 
 import rospy
@@ -194,12 +207,14 @@ from mowbite_planner import backing, calibrecord
 from mowbite_planner import config as limits
 from mowbite_planner.config import IGNORED
 from mowbite_planner.planner import plan_footprint, set_workers
-from mowbite_planner.export import ANSWER_TOO_BIG, MAX_PATH_POSES, plan_pieces, too_big
+from mowbite_planner.export import ANSWER_TOO_BIG, MAX_ANSWER, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import clean_polygon, polygonal, polygons, union
 from mowbite_planner.mapfile import (_points, area_job, area_settings, margins_for, match_area, mow_areas,
                                      openmower_settings)
 from mowbite_planner.mqtt_service import PlannerService
+from mowbite_planner.remote import (MAX_PACKED, PART, TOPIC, RemoteError, canon, code_version, loads, plan_from,
+                                    plan_key, refused, request_json, stack, unpack)
 from mowbite_planner.report import drive_time, track_mowed
 from mowbite_sim.simulate import MowerModel, evaluate, simulate
 
@@ -228,10 +243,11 @@ POINTS = ('robot_outline',)
 PLANNERS = ('mowbite', 'slic3r')
 CLASSIC_SERVICE = '/slic3r_classic/plan_path'
 CLASSIC_WAIT = 5.0  # s it waits for that service
-# the node's own settings, kept with the planner's: which planner, and leftovers_auto (see the top)
-NODE_SETTINGS = ('planner', 'leftovers_auto')
+# the node's own settings, kept with the planner's: which planner, leftovers_auto and remote_planning (see the top)
+NODE_SETTINGS = ('planner', 'leftovers_auto', 'remote_planning')
 # own: the ones of MOWER_LOGIC set here, they beat mower_logic's
-Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner leftovers_auto')
+Setup = collections.namedtuple('Setup', 'mower_width base own_angle stored own planner leftovers_auto '
+                               'remote_planning')
 RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0, limits.MAX_TURN_RADIUS),
           'angle_increment_every': (1, None),
           'perimeter_passes': (-1, limits.MAX_PASSES), 'obstacle_passes': (-1, limits.MAX_PASSES),
@@ -248,6 +264,8 @@ CACHED_PLANS = 16
 # the planner's no to a request kept too (in memory): an area too small asked for again doesn't take as long again
 REFUSED = 64
 DISK_PLANS = 16
+# in plans_dir: the keys of the plans of the job mower_logic mows (MowbitePlannerRos1.pin)
+PINNED_FILE = 'job.json'
 # s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
 # mow and the app's preview find it
 PLAN_AHEAD_DELAY = 5.0
@@ -290,6 +308,22 @@ HOLD_BROKER = ('127.0.0.1', 1883)
 HOLD_TOPIC = 'mowbite/hold'
 HOLD_MAX = 1800.0
 HOLD_SETTLE = 2.0
+# remote_planning: plans asked of a computer in the house (RemotePlanning, the parameter remote) over that broker too.
+# s a hello of the house counts after it was sent; s waited for its plan at least, else so many times what the area's
+# last planning took (REMOTE_FIRST without one), and at most REMOTE_STALL s without a word from it; s it isn't asked
+# after it didn't answer; s waited after the start for the house to plan with the code of here (its watcher fetches
+# it); bytes of a hello, progress or answer header at most
+REMOTE = True
+REMOTE_BROKER = HOLD_BROKER
+REMOTE_FRESH = 90.0
+REMOTE_MIN_WAIT = 30.0
+REMOTE_TIMES = 3.0
+REMOTE_FIRST = 300.0
+REMOTE_STALL = 10.0
+REMOTE_QUIET = 600.0
+REMOTE_CATCH_UP = 120.0
+REMOTE_SETTLE = 3.0
+REMOTE_SMALL = 65536
 # s a finished mow's track is waited for before it's read: xbot_monitoring writes it every 30 s and the rest when the
 # job ends (mower_logic's next STATE event of another job or none: idle), then TRACK_SETTLE s for that to be on disk
 TRACK_WAIT = 900.0
@@ -488,13 +522,15 @@ class PlanProgress:
     them with the time that area's last planning took (estimate_s; without one more slowly), so a bar keeps moving while
     a long step runs in a process of its own. A planning of no area of the map (an outline asked for) isn't shown: the
     messages stay the last area's. waiting() (the worker's): what waits, in every message; when no area's planning runs
-    a change of it is sent too (a while after it, if it's still changed then: a job begun at once isn't)."""
+    a change of it is sent too (a while after it, if it's still changed then: a job begun at once isn't). planned_on:
+    where it's planned (mower, or house with remote_planning, see where), remote_why: why not on the house after all."""
 
     def __init__(self, publish, waiting=lambda: (0, [])):
         self.publish, self.waiting = publish, waiting
         self.lock = threading.Lock()
         self.area, self.key, self.stage, self.done, self.running, self.sent = None, None, None, 0, False, 0.0
         self.started, self.ended, self.error, self.unshown = None, None, None, False
+        self.on, self.remote_why = 'mower', None
         self.told = (0, [])  # (the waiting jobs the last message had)
         self.later = None  # (the timer sending a change of them)
         self.took = {}  # area id: s its last planning took
@@ -507,8 +543,17 @@ class PlanProgress:
                 return
             self.area, self.key, self.stage, self.part, self.done = area_id, key, 'angles', 0.0, 0
             self.started, self.ended, self.error, self.running = time.time(), None, None, True
+            self.on, self.remote_why = 'mower', None
         self.send()
         threading.Thread(target=self.tick, name='planner progress', daemon=True).start()
+
+    def where(self, on, why=None):
+        """It's planned on the mower or the house (computer), why not on the house after all."""
+        with self.lock:
+            if self.unshown:
+                return
+            self.on, self.remote_why = on, why
+        self.send(at_once=True)
 
     def step(self, stage, done, of):
         """plan_coverage's progress."""
@@ -575,7 +620,8 @@ class PlanProgress:
                        'started': round(self.started, 1) if self.started is not None else None,
                        'elapsed_s': round(elapsed, 1) if elapsed is not None else None,
                        'estimate_s': round(estimate, 1) if estimate else None, 'error': self.error,
-                       'waiting_n': waiting[0], 'waiting': waiting[1]}
+                       'waiting_n': waiting[0], 'waiting': waiting[1], 'planned_on': self.on,
+                       'remote_why': self.remote_why}
         try:
             self.publish(json.dumps(message))
         except Exception as e:  # noqa: BLE001 - showing progress must not take a planning down
@@ -1039,6 +1085,210 @@ class HoldReader:
         return ''
 
 
+class RemotePlanning:
+    """remote_planning: plans asked of a computer in the house (mowbite_planner.house there) over the mower's own
+    broker (REMOTE_BROKER, like HoldReader; paho-mqtt connects again by itself), its topics under remote.TOPIC. The
+    house's hello (retained, every remote.HELLO_EVERY s: its code, stack, arch) says whether it's there and plans as
+    here; want (retained) tells it what runs here (code, stack): its watcher fetches that code. ask() sends a request
+    and waits for its answer, a header and the plan packed in parts. Only what comes for the request waiting is taken
+    (with its key and the code of here), everything else is dropped."""
+
+    def __init__(self, code, client=None):
+        self.code, self.stack = code, stack()
+        self.cond = threading.Condition()
+        self.why = 'not connected yet'  # why there's no house, '' when connected
+        self.hello, self.heard = None, 0.0  # the house's last hello and when it was sent (time.monotonic())
+        self.open = None  # the request waiting (ask)
+        self.quiet = 0.0  # (time.monotonic()) it isn't asked till then: it didn't answer
+        self.started, self.connected = time.monotonic(), 0.0
+        self.client = None
+        if client is None:
+            try:
+                import paho.mqtt.client as mqtt
+            except ImportError:
+                self.why = 'no paho-mqtt'
+                return
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self.client = client
+        client.on_connect = self.on_connect
+        client.on_disconnect = self.on_disconnect
+        client.on_message = self.on_message
+        client.reconnect_delay_set(1, 10)
+        client.connect_async(*REMOTE_BROKER)
+        client.loop_start()
+
+    def on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code.is_failure:
+            with self.cond:
+                self.why = 'connection refused (%s)' % reason_code
+            return
+        with self.cond:
+            self.why, self.hello, self.connected = '', None, time.monotonic()  # (the retained hello comes again)
+        client.subscribe([(TOPIC + topic, 1) for topic in ('hello', 'progress/+', 'answer/+', 'answer/+/+')])
+        client.publish(TOPIC + 'want', json.dumps({'code': self.code, 'stack': self.stack}), qos=1, retain=True)
+
+    def on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        with self.cond:
+            self.why, self.hello = 'no connection to %s:%d' % REMOTE_BROKER, None
+            self.cond.notify_all()
+
+    def on_message(self, client, userdata, msg):
+        if not msg.topic.startswith(TOPIC):
+            return
+        topic, payload = msg.topic[len(TOPIC):], bytes(msg.payload)
+        if topic == 'hello':
+            self.on_hello(payload, bool(getattr(msg, 'retain', False)))
+            return
+        kind, _, rest = topic.partition('/')
+        rid, _, part = rest.partition('/')
+        step = None
+        with self.cond:
+            asked = self.open
+            if asked is None or rid != asked['id'] or kind not in ('progress', 'answer'):
+                return  # (another's, or one given up)
+            try:
+                if kind == 'progress':
+                    step = self.progress_of(payload)
+                elif part:
+                    self.part_of(asked, part, payload)
+                elif asked['answer'] is None:
+                    asked['answer'] = self.answer_of(asked, payload)
+            except RemoteError:
+                return  # (not the house's: no word from it)
+            asked['heard'] = time.monotonic()
+            self.cond.notify_all()
+        if step is not None:
+            asked['step'](*step)
+
+    def on_hello(self, payload, retained):
+        """The house's hello: {code, stack, arch, at (unix s it was sent)}, empty: gone. A retained one counts as sent
+        when it says (where that's no more than REMOTE_FRESH s ago here), another as sent now."""
+        hello = None
+        try:
+            if payload:
+                hello = loads(payload) if len(payload) <= REMOTE_SMALL else None
+                if not isinstance(hello, dict) or not isinstance(hello.get('code'), str) or \
+                        not isinstance(hello.get('stack'), dict) or not isinstance(hello.get('at'), (int, float)):
+                    raise RemoteError('not a hello')
+        except RemoteError as e:
+            rospy.logwarn_throttle(600, 'MowBite Planner: the house computer\'s hello not taken: %s' % e)
+            hello = None
+        with self.cond:
+            self.hello = hello
+            age = max(0.0, time.time() - hello['at']) if hello is not None and retained else 0.0
+            self.heard = time.monotonic() - min(age, 2.0 * REMOTE_FRESH)
+            self.cond.notify_all()
+
+    @staticmethod
+    def progress_of(payload):
+        got = loads(payload) if len(payload) <= REMOTE_SMALL else None
+        if not isinstance(got, dict) or not isinstance(got.get('stage'), str) or len(got['stage']) > 32 or \
+                not all(isinstance(got.get(n), int) and not isinstance(got[n], bool) for n in ('done', 'of')):
+            raise RemoteError('progress not readable')
+        return got['stage'], max(0, got['done']), max(1, got['of'])
+
+    def answer_of(self, asked, payload):
+        """The answer's header: {id, key, code, ok, parts, bytes, sha256} or {..., ok: false, error, refused}."""
+        got = loads(payload) if len(payload) <= REMOTE_SMALL else None
+        if not isinstance(got, dict) or got.get('key') != asked['key'] or got.get('code') != self.code:
+            raise RemoteError('not for this request')
+        if got.get('ok') is not True:
+            error = got.get('error')
+            return {'error': error[:500] if isinstance(error, str) else 'no plan',
+                    'refused': got.get('refused') is True and isinstance(error, str)}
+        parts, size, digest = got.get('parts'), got.get('bytes'), got.get('sha256')
+        if not (isinstance(parts, int) and isinstance(size, int) and isinstance(digest, str)) or \
+                not 0 < parts <= MAX_PACKED // PART + 1 or not 0 < size <= MAX_PACKED or len(digest) != 64:
+            raise RemoteError('header not readable')
+        return {'parts': parts, 'bytes': size, 'sha256': digest}
+
+    @staticmethod
+    def part_of(asked, part, payload):
+        if not part.isdigit() or len(part) > 3 or int(part) > MAX_PACKED // PART or len(payload) > PART:
+            raise RemoteError('a part that isn\'t one')
+        asked['parts'][int(part)] = payload
+
+    def state(self):
+        """(why the house isn't asked now, '' where it is; planner.settings' block remote: {reachable, arch,
+        code_match, stack_match, why})."""
+        with self.cond:
+            why, hello, heard = self.why, self.hello, self.heard
+        reachable = not why and hello is not None and time.monotonic() - heard <= REMOTE_FRESH
+        code_match = reachable and hello['code'] == self.code
+        stack_match = reachable and hello['stack'] == self.stack
+        why = '' if code_match and stack_match else 'house computer out of date' if reachable else 'no house computer'
+        return why, {'reachable': reachable, 'arch': hello.get('arch') if reachable else None,
+                     'code_match': code_match, 'stack_match': stack_match, 'why': why or None}
+
+    def ready(self):
+        """Why the house isn't asked now ('' where it is): state's, or it didn't answer a while ago. It waits
+        REMOTE_SETTLE s after connecting for the retained hello, and within REMOTE_CATCH_UP s of the start for a house
+        on the same stack but another code: its watcher fetches the code of here (a planner update)."""
+        while True:
+            why, house = self.state()
+            with self.cond:
+                now = time.monotonic()
+                if not why:
+                    return '' if now >= self.quiet else 'it didn\'t answer, asked again from %s' % time.strftime(
+                        '%H:%M', time.localtime(time.time() + self.quiet - now))
+                fetching = house['stack_match'] and now < self.started + REMOTE_CATCH_UP
+                if not (fetching or self.connected and now < self.connected + REMOTE_SETTLE):
+                    return why
+                self.cond.wait(1.0)
+
+    def ask(self, key, form, wait, step):
+        """The house's plan for the request with key (remote.request_json's form): (the plan packed, '') or (None, why
+        not: no word from the house for REMOTE_STALL s, none within wait s, its answer). step(stage, done, of): the
+        house's progress. PlanningError: the planner's no to it there."""
+        rid = uuid.uuid4().hex
+        try:
+            payload = json.dumps({'id': rid, 'key': key, 'code': self.code, 'stack': self.stack, 'wait_s': wait,
+                                  'form': form}, allow_nan=False, separators=(',', ':'))
+        except ValueError:
+            return None, 'a number in the request isn\'t finite'
+        if len(payload) > MAX_ANSWER:
+            return None, 'the request is too big to send'
+        began = time.monotonic()
+        with self.cond:
+            self.open = {'id': rid, 'key': key, 'heard': began, 'answer': None, 'parts': {}, 'step': step}
+        try:
+            self.client.publish(TOPIC + 'request', payload, qos=1)
+            with self.cond:
+                while True:
+                    got = self.answered(self.open)
+                    if got is not None:
+                        return got
+                    now = time.monotonic()
+                    stalled, late = now - self.open['heard'] > REMOTE_STALL, now - began > wait
+                    if stalled or late or self.why:
+                        if not self.why:
+                            self.quiet = now + REMOTE_QUIET
+                        return None, self.why or ('no word from it for %.0f s' % REMOTE_STALL if stalled else
+                                                  'no plan from it within %.0f s' % wait)
+                    self.cond.wait(1.0)
+        finally:
+            with self.cond:
+                self.open = None
+
+    @staticmethod
+    def answered(asked):
+        """(the plan packed, '') or (None, why not) once the answer's in, None till then. PlanningError: the
+        planner's no."""
+        answer = asked['answer']
+        if answer is None:
+            return None
+        if 'error' in answer:
+            if answer.get('refused'):
+                raise PlanningError(answer['error'])
+            return None, answer['error']
+        if any(k not in asked['parts'] for k in range(answer['parts'])):
+            return None if len(asked['parts']) <= answer['parts'] else (None, 'more parts than it said')
+        data = b''.join(asked['parts'][k] for k in range(answer['parts']))
+        if len(data) != answer['bytes'] or hashlib.sha256(data).hexdigest() != answer['sha256']:
+            return None, 'its answer is broken'
+        return data, ''
+
+
 class MowbitePlannerRos1:
     def __init__(self):
         # (after rospy.init_node: it sets up rosout's handlers anew)
@@ -1083,6 +1333,10 @@ class MowbitePlannerRos1:
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
         self.code = code_version()
         self.drop_old_plans()
+        self.pinned = self.read_pinned() if self.plans_dir else set()
+        # remote_planning: the house computer, why the last plan wasn't planned there (in the log once)
+        self.remote = RemotePlanning(self.code) if rospy.get_param('~remote', REMOTE) else None
+        self.remote_said = ''
         # planner.calib.*: the recording and its result in calib_dir
         self.calib = Calibration(os.path.expanduser(rospy.get_param('~calib_dir', os.path.join(
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_calib'))), lambda payload: mqtt.publish(
@@ -1290,8 +1544,10 @@ class MowbitePlannerRos1:
         if planner not in PLANNERS:
             raise PlanningError('planner must be one of %s' % ', '.join(PLANNERS))
         leftovers_auto = settings.pop('leftovers_auto', False)
-        if not isinstance(leftovers_auto, bool):
-            raise PlanningError('leftovers_auto must be true or false')
+        remote_planning = settings.pop('remote_planning', False)
+        for name, value in (('leftovers_auto', leftovers_auto), ('remote_planning', remote_planning)):
+            if not isinstance(value, bool):
+                raise PlanningError('%s must be true or false' % name)
         # OpenMower's FTC controller only drives forwards: lanes far enough apart that every turn is a forward U-turn
         # of turn_radius. ~settings can change that (and anything else)
         base = PlannerConfig(lane_order='skip').with_overrides(settings)
@@ -1302,11 +1558,11 @@ class MowbitePlannerRos1:
         # has its own
         own_angle = 'angle' in settings or 'angle_strategy' in settings
         # as the planner took them: ints of a float setting as floats, turn_types as a list
-        node = {'planner': planner, 'leftovers_auto': leftovers_auto}
+        node = {'planner': planner, 'leftovers_auto': leftovers_auto, 'remote_planning': remote_planning}
         stored = {n: node[n] if n in node else getattr(blade if n == 'mower_width' else base, n) for n in stored}
         return Setup(blade.mower_width, base, own_angle,
                      {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()},
-                     frozenset(n for n in settings if n in MOWER_LOGIC), planner, leftovers_auto)
+                     frozenset(n for n in settings if n in MOWER_LOGIC), planner, leftovers_auto, remote_planning)
 
     def read_stored(self):
         if not self.file or not os.path.exists(self.file):
@@ -1393,11 +1649,18 @@ class MowbitePlannerRos1:
                           'type': 'string', 'settable': True, 'choices': list(PLANNERS)}
         out['leftovers_auto'] = {'value': current.leftovers_auto, 'default': defaults.leftovers_auto,
                                  'stored': 'leftovers_auto' in current.stored, 'type': 'boolean', 'settable': True}
+        why, house = self.remote.state() if self.remote is not None else ('no house computer', None)
+        out['remote_planning'] = {'value': current.remote_planning, 'default': defaults.remote_planning,
+                                  'stored': 'remote_planning' in current.stored, 'type': 'boolean', 'settable': True}
+        if why:
+            out['remote_planning']['ignored'] = why
         # angle_increment: the steps turned so far and the finished mows towards the next one (and all of them)
         steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
                 'angle_steps': steps, 'angle_mows': mows,
-                'angle_turned': steps * current.base.angle_increment, 'finished_mows': self.angle['finished']}
+                'angle_turned': steps * current.base.angle_increment, 'finished_mows': self.angle['finished'],
+                'remote': house or {'reachable': False, 'arch': None, 'code_match': False, 'stack_match': False,
+                                    'why': why}}
 
     def rpc_angle_reset(self, params=None):
         """Back to no steps turned (angle_increment)."""
@@ -1454,6 +1717,8 @@ class MowbitePlannerRos1:
                 self.job = event.get('job_id') or ''
                 self.job_change.notify_all()
             return
+        if event.get('type') in ('JOB_RESET', 'JOB_COMPLETE'):
+            self.unpin()  # (the job's plans aren't resumed any more)
         if event.get('type') == 'JOB_RESET':
             armed = self.armed
             if armed is not None and armed['served']:  # (the leftovers' job thrown away: the next mow is a whole one)
@@ -1550,7 +1815,7 @@ class MowbitePlannerRos1:
             service.own = current.own
         service.map = data
         service.params = rospy.get_param('/mower_logic', {})
-        self.local.kept = False
+        self.local.kept, self.local.on = False, 'mower'
         got = []
         if mowed is not None:
             service.planner = lambda *args, **kw: got.append(self.left_plan(*args, mowed=mowed, **kw)) or got[-1]
@@ -1560,6 +1825,7 @@ class MowbitePlannerRos1:
         if mowed is not None and keep is not None:
             keep.extend(got)
         result['kept'] = self.local.kept  # planned before (ahead, or the same asked for already)
+        result['planned_on'] = self.local.on
         if got:
             result['duration'] = self.duration(self.estimate(got[-1]))
         return result
@@ -2181,8 +2447,9 @@ class MowbitePlannerRos1:
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
                   reach_over=(), unmowed=()):
-        """(plan, whether it was kept from before), see plan_coverage. drive slope or reverse forwards where it's
-        ignored (driven), said in its warnings."""
+        """(plan, whether it was kept from before), see plan_coverage; with remote_planning planned on the house
+        computer where it can (house_plan). drive slope or reverse forwards where it's ignored (driven), said in its
+        warnings. self.local: kept, the plan's key and where it was planned (on: mower or house)."""
         cfg, why = self.driven(cfg)
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
@@ -2193,14 +2460,14 @@ class MowbitePlannerRos1:
         margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
         args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
         reach_over, unmowed = canon(reach_over), canon(unmowed)
-        key = hashlib.sha1((self.code + repr(args) + (repr(reach_over) if reach_over else '') +
-                            (repr(unmowed) if unmowed else '')).encode()).hexdigest()
+        form = request_json(args, reach_over, unmowed)
+        key = self.local.key = plan_key(self.code, form)
         with self.plans_lock:
-            plan = self.plans.get(key)
-            if plan is not None:
+            got = self.plans.get(key)
+            if got is not None:
                 self.plans.move_to_end(key)
-                self.local.kept = True
-                return self.told(plan, why), True
+                self.local.kept, self.local.on = True, got[1]
+                return self.told(got[0], why), True
             if key in self.refused:
                 kind, message = self.refused[key]
                 raise kind(message)
@@ -2208,15 +2475,17 @@ class MowbitePlannerRos1:
         with busy:  # (the same asked for meanwhile, planning ahead and a mow: it waits for this one's)
             try:
                 with self.plans_lock:
-                    plan = self.plans.get(key)
-                if plan is None:
-                    plan = self.read_plan(key)
-                kept = self.local.kept = plan is not None
-                if plan is None:
-                    self.progress.begin(self.area_of(boundary), key)
+                    got = self.plans.get(key)
+                if got is None:
+                    got = self.read_plan(key)
+                kept = self.local.kept = got is not None
+                if got is None:
+                    area_id = self.area_of(boundary)
+                    self.progress.begin(area_id, key)
                     try:
-                        plan = plan_coverage(*args, reach_over=reach_over, unmowed=unmowed,
-                                             progress=self.progress.step)
+                        plan = self.house_plan(key, form, args, reach_over, unmowed, area_id)
+                        got = (plan, 'house') if plan is not None else (plan_coverage(
+                            *args, reach_over=reach_over, unmowed=unmowed, progress=self.progress.step), 'mower')
                     except Exception as e:
                         self.progress.end(str(e))
                         if isinstance(e, PlanningError):  # (a no from the request alone, never a crash)
@@ -2226,16 +2495,85 @@ class MowbitePlannerRos1:
                                     self.refused.popitem(last=False)
                         raise
                     self.progress.end()
-                    self.write_plan(key, plan)
+                    self.write_plan(key, got)
+                self.local.on = got[1]
                 with self.plans_lock:
-                    self.plans[key] = plan
+                    self.plans[key] = got
                     self.plans.move_to_end(key)
-                    while len(self.plans) > CACHED_PLANS:
-                        self.plans.popitem(last=False)
+                    for old in [k for k in self.plans if k not in self.pinned][:max(0, len(self.plans) -
+                                                                                    CACHED_PLANS)]:
+                        del self.plans[old]
             finally:
                 with self.plans_lock:
                     self.planning.pop(key, None)
-        return self.told(plan, why), kept
+        return self.told(got[0], why), kept
+
+    def house_plan(self, key, form, args, reach_over, unmowed, area_id):
+        """remote_planning: the plan from the house computer where it's asked and its plan taken (read with the
+        geometry and config of here, nothing refused: remote.plan_from, refused), else None, why in the log (when it
+        changed) and the progress. Waits REMOTE_TIMES what the area's last planning took (REMOTE_MIN_WAIT at least,
+        REMOTE_FIRST without one), REMOTE_STALL s without a word. PlanningError: the planner's no there."""
+        if not self.current.remote_planning or self.remote is None:
+            return None
+        why = self.remote.ready()
+        if not why:
+            took = self.progress.took.get(area_id)
+            self.progress.where('house')
+            data, why = self.remote.ask(key, form, max(REMOTE_MIN_WAIT, REMOTE_TIMES * took) if took else REMOTE_FIRST,
+                                        self.progress.step)
+            if data is not None:
+                try:
+                    plan = plan_from(unpack(data), args, reach_over, unmowed)
+                    why = refused(plan)
+                    if not why:
+                        self.remote_said = ''
+                        return plan
+                    why = 'its plan refused: ' + why
+                except Exception as e:  # noqa: BLE001 - whatever it sent, planned here then
+                    why = 'its plan: %s: %s' % (type(e).__name__, e)
+        if why != self.remote_said:
+            rospy.logwarn('MowBite Planner: planned here, not on the house computer: %s', why)
+            self.remote_said = why
+        self.progress.where('mower', why)
+        return None
+
+    def pin(self, key):
+        """The plan of key is the job's (mower_logic got it): kept, in memory and in plans_dir, till the job ends
+        (JOB_COMPLETE or JOB_RESET, unpin), over a restart too (in PINNED_FILE). Resuming the job finds it, even where
+        it came from the house computer and that's gone."""
+        with self.plans_lock:
+            if key in self.pinned:
+                return
+            self.pinned.add(key)
+            pinned = sorted(self.pinned)
+        self.write_pinned(pinned)
+
+    def unpin(self):
+        with self.plans_lock:
+            if not self.pinned:
+                return
+            self.pinned = set()
+        self.write_pinned([])
+
+    def write_pinned(self, keys):
+        if not self.plans_dir:
+            return
+        try:
+            os.makedirs(self.plans_dir, exist_ok=True)
+            path = os.path.join(self.plans_dir, PINNED_FILE)
+            with open(path + '.tmp', 'w') as f:
+                json.dump({'keys': keys}, f)
+            os.replace(path + '.tmp', path)
+        except OSError as e:
+            rospy.logwarn('MowBite Planner: the job\'s plans not noted in %s: %s', self.plans_dir, e)
+
+    def read_pinned(self):
+        try:
+            with open(os.path.join(self.plans_dir, PINNED_FILE)) as f:
+                keys = json.load(f)['keys']
+            return {k for k in keys if isinstance(k, str)}
+        except (OSError, ValueError, KeyError, TypeError):
+            return set()
 
     def area_of(self, boundary):
         """The id of the map's mowing area with this outline (None: none)."""
@@ -2248,7 +2586,7 @@ class MowbitePlannerRos1:
         return os.path.join(self.plans_dir, '%s-%s.pkl' % (self.code[:12], key))
 
     def drop_old_plans(self):
-        """The kept plans of another planner code go (and what a write cut off left)."""
+        """The kept plans of another planner code go (and what a write cut off left), the job's too."""
         if not self.plans_dir:
             return
         own = self.code[:12] + '-'
@@ -2260,27 +2598,33 @@ class MowbitePlannerRos1:
                     pass
 
     def read_plan(self, key):
+        """(plan, where it was planned) kept in plans_dir, None: none."""
         if not self.plans_dir:
             return None
         try:
             with open(self.plan_file(key), 'rb') as f:
-                return pickle.load(f)
+                kept = pickle.load(f)  # (written here only: write_plan, never one of the house computer's)
+            return kept['plan'], kept['on']
         except FileNotFoundError:
             return None
         except Exception as e:  # noqa: BLE001 - a broken or old file is planned again
             rospy.logwarn('MowBite Planner: kept plan %s not readable: %s', key, e)
             return None
 
-    def write_plan(self, key, plan):
+    def write_plan(self, key, got):
+        """(plan, where it was planned) kept in plans_dir, the last DISK_PLANS and the job's (pin)."""
         if not self.plans_dir:
             return
         try:
             os.makedirs(self.plans_dir, exist_ok=True)
             path = self.plan_file(key)
             with open(path + '.tmp', 'wb') as f:
-                pickle.dump(plan, f, protocol=4)
+                pickle.dump({'plan': got[0], 'on': got[1]}, f, protocol=4)
             os.replace(path + '.tmp', path)
-            files = sorted(glob.glob(os.path.join(self.plans_dir, '*.pkl')), key=os.path.getmtime)
+            with self.plans_lock:
+                pinned = {self.plan_file(k) for k in self.pinned}
+            files = [f for f in sorted(glob.glob(os.path.join(self.plans_dir, '*.pkl')), key=os.path.getmtime)
+                     if f not in pinned]
             for old in files[:-DISK_PLANS]:
                 os.remove(old)
         except (OSError, pickle.PicklingError) as e:
@@ -2338,6 +2682,7 @@ class MowbitePlannerRos1:
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
                                         drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over,
                                         unmowed=unmowed)
+            self.pin(self.local.key)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return res
@@ -2374,27 +2719,6 @@ class MowbitePlannerRos1:
             path.poses.append(PoseStamped(header=header, pose=Pose(position=Point(x=p.x, y=p.y, z=0.0),
                                                                    orientation=Quaternion(x=x, y=y, z=z, w=w))))
         return path
-
-
-def canon(value):
-    """Points, lists of them and so on as tuples of floats: the same whichever way they came."""
-    if isinstance(value, (list, tuple)):
-        return tuple(canon(v) for v in value)
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    return value
-
-
-def code_version():
-    """A digest of the planner's code: a plan kept on disk counts for that code only. (Built with catkin, the package
-    first found is a stand-in that only points to the code, its __path__ has both.)"""
-    digest = hashlib.sha1()
-    for root in mowbite_planner.__path__:
-        for name in sorted(os.listdir(root)):
-            if name.endswith('.py'):
-                with open(os.path.join(root, name), 'rb') as f:
-                    digest.update(name.encode() + b'\0' + f.read())
-    return digest.hexdigest()
 
 
 def read_track(path):

@@ -222,11 +222,14 @@ const INFO = {
   leftovers_auto: ['extras', 'Go back for what it missed', 'After every mow the planner looks at the real track. ' +
                    'If 0.3 m² or more was left, it sends the mower out again once (not in the rain).'],
   planner: ['extras', 'Planner', 'mowbite, or slic3r: OpenMower\'s own planner (no body check).'],
+  remote_planning: ['extras', 'Plan on a computer in the house', 'Where one runs the planner\'s house service ' +
+                    '(its compose.yaml): quicker. The mower checks every plan and plans itself where that one ' +
+                    'isn\'t there.'],
 };
 const GROUPS = [['mower', 'Your mower', true], ['keep', 'Keeping off edges and obstacles', true],
                 ['loops', 'Loops', false], ['lanes', 'Lanes', false], ['turns', 'Turns', false],
                 ['drives', 'Driving between parts', false], ['extras', 'Extras', false], ['other', 'Other', false]];
-const NODE_ONLY = ['planner', 'leftovers_auto'];  // the node's own, planner.plan doesn't take them
+const NODE_ONLY = ['planner', 'leftovers_auto', 'remote_planning'];  // the node's own, planner.plan doesn't take them
 const PERCENT = ['overlap'];
 
 const $ = id => document.getElementById(id);
@@ -235,7 +238,7 @@ const NS = 'http://www.w3.org/2000/svg';
 let settings = {}, turned = {}, pending = {}, mapData = null, areaId = null, plan = null, view = null, asked = 0;
 // 'all': the settings for all areas (pending), 'area': the chosen area's own (pendingArea); an obstacle picked
 let scope = 'all', pendingArea = {}, obstacleId = null;
-const AREA_SKIP = ['angle_increment_every', 'planner', 'leftovers_auto'];  // only for all areas
+const AREA_SKIP = ['angle_increment_every', 'planner', 'leftovers_auto', 'remote_planning'];  // only for all areas
 
 async function rpc(method, params) {
   const r = await fetch('rpc', {method: 'POST', headers: {'Content-Type': 'application/json'},
