@@ -692,10 +692,10 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.area.set', 'planner.calib.result', 'planner.calib.start',
-               'planner.calib.stop', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
-               'planner.settings', 'planner.settings.set', 'planner.simulate', 'planner.simulate.cancel',
-               'planner.simulate.status']
+    methods = ['planner.angle.reset', 'planner.area.set', 'planner.calib.check', 'planner.calib.result',
+               'planner.calib.start', 'planner.calib.stop', 'planner.drive', 'planner.leftovers', 'planner.log',
+               'planner.plan', 'planner.settings', 'planner.settings.set', 'planner.simulate',
+               'planner.simulate.cancel', 'planner.simulate.status']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -2220,8 +2220,8 @@ CALIB_RESULT = {'ready': True, 'version': 'mowbite-calib/1', 'based_on': {'m': 4
                 'warnings': [], 'values': [], 'info': {}}
 
 
-def gps_message(fixed=True, x=1.0, y=2.0):
-    m = node_module.AbsolutePose(flags=2 if fixed else 4, position_accuracy=0.014, motion_vector_valid=1)
+def gps_message(fixed=True, x=1.0, y=2.0, accuracy=0.014):
+    m = node_module.AbsolutePose(flags=2 if fixed else 4, position_accuracy=accuracy, motion_vector_valid=1)
     m.pose.pose.position.x, m.pose.pose.position.y = x, y
     return m
 
@@ -2272,6 +2272,40 @@ def test_calib_refused(planner, monkeypatch):
     assert not planner.calib.recorder.recording and not calib_progress()
 
 
+def test_calib_check(planner, monkeypatch):
+    """planner.calib.check: what stands in the way of a recording, the receiver's RTK (also in the dock, where
+    OpenMower's own position doesn't use it), without recording; a mow begins without RTK fixed and waits for it."""
+    assert rpc('planner.calib.check')[0] == {'ok': False, 'rtk': None, 'problems': [
+        {'reason': 'SENSOR_MISSING', 'message': 'nothing on %s' % t}
+        for t in (node_module.CALIB_GPS, node_module.CALIB_IMU, node_module.CALIB_TWIST)] + [
+        {'reason': 'PARAM_MISSING', 'message': "OpenMower's parameter %s isn't set" % k}
+        for k in node_module.CALIB_PARAMS.values()]}
+    calib_ready(monkeypatch)
+    assert rpc('planner.calib.check')[0] == {'ok': True, 'problems': [], 'rtk': {'fixed': True, 'accuracy': 0.014}}
+    rospy.messages[node_module.CALIB_GPS] = gps_message(accuracy=0.08)
+    assert rpc('planner.calib.check')[0] == {'ok': False, 'rtk': {'fixed': False, 'accuracy': 0.08}, 'problems': [
+        {'reason': 'POSITION_ACCURACY', 'message': 'RTK fixed, but 0.080 m accuracy (0.05 m at most)'}]}
+    rospy.messages[node_module.CALIB_GPS] = gps_message(fixed=False)
+    assert rpc('planner.calib.check')[0]['problems'] == [{'reason': 'NO_RTK', 'message': 'no RTK fixed'}]
+    monkeypatch.setattr(node_module.calibrecord, 'FREE', 1 << 60)
+    assert [p['reason'] for p in rpc('planner.calib.check')[0]['problems']] == ['NO_RTK', 'DISK_SPACE']
+    assert not planner.calib.recorder.recording and not calib_progress()
+    monkeypatch.undo()
+    calib_ready(monkeypatch)
+    rospy.messages[node_module.CALIB_GPS] = gps_message(fixed=False)
+    assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'no RTK fixed'
+    assert rpc('planner.calib.start', {'mode': 'mow'}) == ({'ok': True}, None)
+    assert calib_progress()[-1]['rtk'] == {'fixed': False, 'accuracy': 0.014} and calib_progress()[-1]['runs'] == 0
+    rospy.messages[node_module.CALIB_GPS] = gps_message()  # (RTK fixed now)
+    rospy.subscribers[node_module.CALIB_GPS](rospy.messages[node_module.CALIB_GPS])
+    planner.calib.send(at_once=True)
+    assert calib_progress()[-1]['rtk'] == {'fixed': True, 'accuracy': 0.014}
+    assert rpc('planner.calib.check')[0]['problems'] == [{'reason': 'BUSY',
+                                                          'message': 'a calibration is recorded already'}]
+    assert rpc('planner.calib.stop') == ({'ok': True}, None)
+    calib_threads('calibration evaluation')
+
+
 def test_calib_records_and_evaluates(planner, monkeypatch):
     """Recorded what comes on OpenMower's topics (the old values its parameters), stopped, evaluated (in a process of
     its own, here a stand-in), the result kept; the progress all along."""
@@ -2281,7 +2315,7 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
                'rotation_left': 0.0, 'rotation_right': 0.0, 'tight_left': 0.0, 'tight_right': 0.0}
     need = node_module.calibrecord.needed('joystick')
     assert calib_progress()[-1] == dict(counted, phase='recording', ready=False, error=None, mode='joystick',
-                                        need=need)
+                                        need=need, rtk={'fixed': True, 'accuracy': 0.014})
     assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'a calibration is recorded already'
     assert rpc('planner.calib.result')[1][1] == 'the calibration is still recorded'
     imu = node_module.Imu()

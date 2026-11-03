@@ -101,7 +101,8 @@ set `overlap`.
 | `planner.simulate.cancel` | ends the running simulation |
 | `planner.angle.reset` | puts the stripe rotation (`angle_increment`) back to the start |
 | `planner.log` | the planner's last 2000 log lines since it started (`since`: only newer ones, `limit`), e.g. for an app to download |
-| `planner.calib.start` | records a drive to calibrate the mower with RTK fixed: `{"mode": "joystick"}` driven by hand in the recording mode (straight runs of 5 m and more, three slow full turns on the spot each way with a few metres straight between), `{"mode": "mow"}` the next mow; says why where it can't start |
+| `planner.calib.check` | what stands in the way of a recording (`problems`, each with `reason` and `message`) and the GNSS receiver's RTK (`fixed`, `accuracy`), also in the dock; records nothing |
+| `planner.calib.start` | records a drive to calibrate the mower, counting only what's driven with RTK fixed: `{"mode": "joystick"}` driven by hand in the recording mode (straight runs of 5 m and more, three slow full turns on the spot each way with a few metres straight between), `{"mode": "mow"}` the next mow (also begun without RTK fixed, in the dock: it waits for it); says why where it can't start |
 | `planner.calib.stop` | ends the recording (it ends by itself with enough data, after 20 min by joystick or 2 h, or after the mow), then it's evaluated |
 | `planner.calib.result` | the evaluation: ticks per metre, wheel distance and antenna offset, each new and old with its sigma and quality and whether it's fit to take, and warnings (one wheel smaller, the IMU tilted, ...). The planner never changes OpenMower's parameters |
 

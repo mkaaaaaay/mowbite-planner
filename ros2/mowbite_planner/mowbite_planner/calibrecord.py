@@ -15,7 +15,7 @@ import zlib
 from typing import Optional, Tuple
 
 from .calib import MIN
-from .calibfit import RUN_CURVE, RUN_USE, RUN_V, SMOOTH, STAND_S, STAND_TRIM, STILL, TIGHT_R, TURN_MIN
+from .calibfit import RTK_ACC, RUN_CURVE, RUN_USE, RUN_V, SMOOTH, STAND_S, STAND_TRIM, STILL, TIGHT_R, TURN_MIN
 from .calibread import FORMAT
 
 RECORDING = 'recording.jsonl.gz'
@@ -27,6 +27,8 @@ FREE = 500 * 1024 * 1024
 FREE_GOING = 100 * 1024 * 1024
 # s between two flushes (what's written so far can be read)
 FLUSH_EVERY = 5.0
+# s a GNSS line with RTK fixed counts for (the receiver sends 5 to 20 a second)
+FIX_HOLD = 1.0
 # the digits a number is written with (else 4), the ones that may be null
 DIGITS = {'t': 3, 'gx': 5, 'gy': 5, 'gz': 5, 'v': 5, 'w': 5}
 NULLS = ('vh', 'mh', 've', 'vn', 'rt')
@@ -63,10 +65,17 @@ def needed(mode: str) -> dict:
     return out
 
 
+def fixed(fix: str, acc: float) -> bool:
+    """Whether a GNSS line counts for the evaluation (calibfit: RTK fixed, RTK_ACC m at most)."""
+    return fix == 'fixed' and acc <= RTK_ACC
+
+
 class Counts:
     """How far a recording got, from the odometry as it comes (like the evaluation finds it, roughly): straight runs of
     need['run_m'] m at least (runs, m), the turns between runs each way (rad) and the tight ones' rotation (the
-    antenna), the stands (s, like calibfit's: |v| and |w| under STILL for STAND_S s, STAND_TRIM off each end)."""
+    antenna), the stands (s, like calibfit's: |v| and |w| under STILL for STAND_S s, STAND_TRIM off each end). Only
+    while the GNSS has RTK fixed (gps, FIX_HOLD s each): without it what goes on is dropped, the run, the turn after
+    the run before and the stand."""
 
     def __init__(self, need: dict) -> None:
         self.need, self.window, self.last = need, collections.deque(), None
@@ -76,8 +85,24 @@ class Counts:
         self.turns = {True: [], False: []}
         self.tight = {True: 0.0, False: 0.0}
         self.stood, self.still = 0.0, None  # (s of the stands ended, [from, to] of the one going on)
+        self.fixed_until, self.counting = -math.inf, False
+
+    def gps(self, t: float, fixed: bool) -> None:
+        self.fixed_until = t + FIX_HOLD if fixed else -math.inf
+
+    def lost(self) -> None:
+        """RTK fixed gone: what goes on dropped."""
+        self.window.clear()
+        self.last, self.straight, self.had_run, self.pending, self.still = None, False, False, None, None
+        self.run = self.rot = self.way = 0.0
 
     def add(self, t: float, v: float, w: float) -> None:
+        if t > self.fixed_until:
+            if self.counting:
+                self.lost()
+            self.counting = False
+            return
+        self.counting = True
         if abs(v) < STILL and abs(w) < STILL:
             self.still = [t if self.still is None else self.still[0], t]
         elif self.still is not None:
@@ -199,6 +224,8 @@ class Recorder:
             kind, t, fields = self.queue.popleft()
             if kind == 'twist':
                 self.counts.add(t, fields['v'], fields['w'])
+            elif kind == 'gps':
+                self.counts.gps(t, fixed(fields['fix'], fields['acc']))
             text = line(kind, t, fields)
             if text is not None:
                 lines.append(text)

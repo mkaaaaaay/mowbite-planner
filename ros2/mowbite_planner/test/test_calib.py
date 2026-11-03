@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
 import calibsim  # noqa: E402
-from mowbite_planner import calib, calibread, calibrecord  # noqa: E402
+from mowbite_planner import calib, calibfit, calibread, calibrecord  # noqa: E402
 from mowbite_planner.calib import CalibError, evaluate  # noqa: E402
 
 
@@ -254,8 +254,11 @@ def test_record_counts_like_the_evaluation(tmp_path):
     rec = calibread.read(m.recording(str(tmp_path / 'j.jsonl.gz')))
     counts, twist = calibrecord.Counts(calib.MIN['joystick']), rec.columns['twist']
     enough_at = None
-    for t, v, w in zip(twist['t'], twist['v'], twist['w']):
-        counts.add(float(t), float(v), float(w))
+    for t, kind, a, b in as_it_comes(rec):
+        if kind == 'gps':
+            counts.gps(t, a)
+            continue
+        counts.add(t, a, b)
         if enough_at is None and counts.enough():
             enough_at = t
     result = evaluate(rec)
@@ -270,10 +273,42 @@ def test_record_counts_like_the_evaluation(tmp_path):
                     'rotation_left': 2.5, 'rotation_right': 2.5, 'tight_left': 2.0, 'tight_right': 2.0}
 
 
+def as_it_comes(rec, fixed=lambda t: True):
+    """A recording's twist (t, 'twist', v, w) and GNSS lines (t, 'gps', counts for the evaluation, None) in time
+    order, the GNSS ones without RTK fixed where fixed(t) says so."""
+    twist, gps = rec.columns['twist'], rec.columns['gps']
+    lines = [(float(t), 'twist', float(v), float(w)) for t, v, w in zip(twist['t'], twist['v'], twist['w'])]
+    lines += [(float(t), 'gps', bool(f == 0 and acc <= calibfit.RTK_ACC and fixed(t)), None)
+              for t, f, acc in zip(gps['t'], rec.fixes, gps['acc'])]
+    return sorted(lines, key=lambda line: (line[0], line[1]))
+
+
+def test_record_counts_only_with_rtk_fixed(tmp_path):
+    """Without RTK fixed nothing counts (a mow begun in the dock: it waits for it); losing it drops what goes on (the
+    run, the turn after the run before, the stand), what was counted stays."""
+    rec = calibread.read(calibsim.joystick(2).recording(str(tmp_path / 'j.jsonl.gz')))
+
+    def counted(fixed):
+        counts = calibrecord.Counts(calib.MIN['joystick'])
+        for t, kind, a, b in as_it_comes(rec, fixed):
+            counts.gps(t, a) if kind == 'gps' else counts.add(t, a, b)
+        return counts.progress()
+
+    full = counted(lambda t: True)
+    assert counted(lambda t: False) == {k: 0 if isinstance(v, int) else 0.0 for k, v in full.items()}
+    t0, t1 = float(rec.columns['twist']['t'][0]), float(rec.columns['twist']['t'][-1])
+    late = counted(lambda t: t > t0 + 0.5 * (t1 - t0))  # (fixed from halfway on)
+    assert 0 < late['runs'] < full['runs'] and late['m'] < full['m'] and late['still_s'] < full['still_s']
+    gap = counted(lambda t: not t0 + 0.4 * (t1 - t0) < t < t0 + 0.45 * (t1 - t0))  # (lost for a while)
+    assert gap['runs'] < full['runs'] or gap['turns'] < full['turns']
+    assert all(gap[k] <= full[k] for k in full)
+
+
 def test_record_counts_the_stands():
     """Standing counts like the evaluation's stands (STAND_S s at least, STAND_TRIM off each end), the one going on
     too; without them it isn't enough."""
     counts = calibrecord.Counts(dict(calib.MIN['joystick'], runs=0, m=0.0, turns=0, rotation=0.0, antenna=0.0))
+    counts.fixed_until = math.inf  # (RTK fixed all along)
     for k in range(121):  # (12 s still, then moving)
         counts.add(k * 0.1, 0.0, 0.0)
     assert counts.still_s() == pytest.approx(11.0) and counts.enough()
