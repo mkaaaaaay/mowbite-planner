@@ -1,6 +1,8 @@
-"""The calibration's fits (mowbite_planner.calib): runs, stands and turns found in the odometry, and the estimates
-against RTK fixed (the antenna's points): the real way to the odometry's (sv), the real turn to the odometry's on the
-spot and in arcs (k_spin, k_arc), the antenna (a), the GNSS delay (d), the gyro's bias and scale. Only numpy."""
+"""The calibration's fits (mowbite_planner.calib): runs, stands and turns found in the odometry's way and the gyro's
+turn, and the estimates against RTK fixed (the antenna's points): the real way to the odometry's (sv), the real turn to
+the gyro's and to the wheels' on the spot and in arcs (k_spin, k_arc, by the wheels the ticks'), the antenna (a), the
+GNSS delay (d), the gyro's bias and scale. A drive's twist w is never taken: it isn't a rotation on every hardware
+(OpenMower v2 sends half the wheels' difference in m/s). Only numpy."""
 
 import math
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -25,11 +27,16 @@ RUN_USE = 1.0
 CHUNK_M = 10.0
 BEND = 0.5
 # a stand: |v| and |w| under STILL for STAND_S s at least, STAND_TRIM s off each end (the program's: its first
-# PHASE_SETTLE s off too)
+# PHASE_SETTLE s off too); the gyro's bias from where the wheels stand and it turns under GYRO_CALM rad/s, a gyro
+# sample held GYRO_HOLD s at most
 STILL = 0.01
 STAND_S = 2.0
 STAND_TRIM = 0.5
 PHASE_SETTLE = 1.0
+GYRO_CALM = 0.03
+GYRO_HOLD = 0.1
+# the ticks' way to the twist's that's believed (else the ticks aren't taken: their signs or count off)
+TICKS_FIT = (0.5, 2.0)
 # headings: from the first or last HEADING_M m of a run, HEADING_POINTS points at least (a piece's too). Turns:
 # TURN_MIN rad at least within TURN_S s, not back more than TURN_BACK; on the spot under SPIN_R m driven a rad, tight
 # (the antenna) under TIGHT_R; the open ones (a run on one side only) end TURN_SETTLE s after the rotation does, their
@@ -119,13 +126,18 @@ def bent(points: np.ndarray, model: Callable[[float], Tuple[np.ndarray, np.ndarr
 
 
 class Odometry:
-    """The wheels' way at times t: S the distance driven (m, backwards counts down) and Th the rotation (rad, left +),
-    summed up from the start with the basis; v and w smoothed over SMOOTH s; gaps [(t0, t1)] without odometry (over GAP
-    s, S and Th a guess across)."""
+    """The wheels' way and the mower's rotation at times t: S the distance driven (m, backwards counts down; from the
+    ticks with the basis, else the twist's v) and Th the rotation (rad, left +): the gyro's with its bias off (bias,
+    None: none found, then 0), without an IMU the ticks'. wheels: the ticks' rotation with the basis (None without
+    ticks), L and R their counts. v and w smoothed over SMOOTH s; gaps [(t0, t1)] without odometry or gyro (over GAP
+    s, S and Th a guess across); notes: why ticks there weren't taken."""
 
     def __init__(self, rec: Recording) -> None:
         tpm, wd = rec.ticks_per_m, rec.wheel_distance
-        ticks, twist = rec.columns['ticks'], rec.columns['twist']
+        ticks, twist, imu = rec.columns['ticks'], rec.columns['twist'], rec.columns['imu']
+        self.notes = []
+        if ticks['t'].size >= 2 and twist['t'].size >= 2 and not self._ticks_fit(ticks, twist, tpm):
+            ticks = {'t': np.zeros(0)}
         source = ticks if ticks['t'].size >= 2 else twist
         t = source['t']
         if t.size < 2:
@@ -133,24 +145,64 @@ class Odometry:
         keep = np.concatenate([[True], np.diff(t) > 0])
         t = t[keep]
         dt = np.diff(t)
+        self.wheels = self.L = self.R = None
         if source is ticks:
             left, right = ticks['l'][keep], ticks['r'][keep]
-            S, Th = (left + right) / (2 * tpm), (right - left) / (tpm * wd)
+            S = (left + right) / (2 * tpm)
+            self.L, self.R, self.wheels = left - left[0], right - right[0], (right - left) / (tpm * wd)
+            self.wheels = self.wheels - self.wheels[0]
         else:
             step = np.where(dt > GAP, np.median(dt), dt)
             S = np.concatenate([[0.0], np.cumsum(twist['v'][keep][1:] * step)])
-            Th = np.concatenate([[0.0], np.cumsum(twist['w'][keep][1:] * step)])
-        self.t, self.S, self.Th = t, S - S[0], Th - Th[0]
+        self.t, self.S = t, S - S[0]
         self.gaps = [(t[i], t[i + 1]) for i in np.flatnonzero(dt > GAP)]
         half = SMOOTH / 2
         self.v = (self.dist(t + half) - self.dist(t - half)) / SMOOTH
+        self.gyro, self.bias = imu['t'].size >= 2, None
+        if self.gyro:
+            ti, gz = imu['t'], imu['gz']
+            self.bias = self._bias(ti, gz)
+            Th = np.interp(t, ti, cumulative(ti, gz - (self.bias or 0.0), hold=GYRO_HOLD))
+            self.gaps = sorted(self.gaps + [(ti[i], ti[i + 1]) for i in np.flatnonzero(np.diff(ti) > GAP)])
+        elif self.wheels is not None:
+            Th = self.wheels
+        else:
+            raise CalibError('no rotation: neither imu nor ticks lines')
+        self.Th = Th - Th[0]
         self.w = (self.turn(t + half) - self.turn(t - half)) / SMOOTH
+
+    def _ticks_fit(self, ticks, twist, tpm: float) -> bool:
+        """Whether the ticks' way fits the twist's (TICKS_FIT; under 5 m driven: taken)."""
+        way = float(np.abs(np.diff((ticks['l'] + ticks['r']) / (2 * tpm))).sum())
+        dt = np.minimum(np.diff(twist['t']), 0.5)
+        asked = float((np.abs(twist['v'][1:]) * dt).sum())
+        if asked < 5.0 or TICKS_FIT[0] <= way / asked <= TICKS_FIT[1]:
+            return True
+        self.notes.append('the wheel ticks don\'t fit the drive\'s twist (%.1f m to %.1f m: their signs or count '
+                          'off), not taken' % (way, asked))
+        return False
+
+    def _bias(self, ti: np.ndarray, gz: np.ndarray) -> Optional[float]:
+        """The gyro's bias: its mean where the wheels stand (|v| under STILL) and it turns under GYRO_CALM rad/s for
+        STAND_S s at least, STAND_TRIM s off each end."""
+        summed = cumulative(ti, gz, hold=GYRO_HOLD)
+        half = SMOOTH / 2
+        rate = (np.interp(ti + half, ti, summed) - np.interp(ti - half, ti, summed)) / SMOOTH
+        calm = (np.abs(np.interp(ti, self.t, self.v)) < STILL) & (np.abs(rate) < GYRO_CALM)
+        inside = np.zeros(ti.size, dtype=bool)
+        for i0, i1 in _spans(calm):
+            if ti[i1] - ti[i0] >= STAND_S + 2 * STAND_TRIM:
+                inside[np.searchsorted(ti, ti[i0] + STAND_TRIM):np.searchsorted(ti, ti[i1] - STAND_TRIM)] = True
+        return float(gz[inside].mean()) if inside.sum() >= 20 else None
 
     def dist(self, at):
         return np.interp(at, self.t, self.S)
 
     def turn(self, at):
         return np.interp(at, self.t, self.Th)
+
+    def wheel_turn(self, at):
+        return np.interp(at, self.t, self.wheels)
 
     def broken(self, t0: float, t1: float) -> bool:
         return any(a < t1 and b > t0 for a, b in self.gaps)
@@ -169,13 +221,14 @@ class Odometry:
 
 
 class Turn:
-    """A turn from t0 to t1: the runs before and after it (index, None: none), the odometry's rotation omega, the way
-    driven in it; true: its real rotation (from the headings of both runs, else from the gyro), fit: the antenna's
-    (vector, squares left)."""
+    """A turn from t0 to t1: the runs before and after it (index, None: none), the odometry's rotation omega (the
+    gyro's), the wheels' (the ticks', None: none), the way driven in it; true: its real rotation (from the headings of
+    both runs, else omega scaled like the others), fit: the antenna's (vector, squares left)."""
 
     def __init__(self, t0: float, t1: float, before: Optional[int], after: Optional[int], omega: float,
-                 way: float) -> None:
+                 wheels: Optional[float], way: float) -> None:
         self.t0, self.t1, self.before, self.after, self.omega, self.way = t0, t1, before, after, omega, way
+        self.wheels = wheels
         self.left = omega > 0
         self.spin = way < SPIN_R * abs(omega)
         self.tight = way <= TIGHT_R * abs(omega)
@@ -259,7 +312,8 @@ def _turn(odo: Odometry, t0: float, t1: float, before: Optional[int], after: Opt
     omega = float(th[-1] - th[0])
     if abs(omega) < TURN_MIN or float(th.max() - th.min()) > abs(omega) + TURN_BACK:
         return None
-    return Turn(t0, t1, before, after, omega, float(np.abs(np.diff(odo.dist(times))).sum()))
+    wheels = None if odo.wheels is None else float(odo.wheel_turn(t1) - odo.wheel_turn(t0))
+    return Turn(t0, t1, before, after, omega, wheels, float(np.abs(np.diff(odo.dist(times))).sum()))
 
 
 def _settled(odo: Odometry, t0: float, t1: float, forward: bool) -> Optional[float]:
@@ -298,10 +352,10 @@ def turns(odo: Odometry, runs: List[Tuple[float, float]]) -> List[Turn]:
     return sorted(found, key=lambda turn: turn.t0)
 
 
-def ratio(group: Sequence[Turn]) -> Optional[float]:
-    """The real rotation to the odometry's: each way's (true / omega summed) and their mean."""
+def ratio(group: Sequence[Turn], wheels: bool = False) -> Optional[float]:
+    """The real rotation to the odometry's (the wheels'): each way's (true / omega summed) and their mean."""
     ways = [[t for t in group if t.left == left] for left in (True, False)]
-    got = [sum(abs(t.true) for t in w) / sum(abs(t.omega) for t in w) for w in ways if w]
+    got = [sum(abs(t.true) for t in w) / sum(abs(t.wheels if wheels else t.omega) for t in w) for w in ways if w]
     return sum(got) / len(got) if got else None
 
 
@@ -316,7 +370,7 @@ def antenna_mean(group: Sequence[Turn]) -> Optional[np.ndarray]:
 class Fit:
     """The estimates against RTK: sv, k_spin, k_arc, a (m, body frame), d (s); heads: the headings at each run's start
     and end, scales: the runs' fits (RunFit, None: none), turns: their real rotation (between two runs from the
-    headings, else the gyro's: its bias from the stands, its scale, gyro / real, from those) and antenna fits."""
+    headings, else the odometry's scaled like those; gyro_scale: gyro / real) and antenna fits."""
 
     def __init__(self, rec: Recording, odo: Odometry, runs: List[Tuple[float, float]],
                  stands: List[Tuple[float, float]]) -> None:
@@ -328,15 +382,7 @@ class Fit:
         self.a = np.array([rec.params['antenna_offset_x'], rec.params['antenna_offset_y']])
         self.heads = [(None, None)] * len(runs)
         self.scales = [None] * len(runs)
-        imu = rec.columns['imu']
-        self.gyro_bias = self.gyro_scale = self.gyro = None
-        if imu['t'].size >= 2 and stands:
-            inside = np.zeros(imu['t'].size, dtype=bool)
-            for t0, t1 in stands:
-                inside[np.searchsorted(imu['t'], t0):np.searchsorted(imu['t'], t1)] = True
-            if inside.sum() >= 20:
-                self.gyro_bias = float(imu['gz'][inside].mean())
-                self.gyro = (imu['t'], cumulative(imu['t'], imu['gz'] - self.gyro_bias, hold=0.1))
+        self.gyro_scale = None
 
     def points(self, t0: float, t1: float) -> Tuple[np.ndarray, np.ndarray]:
         """The RTK points of a piece from t0 to t1: their times on the odometry's clock, positions."""
@@ -415,13 +461,6 @@ class Fit:
         base = h1 - h0
         return base + 2 * math.pi * round((self.k_turn(turn) * turn.omega - base) / (2 * math.pi))
 
-    def gyro_turn(self, turn: Turn) -> Optional[float]:
-        """What the gyro turned in a turn (bias off)."""
-        if self.gyro is None:
-            return None
-        t, summed = self.gyro
-        return float(np.interp(turn.t1, t, summed) - np.interp(turn.t0, t, summed))
-
     def turn_fit(self, turn: Turn) -> Optional[Tuple[np.ndarray, float, int]]:
         """The antenna from a tight turn's points: (vector, squares left, points)."""
         if not turn.tight:
@@ -450,19 +489,24 @@ class Fit:
         return x[2:], float(((design @ x - rhs) ** 2).sum()), len(P)
 
     def turn_scales(self) -> None:
+        """The real rotation to the odometry's from the turns between two runs (the gyro's one for all, the ticks' on
+        the spot and in arcs apart), the tight ones with a run on one side only scaled by it."""
         for turn in self.turns:
             turn.true = self.turn_true(turn)
-        known = [(abs(t.true), abs(self.gyro_turn(t))) for t in self.turns if t.true is not None and self.gyro]
-        self.gyro_scale = sum(g for _, g in known) / sum(r for r, _ in known) if len(known) >= 2 else None
-        for turn in self.turns:
-            if turn.true is None and self.gyro_scale and turn.tight:
-                real = self.gyro_turn(turn) / self.gyro_scale
-                if real * turn.omega > 0:
-                    turn.true = real
-        spin = ratio([t for t in self.turns if t.true is not None and t.spin])
-        arc = ratio([t for t in self.turns if t.true is not None and not t.spin])
-        self.k_spin = spin or arc or 1.0
-        self.k_arc = arc or spin or 1.0
+        known = [t for t in self.turns if t.true is not None]
+        if self.odo.gyro:
+            self.k_spin = self.k_arc = ratio(known) or 1.0
+            self.gyro_scale = sum(abs(t.omega) for t in known) / sum(abs(t.true) for t in known) \
+                if len(known) >= 2 else None
+        else:
+            spin = ratio([t for t in known if t.spin])
+            arc = ratio([t for t in known if not t.spin])
+            self.k_spin = spin or arc or 1.0
+            self.k_arc = arc or spin or 1.0
+        if len(known) >= 2:
+            for turn in self.turns:
+                if turn.true is None and turn.tight:
+                    turn.true = self.k_turn(turn) * turn.omega
 
     def cost(self, d: float) -> float:
         self.d = d

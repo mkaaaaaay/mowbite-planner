@@ -1,6 +1,7 @@
 """The calibration (mowbite_planner.calib) on drives of the simulator (calibsim.py): its targets over several seeds
-(ticks_per_m within 1 %, wheel_distance_m within 2 %, the antenna within 2 cm, the IMU within 1 deg), no value
-without the least data, the warnings, and the reader's limits."""
+(ticks_per_m within 1 %, wheel_distance_m within 2 %, the antenna within 2 cm, the IMU within 1 deg), on OpenMower v2
+too (its twist's w no rotation, its tacho as ticks), no wheel distance without ticks, no value without the least data,
+the warnings, the reader's limits, and the recorder: its counting as it comes, the tacho."""
 
 import gzip
 import json
@@ -77,15 +78,46 @@ def test_program_targets(tmp_path):
 
 
 def test_joystick_targets(tmp_path):
-    """OpenMower by joystick: half the speed asked for, the stick only pushed on."""
+    """OpenMower by joystick: half the speed asked for, the stick only pushed on; on v2 its tacho made ticks lines."""
     got = []
     for seed in range(4):
-        m = calibsim.joystick(seed, odometry='ticks' if seed == 3 else 'twist')
+        m = calibsim.joystick(seed, odometry='v2' if seed in (1, 2) else 'ticks')
         result = run(tmp_path, m)
         got.append(errors(m, result))
         assert set(values(result)) == set(calib.VALUES) - {'imu_roll', 'imu_pitch'}
         assert abs(result['info']['speed_ratio'] / (m.speed * m.basis[0] / m.true_ticks) - 1) < 0.05
     within(got)
+
+
+@pytest.mark.parametrize('odometry', ['v2-twist', 'twist'])
+def test_no_ticks_no_wheel_distance(tmp_path, odometry):
+    """Only a twist (OpenMower v2's w half the wheels' difference in m/s; or a right one): its w isn't taken, the
+    turns from the gyro, everything but the wheel distance, ready without it."""
+    m = calibsim.joystick(4, odometry=odometry)
+    result = run(tmp_path, m)
+    got = values(result)
+    assert got['wheel_distance_m']['value'] is None and got['wheel_distance_m']['warning'] == calib.NO_TICKS
+    errs = errors(m, result)
+    assert all(errs[n] < TARGETS[n] for n in ('ticks_per_m', 'antenna_offset_x', 'antenna_offset_y')), errs
+    assert result['ready'] and result['based_on']['turns'] >= 6 and result['based_on']['runs'] == 7
+    assert abs(result['info']['gyro_scale'] / m.gyro_scale - 1) < 0.005
+    assert result['info']['ticks_per_m_left'] is None
+
+
+def test_ticks_off_not_taken(tmp_path):
+    """Ticks that don't fit the twist (a side's sign off): not taken, said why."""
+    m = calibsim.joystick(0, odometry='v2')
+    path = m.recording(str(tmp_path / 'v2.jsonl.gz'))
+    with gzip.open(path, 'rt') as f:
+        lines = [json.loads(line) for line in f]
+    for line in lines:
+        if line.get('k') == 'ticks':
+            line['r'] = -line['r']
+    with gzip.open(path, 'wt') as f:
+        f.write('\n'.join(json.dumps(line) for line in lines) + '\n')
+    result = evaluate(path)
+    assert any(w.startswith('the wheel ticks don\'t fit the drive\'s twist') for w in result['warnings'])
+    assert values(result)['wheel_distance_m']['warning'] == calib.NO_TICKS and values(result)['ticks_per_m']['ok']
 
 
 def test_mow_targets(tmp_path):
@@ -105,6 +137,10 @@ def test_wheels_apart(tmp_path):
         within([errors(m, result)], always=list(TARGETS)[:4])
         warned = [w for w in result['warnings'] if w.startswith('left/right: the %s wheel' % side)]
         assert len(warned) == 1 and abs(float(re.search(r'([0-9.]+) % smaller', warned[0])[1]) - 4.0) < 0.5, warned
+        info = result['info']
+        truth = m.ticks * (1 + diff / 2) / (1 - m.slip), m.ticks * (1 - diff / 2) / (1 - m.slip)
+        assert abs(info['ticks_per_m_left'] / truth[0] - 1) < 0.01
+        assert abs(info['ticks_per_m_right'] / truth[1] - 1) < 0.01
 
 
 def test_on_the_spot_and_arcs_apart(tmp_path):
@@ -225,6 +261,11 @@ def test_no_odometry_or_rtk(tmp_path):
     result = evaluate(written(tmp_path, '{"t": 1, "k": "imu", "gx": 0, "gy": 0, "gz": 0, "ax": 0, "ay": 0, "az": 9.8}'))
     assert not result['ready'] and all(v['warning'] == 'no odometry' for v in result['values'])
     path = written(tmp_path, *['{"t": %d, "k": "twist", "v": 0.2, "w": 0}' % t for t in range(1, 50)])
+    assert evaluate(path)['warnings'] == ['the recording stops in the middle (no end line): evaluated up to there',
+                                          'no rotation: neither imu nor ticks lines']
+    path = written(tmp_path, *['{"t": %d, "k": "twist", "v": 0.2, "w": 0}' % t for t in range(1, 50)] +
+                   ['{"t": %d, "k": "imu", "gx": 0, "gy": 0, "gz": 0, "ax": 0, "ay": 0, "az": 9.8}' % t
+                    for t in range(1, 50)])
     assert all(v['warning'] == 'no RTK fixed' for v in evaluate(path)['values'])
 
 
@@ -248,23 +289,23 @@ def test_record_lines():
 
 
 def test_record_counts_like_the_evaluation(tmp_path):
-    """Counted as it comes: a joystick drive's runs and turns about as the evaluation finds them, enough at its end
-    and not before its last turn."""
-    m = calibsim.joystick(2)
+    """Counted as it comes from the gyro and the RTK track (OpenMower v2: its twist's w no rotation, only the twist's
+    sign taken): a joystick drive's runs and turns about as the evaluation finds them, enough at its end and not before
+    its last turn."""
+    m = calibsim.joystick(2, odometry='v2-twist')
     rec = calibread.read(m.recording(str(tmp_path / 'j.jsonl.gz')))
-    counts, twist = calibrecord.Counts(calib.MIN['joystick']), rec.columns['twist']
+    counts = calibrecord.Counts(calib.MIN['joystick'])
     enough_at = None
-    for t, kind, a, b in as_it_comes(rec):
-        if kind == 'gps':
-            counts.gps(t, a)
-            continue
-        counts.add(t, a, b)
+    for t, kind, *got in as_it_comes(rec):
+        given(counts, t, kind, got)
         if enough_at is None and counts.enough():
             enough_at = t
     result = evaluate(rec)
-    assert counts.runs == result['based_on']['runs'] == 7
-    assert abs(counts.m - result['based_on']['m']) < 2.0 and len(counts.turns[True]) == len(counts.turns[False]) == 3
-    assert enough_at is not None and enough_at > twist['t'][-1] - 60
+    runs, m = counts.counted()
+    assert runs == result['based_on']['runs'] == 7
+    assert abs(m - result['based_on']['m']) < 2.0 and len(counts.turns[True]) == len(counts.turns[False]) == 3
+    assert abs(sum(counts.turns[True]) / (2 * math.pi) - 3 * 1.05) < 0.1  # (2.1 pi each, the gyro a bit off)
+    assert enough_at is not None and enough_at > rec.columns['twist']['t'][-1] - 60
     # the progress by the names of what the mode needs, all of it there (the stand at the start: 12 s less the ends)
     got, need = counts.progress(), calibrecord.needed('joystick')
     assert set(need) - {'run_m'} <= set(got) and got['turns_left'] == got['turns_right'] == 3
@@ -273,25 +314,46 @@ def test_record_counts_like_the_evaluation(tmp_path):
                     'rotation_left': 2.5, 'rotation_right': 2.5, 'tight_left': 2.0, 'tight_right': 2.0}
 
 
+def test_record_counts_a_mow(tmp_path):
+    """A mow's lanes and U-turns in arcs counted like the evaluation finds them."""
+    m = calibsim.mow(0, lane_m=3.0, odometry='v2')
+    rec = calibread.read(m.recording(str(tmp_path / 'm.jsonl.gz')))
+    counts = calibrecord.Counts(calib.MIN['mow'])
+    for t, kind, *got in as_it_comes(rec):
+        given(counts, t, kind, got)
+    turns = len(counts.turns[True]) + len(counts.turns[False])
+    assert counts.counted()[0] >= 40 and turns >= 40 and counts.enough(), counts.progress()
+
+
 def as_it_comes(rec, fixed=lambda t: True):
-    """A recording's twist (t, 'twist', v, w) and GNSS lines (t, 'gps', counts for the evaluation, None) in time
-    order, the GNSS ones without RTK fixed where fixed(t) says so."""
-    twist, gps = rec.columns['twist'], rec.columns['gps']
-    lines = [(float(t), 'twist', float(v), float(w)) for t, v, w in zip(twist['t'], twist['v'], twist['w'])]
-    lines += [(float(t), 'gps', bool(f == 0 and acc <= calibfit.RTK_ACC and fixed(t)), None)
-              for t, f, acc in zip(gps['t'], rec.fixes, gps['acc'])]
+    """A recording's imu (t, 'imu', gz), twist (t, 'twist', v) and GNSS lines (t, 'gps', x, y, counts for the
+    evaluation) in time order, the GNSS ones without RTK fixed where fixed(t) says so."""
+    imu, twist, gps = rec.columns['imu'], rec.columns['twist'], rec.columns['gps']
+    lines = [(float(t), 'imu', float(g)) for t, g in zip(imu['t'], imu['gz'])]
+    lines += [(float(t), 'twist', float(v)) for t, v in zip(twist['t'], twist['v'])]
+    lines += [(float(t), 'gps', float(x), float(y), bool(f == 0 and acc <= calibfit.RTK_ACC and fixed(t)))
+              for t, x, y, f, acc in zip(gps['t'], gps['x'], gps['y'], rec.fixes, gps['acc'])]
     return sorted(lines, key=lambda line: (line[0], line[1]))
+
+
+def given(counts, t, kind, got):
+    if kind == 'imu':
+        counts.imu(t, *got)
+    elif kind == 'twist':
+        counts.odometry(*got)
+    else:
+        counts.gps(t, *got)
 
 
 def test_record_counts_only_with_rtk_fixed(tmp_path):
     """Without RTK fixed nothing counts (a mow begun in the dock: it waits for it); losing it drops what goes on (the
     run, the turn after the run before, the stand), what was counted stays."""
-    rec = calibread.read(calibsim.joystick(2).recording(str(tmp_path / 'j.jsonl.gz')))
+    rec = calibread.read(calibsim.joystick(2, odometry='v2').recording(str(tmp_path / 'j.jsonl.gz')))
 
     def counted(fixed):
         counts = calibrecord.Counts(calib.MIN['joystick'])
-        for t, kind, a, b in as_it_comes(rec, fixed):
-            counts.gps(t, a) if kind == 'gps' else counts.add(t, a, b)
+        for t, kind, *got in as_it_comes(rec, fixed):
+            given(counts, t, kind, got)
         return counts.progress()
 
     full = counted(lambda t: True)
@@ -306,18 +368,42 @@ def test_record_counts_only_with_rtk_fixed(tmp_path):
 
 def test_record_counts_the_stands():
     """Standing counts like the evaluation's stands (STAND_S s at least, STAND_TRIM off each end), the one going on
-    too; without them it isn't enough."""
+    too; RTK's noise standing doesn't move it, the gyro turning does; without them it isn't enough."""
     counts = calibrecord.Counts(dict(calib.MIN['joystick'], runs=0, m=0.0, turns=0, rotation=0.0, antenna=0.0))
-    counts.fixed_until = math.inf  # (RTK fixed all along)
-    for k in range(121):  # (12 s still, then moving)
-        counts.add(k * 0.1, 0.0, 0.0)
+    noise = [(0.003 * math.sin(k), 0.003 * math.cos(1.7 * k)) for k in range(400)]
+
+    def at(t, x=0.0, gz=0.0, v=0.0):
+        counts.imu(t, gz)
+        counts.odometry(v)
+        counts.gps(t, x + noise[int(t * 10) % 400][0], noise[int(t * 10) % 400][1], True)
+
+    for k in range(126):  # (12.5 s still, then moving)
+        at(k * 0.1)
     assert counts.still_s() == pytest.approx(11.0) and counts.enough()
-    counts.add(12.1, 0.2, 0.0)
-    for k in range(20):  # (2 s: too short for a stand)
-        counts.add(13.0 + k * 0.1, 0.005, 0.0)
-    counts.add(15.0, 0.2, 0.0)
+    for k in range(10):
+        at(12.6 + k * 0.1, 0.2 * (k + 1) * 0.1, v=0.2)
+    for k in range(25):  # (2.5 s: too short for a stand)
+        at(13.6 + k * 0.1, 0.2)
+    for k in range(40):  # (4 s turning on the spot: no stand)
+        at(16.1 + k * 0.1, 0.2, gz=0.3)
+    at(20.1, 0.4, v=0.2)
+    at(20.2, 0.6, v=0.2)
     assert counts.progress()['still_s'] == 11.0
     assert not calibrecord.Counts(calib.MIN['joystick']).enough()
+
+
+def test_tacho():
+    """OpenMower's tacho as ticks lines: a pair once both sides are new, wrapping both ways, the right mirrored, a jump
+    (an ESC started again) left out."""
+    tacho = calibrecord.Tacho()
+    top = 1 << 32
+    assert tacho.add('l', top - 2) is None and tacho.add('l', top - 1) is None
+    assert tacho.add('r', 3) == (1, 0)
+    assert tacho.add('r', top - 5) is None  # (right: 8 down is 8 on)
+    assert tacho.add('l', 4) == (6, 8)
+    assert tacho.add('l', 1) is None and tacho.add('r', top - 2) == (3, 5)  # (backwards)
+    assert tacho.add('l', 1000000) is None and tacho.add('r', top - 2) == (3, 5)  # (a jump)
+    assert tacho.add('r', top - 12) is None and tacho.add('l', 1000010) == (13, 15)
 
 
 def test_recorder(tmp_path, monkeypatch):

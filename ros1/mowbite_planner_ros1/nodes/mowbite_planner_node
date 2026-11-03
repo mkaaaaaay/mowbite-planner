@@ -194,7 +194,7 @@ import weakref
 import rospy
 from shapely.geometry import Point as Spot
 from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion, Twist, TwistStamped
-from mower_msgs.msg import HighLevelStatus, Status
+from mower_msgs.msg import ESCStatus, HighLevelStatus, Status
 from nav_msgs.msg import Path
 from sensor_msgs.msg import Imu
 from slic3r_coverage_planner.msg import Path as PlannerPath
@@ -389,6 +389,7 @@ LOG_LINES = 2000
 CALIB_GPS = '/ll/position/gps'
 CALIB_IMU = '/ll/imu/data_raw'
 CALIB_TWIST = '/ll/diff_drive/measured_twist'
+CALIB_ESC = {'l': '/ll/diff_drive/left_esc_status', 'r': '/ll/diff_drive/right_esc_status'}
 CALIB_CMD = '/ll/cmd_vel'
 CALIB_PARAMS = {'ticks_per_m': '/ll/services/diff_drive/ticks_per_m',
                 'wheel_distance_m': '/ll/services/diff_drive/wheel_distance_m',
@@ -792,7 +793,8 @@ class WebPage:
 
 class Calibration:
     """planner.calib.* (OpenMower's way to the calibration, mowbite_planner.calib): start records OpenMower's GNSS,
-    IMU, odometry and cmd_vel (calibrecord.Recorder into folder, the one before gone) once it can (each topic there,
+    IMU, odometry (the measured twist, the ESCs' tacho as ticks where they send it: calibrecord.Tacho) and cmd_vel
+    (calibrecord.Recorder into folder, the one before gone) once it can (each topic there,
     RTK fixed but for a mow, disk space: check says it beforehand), stop ends it. It ends by itself at its time or
     size limit, after a mow in mode mow (JOB_COMPLETE), and with enough data: once the runs and turns counted while it's recorded are enough, it's
     evaluated as it stands every CALIB_CHECK s until that's ready. Then it's evaluated (run_calib: a process of its
@@ -816,6 +818,7 @@ class Calibration:
         self.phase, self.error, self.ready, self.based_on, self.sent = None, None, False, None, 0.0
         self.checked, self.checking, self.enough = 0.0, False, False
         self.gps = None  # (the last GNSS message while it's recorded)
+        self.tacho, self.tacho_lock = None, threading.Lock()
         self.wake = threading.Event()  # (the recording's steps end at once with it)
         if os.path.exists(self.recorder.path) and not os.path.exists(self.recorder.result):
             rospy.loginfo('MowBite Planner: the calibration recorded before the node started is evaluated')
@@ -890,10 +893,13 @@ class Calibration:
                 raise PlanningError('not recorded: %s' % e)
             self.phase, self.error, self.ready, self.based_on, self.gps = 'recording', None, False, None, msgs['gps']
             self.checked, self.enough, self.wake = time.time(), False, threading.Event()
+            self.tacho = calibrecord.Tacho()
             self.subs = [rospy.Subscriber(CALIB_GPS, AbsolutePose, self.on_gps, queue_size=50),
                          rospy.Subscriber(CALIB_IMU, Imu, self.on_imu, queue_size=200),
                          rospy.Subscriber(CALIB_TWIST, TwistStamped, self.on_twist, queue_size=50),
-                         rospy.Subscriber(CALIB_CMD, Twist, self.on_cmd, queue_size=50)]
+                         rospy.Subscriber(CALIB_CMD, Twist, self.on_cmd, queue_size=50)] + [
+                rospy.Subscriber(topic, ESCStatus, lambda msg, side=side: self.on_esc(side, msg), queue_size=50)
+                for side, topic in CALIB_ESC.items()]
             threading.Thread(target=self.loop, args=(self.wake,), name='calibration recording', daemon=True).start()
         rospy.loginfo('MowBite Planner: recording a calibration (%s)', mode)
         self.send(at_once=True)
@@ -940,6 +946,12 @@ class Calibration:
 
     def on_twist(self, msg):
         self.recorder.add('twist', time.time(), v=float(msg.twist.linear.x), w=float(msg.twist.angular.z))
+
+    def on_esc(self, side, msg):
+        with self.tacho_lock:
+            pair = self.tacho.add(side, msg.tacho)
+        if pair is not None:
+            self.recorder.add('ticks', time.time(), l=pair[0], r=pair[1])
 
     def on_cmd(self, msg):
         self.recorder.add('cmd', time.time(), v=float(msg.linear.x), w=float(msg.angular.z))

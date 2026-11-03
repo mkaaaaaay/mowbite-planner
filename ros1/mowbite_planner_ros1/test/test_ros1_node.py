@@ -154,6 +154,7 @@ def install():
         'xbot_msgs.msg': types.SimpleNamespace(AbsolutePose=absolute),
         'mower_msgs': types.ModuleType('mower_msgs'),
         'mower_msgs.msg': types.SimpleNamespace(
+            ESCStatus=msg('ESCStatus', tacho=int),
             HighLevelStatus=msg('HighLevelStatus', state_name=str, is_charging=bool, emergency=bool),
             Status=msg('Status', rain_detected=bool)),
         'nav_msgs': types.ModuleType('nav_msgs'),
@@ -2307,8 +2308,8 @@ def test_calib_check(planner, monkeypatch):
 
 
 def test_calib_records_and_evaluates(planner, monkeypatch):
-    """Recorded what comes on OpenMower's topics (the old values its parameters), stopped, evaluated (in a process of
-    its own, here a stand-in), the result kept; the progress all along."""
+    """Recorded what comes on OpenMower's topics (the old values its parameters, the ESCs' tacho as ticks), stopped,
+    evaluated (in a process of its own, here a stand-in), the result kept; the progress all along."""
     asked = calib_ready(monkeypatch, CALIB_RESULT)
     assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
     counted = {'m': 0.0, 'turns': 0.0, 'runs': 0, 'still_s': 0.0, 'turns_left': 0, 'turns_right': 0,
@@ -2326,6 +2327,10 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
     rospy.subscribers[node_module.CALIB_IMU](imu)
     rospy.subscribers[node_module.CALIB_TWIST](twist)
     rospy.subscribers[node_module.CALIB_CMD](cmd)
+    # (the ESCs' tacho: a pair each time both sides are new; the left wraps, the right is mirrored)
+    for left, right in ((2 ** 32 - 10, 5), (6, 2 ** 32 - 11)):
+        rospy.subscribers[node_module.CALIB_ESC['l']](node_module.ESCStatus(tacho=left))
+        rospy.subscribers[node_module.CALIB_ESC['r']](node_module.ESCStatus(tacho=right))
     planner.calib.step(time.time())
     assert rpc('planner.calib.stop') == ({'ok': True}, None)
     assert node_module.CALIB_GPS not in rospy.subscribers  # (no longer)
@@ -2338,6 +2343,7 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
                           'antenna_offset_y': 0.0}
     assert list(rec.columns['gps']['x']) == [3.0] and list(rec.columns['imu']['az']) == [9.81]
     assert list(rec.columns['twist']['v']) == [0.2] and list(rec.columns['cmd']['v']) == [0.2]
+    assert list(rec.columns['ticks']['l']) == [0, 16] and list(rec.columns['ticks']['r']) == [0, 16]
     assert rec.end['why'] == 'stop'
     # (m, turns and runs then the evaluation's)
     assert calib_progress()[-1] == dict(counted, m=42.0, turns=6.1, runs=7, phase='done', ready=True, error=None,

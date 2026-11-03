@@ -3,7 +3,9 @@ antenna and IMU a bit off, driven like the calibration's modes, its sensors writ
 
 Off like a real one: RTK noise, GNSS delay, gyro bias and scale, a dead zone and lag in the drive, the wheels slipping
 along (per run a bit apart) and when turning (on the spot more than in arcs, per turn a bit apart), a pivot off the
-axle wandering while it spins, the wheels apart in size, the odometry in whole ticks with its clock jittering."""
+axle wandering while it spins, the wheels apart in size, the odometry in whole ticks with its clock jittering; on
+OpenMower v2 its twist's w half the wheels' difference in m/s (no rotation) and the ESCs' tacho wrapping, the right one
+mirrored, a message of one side lost now and then (the node's Tacho makes the ticks lines)."""
 
 import gzip
 import json
@@ -12,6 +14,7 @@ import math
 import numpy as np
 
 from mowbite_planner.calib import FORMAT
+from mowbite_planner.calibrecord import Tacho
 
 DT = 0.01
 GRAVITY = 9.80665
@@ -24,9 +27,10 @@ class Mower:
     arc_slip (the rotation lost turning), pivot (m, how far it wanders off the axle spinning), delay (s, GNSS), rtk (m,
     noise each axis), gyro_bias (rad/s), gyro_scale, deadzone (m/s), speed (real / commanded), imu (roll, pitch of its
     mount), slope (the ground's rise along x and y). basis: (ticks_per_m, wheel_distance_m) the odometry is worked out
-    with, params the header's (old), by default the basis and an antenna off. odometry: twist or ticks."""
+    with, params the header's (old), by default the basis and an antenna off. odometry: ticks, twist (w a rotation),
+    v2 (OpenMower v2: ticks from its tacho, twist with its w) or v2-twist (only its twist)."""
 
-    def __init__(self, seed=0, source='openmower', mode='joystick', odometry='twist', basis=None, params=None,
+    def __init__(self, seed=0, source='openmower', mode='joystick', odometry='ticks', basis=None, params=None,
                  imu_frame='base_link', **kw):
         rng = self.rng = np.random.RandomState(seed)
         self.seed, self.source, self.mode, self.odometry, self.imu_frame = seed, source, mode, odometry, imu_frame
@@ -191,15 +195,26 @@ class Mower:
         left, right = np.floor(np.interp(ts, t, tl)), np.floor(np.interp(ts, t, tr))
         tpm, wd = self.basis
         stamp = t0 + ts + 0.004 + rng.uniform(0, 0.003, ts.size)
+        tacho, wrap = Tacho(), {'l': (1 << 32) - 500, 'r': 1000}  # (left wraps going on, right at once)
         for k in range(1, ts.size):
+            dl, dr = left[k] - left[k - 1], right[k] - right[k - 1]
+            span = 1 / RATES['odometry']
             if self.odometry == 'ticks':
-                line = {'k': 'ticks', 'l': int(left[k]), 'r': int(right[k])}
+                lines.append((stamp[k], {'k': 'ticks', 'l': int(left[k]), 'r': int(right[k])}))
+            elif self.odometry == 'twist':
+                lines.append((stamp[k], {'k': 'twist', 'v': round((dl + dr) / 2 / tpm / span, 5),
+                                         'w': round((dr - dl) / (tpm * wd) / span, 5)}))
             else:
-                dl, dr = left[k] - left[k - 1], right[k] - right[k - 1]
-                span = 1 / RATES['odometry']
-                line = {'k': 'twist', 'v': round((dl + dr) / 2 / tpm / span, 5),
-                        'w': round((dr - dl) / (tpm * wd) / span, 5)}
-            lines.append((stamp[k], line))
+                lines.append((stamp[k], {'k': 'twist', 'v': round((dl + dr) / 2 / tpm / span, 5),
+                                         'w': round((dr - dl) / 2 / tpm / span, 5)}))
+            if self.odometry == 'v2':
+                raw = {'l': int(wrap['l'] + left[k]) % (1 << 32), 'r': int(wrap['r'] - right[k]) % (1 << 32)}
+                for side in ('lr' if k % 2 else 'rl'):
+                    if rng.uniform() < 0.01:  # (lost)
+                        continue
+                    pair = tacho.add(side, raw[side])
+                    if pair is not None:
+                        lines.append((stamp[k] + 0.001, {'k': 'ticks', 'l': pair[0], 'r': pair[1]}))
         ts = np.arange(0.5, t[-1], 1 / RATES['cmd'])
         idx = np.searchsorted(t, ts).clip(0, t.size - 1)
         for k in range(ts.size):

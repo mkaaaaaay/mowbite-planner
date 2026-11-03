@@ -8,14 +8,18 @@ quality and whether it's fit to take (ok). Nothing here writes them anywhere.
 The recording (calibread.py): from OpenMower's ROS 1 node a drive by joystick or a mow (passive), from MowBite OS its
 calibration program (phase marks). Only numpy, no shapely: any thread will do.
 
-Against RTK fixed (the antenna's points), with the odometry's track shaped by the guesses so far (calibfit.py):
-  - straight runs (over 1 s v >= 0.1 m/s and |w| <= v / 3; the program's lines): the odometry's track turned, moved,
+Against RTK fixed (the antenna's points), with the track of the odometry's way (the ticks', else the twist's v) and
+the gyro's turn shaped by the guesses so far (calibfit.py); a twist's w is never taken (OpenMower v2 sends half the
+wheels' difference in m/s there):
+  - straight runs (over 1 s v >= 0.1 m/s and |w| <= v / 3 by the gyro; the program's lines): the track turned, moved,
     scaled and bent onto the points gives the real way to the odometry's, ticks_per_m = basis / that. The GNSS delay
     is the one the runs and turns fit best with.
   - the heading at the start and the end of each run (its first and last 1.5 m turned and moved onto the points), a
-    turn of 90 deg at least between two runs: the real turn to the odometry's, on the spot and in arcs apart (each
-    way's mean), wheel_distance_m = basis * runs' / turns' (arcs where there are enough of them). A turn with a run on
-    one side only: the gyro's turn, its scale from the others.
+    turn of 90 deg at least between two runs: the real turn to the gyro's (its scale) and to the ticks', on the spot
+    and in arcs apart (each way's mean), wheel_distance_m = basis * runs' / turns' by the ticks (arcs where there are
+    enough of them; without ticks none, not counted for ready). A turn with a run on one side only: the gyro's turn,
+    scaled like the others.
+  - each wheel's ticks a metre from the runs (their real way and turn): info, a warning where they're apart.
   - the antenna in each tight turn: its points against the body's track (the heading spread like the odometry's
     turn), left and right turns averaged, their difference counts into sigma (a pivot off the axle).
   - imu_roll/pitch (the IMU's tilt on level ground, atan2(ay, az) and atan2(-ax, hypot(ay, az)) of gravity): the
@@ -27,7 +31,7 @@ nor one without the least data (MIN). ok: a value within its fixed limits (VALUE
 import json
 import math
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -58,6 +62,8 @@ MIN = {
     'mow': {'run_m': 2.0, 'runs': 8, 'm': 50.0, 'turns': 20, 'rotation': 0.0, 'antenna': 2.0, 'stand_s': 10.0},
     'program': {'run_m': 1.5, 'runs': 4, 'm': 7.0, 'turns': 1, 'rotation': 1.5, 'antenna': 1.5, 'stand_s': 10.0},
 }
+# why the wheel distance isn't offered without ticks (not counted for ready)
+NO_TICKS = 'no wheel ticks recorded: the wheel distance comes only from them'
 # bootstrap draws and its seed; a wheel difference that warns, arcs vs on the spot that warn, a tilt of the IMU that
 # warns on OpenMower; places within PLACE_R m are one, two headings PLACE_TURN apart at one tell the slope from the tilt
 BOOT = 200
@@ -123,7 +129,10 @@ def _ticks(rec: Recording, fit: Fit, need: dict, rng: np.random.RandomState):
 
 def _wheels(rec: Recording, fit: Fit, need: dict, rng: np.random.RandomState, sv_draws, runs: int,
             warnings: List[str]):
-    """wheel_distance_m: (value, sigma) or why not; from arcs where they're enough, else on the spot, else both."""
+    """wheel_distance_m from the ticks' turns: (value, sigma) or why not; from arcs where they're enough, else on the
+    spot, else both."""
+    if fit.odo.wheels is None:
+        return NO_TICKS
     known = [t for t in fit.turns if t.true is not None]
     groups = [('arcs', [t for t in known if not t.spin]), ('on the spot', [t for t in known if t.spin]),
               ('both', known)]
@@ -142,15 +151,15 @@ def _wheels(rec: Recording, fit: Fit, need: dict, rng: np.random.RandomState, sv
     ways = [[t for t in chosen[1] if t.left == left] for left in (True, False)]
     draws = []
     for way in ways:
-        true, omega = np.abs([t.true for t in way]), np.abs([t.omega for t in way])
+        true, omega = np.abs([t.true for t in way]), np.abs([t.wheels for t in way])
         pick = _boot(rng, len(way))
         draws.append(true[pick].sum(axis=1) / omega[pick].sum(axis=1))
-    arc, spin = [ratio(group) if len(group) >= 2 else None for _, group in groups[:2]]
+    arc, spin = [ratio(group, True) if len(group) >= 2 else None for _, group in groups[:2]]
     if spin and arc and abs(spin / arc - 1) > SPIN_ARC_WARN:
         warnings.append('wheel distance on the spot %.4f m, in arcs %.4f m (%.1f %% apart), proposed: %s' % (
             rec.wheel_distance * fit.sv / spin, rec.wheel_distance * fit.sv / arc, 100 * abs(arc / spin - 1),
             chosen[0]))
-    return (rec.wheel_distance * fit.sv / ratio(chosen[1]),
+    return (rec.wheel_distance * fit.sv / ratio(chosen[1], True),
             _spread(rec.wheel_distance * sv_draws / ((draws[0] + draws[1]) / 2), min([runs] + [len(w) for w in ways])))
 
 
@@ -259,8 +268,8 @@ def _tilt(rec: Recording, fit: Fit, stands, need: dict, info: dict, warnings: Li
 def evaluate(path, interim: bool = False) -> dict:
     """The calibration from a recording (a path or a Recording): {ready, version, based_on: {m, turns (full turns),
     runs}, warnings, values: [{name, value, unit, old, sigma, quality, ok, warning}], info: {gyro_scale, gyro_bias,
-    gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio}}. interim: one still recorded (no warning that it
-    stops in the middle). CalibError: no recording that can be read."""
+    gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_per_m_left, ticks_per_m_right}}. interim:
+    one still recorded (no warning that it stops in the middle). CalibError: no recording that can be read."""
     rec = path if isinstance(path, Recording) else read(path)
     warnings = []
     if rec.end is None and not interim:
@@ -272,7 +281,7 @@ def evaluate(path, interim: bool = False) -> dict:
     names = list(PARAMS) + (['imu_roll', 'imu_pitch'] if rec.source == 'mowbite-os' else [])
     old = dict(rec.params, imu_roll=rec.imu_old[0], imu_pitch=rec.imu_old[1])
     info = dict.fromkeys(('gyro_scale', 'gyro_bias', 'gnss_delay_s', 'rtk_spread_m', 'slope_deg', 'speed_ratio',
-                          'turn_ratio'))
+                          'turn_ratio', 'ticks_per_m_left', 'ticks_per_m_right'))
     result = {'ready': False, 'version': FORMAT, 'based_on': {'m': 0.0, 'turns': 0.0, 'runs': 0},
               'warnings': warnings, 'info': info}
     try:
@@ -280,6 +289,7 @@ def evaluate(path, interim: bool = False) -> dict:
     except CalibError as e:
         warnings.append(str(e))
         return dict(result, values=[_entry(n, None, None, old[n], 'no odometry') for n in names])
+    warnings.extend(odo.notes)
     runs, stands = segments(rec, odo)
     fit = Fit(rec, odo, runs, stands)
     if len(fit.tg) < 20:
@@ -295,9 +305,10 @@ def evaluate(path, interim: bool = False) -> dict:
     estimates.update(_tilt(rec, fit, stands, need, info, warnings))
     values = [_entry(n, *(estimates[n] if isinstance(estimates[n], tuple) else (None, None)), old[n],
                      None if isinstance(estimates[n], tuple) else estimates[n]) for n in names]
-    wanted = [v for v in values if not v['name'].startswith('imu_') or rec.imu_frame in (None, 'base_link')]
+    wanted = [v for v in values if (not v['name'].startswith('imu_') or rec.imu_frame in (None, 'base_link')) and
+              v['warning'] != NO_TICKS]
     _info(rec, fit, info)
-    _warn(rec, odo, fit, warnings)
+    _warn(rec, odo, fit, values, info, warnings)
     used = [s for s in fit.scales if s is not None]
     turned = sum(abs(t.true if t.true is not None else t.omega) for t in fit.turns
                  if t.true is not None or t.fit is not None)
@@ -308,8 +319,8 @@ def evaluate(path, interim: bool = False) -> dict:
 
 def _info(rec: Recording, fit: Fit, info: dict) -> None:
     info['gnss_delay_s'] = round(fit.d, 3)
-    if fit.gyro_bias is not None:
-        info['gyro_bias'] = round(fit.gyro_bias, 5)
+    if fit.odo.bias is not None:
+        info['gyro_bias'] = round(fit.odo.bias, 5)
     if fit.gyro_scale:
         info['gyro_scale'] = round(fit.gyro_scale, 4)
     spread = []
@@ -336,28 +347,49 @@ def _info(rec: Recording, fit: Fit, info: dict) -> None:
         info['turn_ratio'] = round(sum(abs(t.true) for t in known) / turned, 3)
 
 
-def _warn(rec: Recording, odo: Odometry, fit: Fit, warnings: List[str]) -> None:
-    """Left and right apart (a: the wheels turn apart, b: one wheel smaller), driving mostly curved, RTK not fixed."""
-    wd = rec.wheel_distance * fit.sv / fit.k_arc
-    true = odom = way = asked = 0.0
-    cmd = rec.columns['cmd']
-    w = cumulative(cmd['t'], cmd['w']) if cmd['t'].size >= 2 else None
+def _sides(odo: Odometry, fit: Fit, wd: float) -> Optional[Tuple[float, float]]:
+    """Each wheel's ticks a metre (left, right) from the runs with both headings: their real way, each wheel's that
+    less (more) half the wheel distance times the real turn; None without ticks or under 5 m."""
+    if odo.L is None:
+        return None
+    ticks, way = np.zeros(2), np.zeros(2)
     for run, (h0, h1), got in zip(fit.runs, fit.heads, fit.scales):
         if h0 is None or h1 is None or got is None or got.length > 2 * CHUNK_M:
             continue
-        true += wrap(h1 - h0)
-        odom += fit.k_arc * float(odo.turn(run[1]) - odo.turn(run[0]))
-        way += fit.sv * got.length
-        if w is not None:
-            asked += float(np.interp(run[1], cmd['t'], w) - np.interp(run[0], cmd['t'], w))
-    if way >= 5.0:
-        b = (true - odom) / way * wd
+        real, turned = fit.sv * float(odo.dist(run[1]) - odo.dist(run[0])), wrap(h1 - h0)
+        for i, (counts, sign) in enumerate(((odo.L, -1), (odo.R, 1))):
+            ticks[i] += float(np.interp(run[1], odo.t, counts) - np.interp(run[0], odo.t, counts))
+            way[i] += real + sign * turned * wd / 2
+    if way.min() < 5.0:
+        return None
+    return float(ticks[0] / way[0]), float(ticks[1] / way[1])
+
+
+def _warn(rec: Recording, odo: Odometry, fit: Fit, values: List[dict], info: dict, warnings: List[str]) -> None:
+    """With ticks each wheel's ticks a metre (info) and left and right apart (a: the wheels turn apart, b: one wheel
+    smaller); driving mostly curved, RTK not fixed."""
+    wd = next(v['value'] for v in values if v['name'] == 'wheel_distance_m') or rec.wheel_distance
+    sides = _sides(odo, fit, wd)
+    if sides is not None:
+        info['ticks_per_m_left'], info['ticks_per_m_right'] = round(sides[0], 1), round(sides[1], 1)
+        b = sides[0] / sides[1] - 1
         if abs(b) >= LR_WARN:
-            warnings.append('left/right: the %s wheel is in effect %.1f %% smaller (diameter, wear, dirt), straight on '
-                            'the odometry it turns %s; OpenMower has one ticks_per_m for both' % (
-                                'left' if b > 0 else 'right', 100 * abs(b), 'left' if b > 0 else 'right'))
-        a = (odom - fit.k_arc * asked) / way * wd
-        if w is not None and abs(a) >= LR_WARN:
+            warnings.append('left/right: the %s wheel is in effect %.1f %% smaller (diameter, wear, dirt): %.0f and '
+                            '%.0f ticks/m left and right; OpenMower has one ticks_per_m for both' % (
+                                'left' if b > 0 else 'right', 100 * abs(b), sides[0], sides[1]))
+    cmd = rec.columns['cmd']
+    if odo.wheels is not None and cmd['t'].size >= 2:
+        w = cumulative(cmd['t'], cmd['w'])
+        k = ratio([t for t in fit.turns if t.true is not None and t.wheels], True) or 1.0
+        turned = asked = way = 0.0
+        for run, got in zip(fit.runs, fit.scales):
+            if got is None or got.length > 2 * CHUNK_M:
+                continue
+            turned += float(odo.wheel_turn(run[1]) - odo.wheel_turn(run[0]))
+            asked += float(np.interp(run[1], cmd['t'], w) - np.interp(run[0], cmd['t'], w))
+            way += fit.sv * got.length
+        a = k * (turned - asked) / way * wd if way >= 5.0 else 0.0
+        if abs(a) >= LR_WARN:
             warnings.append('left/right: the %s wheel turns %.1f %% faster than asked (motor, gearbox, control)' %
                             ('right' if a > 0 else 'left', 100 * abs(a)))
     forward = float(np.clip(np.diff(odo.S), 0, None)[odo.v[1:] >= RUN_V].sum())
