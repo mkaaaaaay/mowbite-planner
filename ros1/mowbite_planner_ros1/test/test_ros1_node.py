@@ -58,6 +58,14 @@ def install():
                   outline=polygon, holes=list)
     request.FILL_LINEAR, request.FILL_CONCENTRIC = 0, 1
     response = msg('PlanPathResponse', paths=list)
+    vector3 = msg('Vector3', x=float, y=float, z=float)
+    twist = msg('Twist', linear=vector3, angular=vector3)
+    twist_stamped = msg('TwistStamped', header=header, twist=twist)
+    imu = msg('Imu', header=header, angular_velocity=vector3, linear_acceleration=vector3)
+    absolute = msg('AbsolutePose', header=header, flags=int, orientation_valid=int, motion_vector_valid=int,
+                   position_accuracy=float, pose=msg('PoseWithCovariance', pose=pose, covariance=list),
+                   motion_vector=vector3, vehicle_heading=float, motion_heading=float)
+    absolute.FLAG_GPS_RTK_FIXED, absolute.FLAG_GPS_RTK_FLOAT = 2, 4
     rpc_error = msg('RpcError', code=int, message=str, id=str)
     rpc_error.ERROR_INVALID_PARAMS, rpc_error.ERROR_INTERNAL = -32602, -32603
 
@@ -86,6 +94,7 @@ def install():
 
         def Subscriber(self, topic, kind, callback, **kwargs):
             self.subscribers[topic] = callback
+            return types.SimpleNamespace(unregister=lambda: self.subscribers.pop(topic, None))
 
         def Publisher(self, topic, kind, **kwargs):
             return types.SimpleNamespace(publish=lambda m: self.published.append((topic, m)))
@@ -134,7 +143,12 @@ def install():
         'xbot_mqtt.srv': types.SimpleNamespace(RegisterMethodsSrv=object),
         'geometry_msgs': types.ModuleType('geometry_msgs'),
         'geometry_msgs.msg': types.SimpleNamespace(Point=point, Point32=point32, Pose=pose, PoseStamped=pose_stamped,
-                                                   Quaternion=quat, Polygon=polygon),
+                                                   Quaternion=quat, Polygon=polygon, Twist=twist,
+                                                   TwistStamped=twist_stamped),
+        'sensor_msgs': types.ModuleType('sensor_msgs'),
+        'sensor_msgs.msg': types.SimpleNamespace(Imu=imu),
+        'xbot_msgs': types.ModuleType('xbot_msgs'),
+        'xbot_msgs.msg': types.SimpleNamespace(AbsolutePose=absolute),
         'mower_msgs': types.ModuleType('mower_msgs'),
         'mower_msgs.msg': types.SimpleNamespace(
             HighLevelStatus=msg('HighLevelStatus', state_name=str, is_charging=bool, emergency=bool),
@@ -158,7 +172,8 @@ def install():
 rospy, node_module, Request, Polygon, Point32 = install()
 
 
-from mowbite_planner import mqtt_service  # noqa: E402
+from mowbite_planner import calibread, mqtt_service  # noqa: E402
+import calibsim  # noqa: E402
 from stubplan import Spy  # noqa: E402
 
 
@@ -239,6 +254,7 @@ def planner():
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_plans'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups'), ignore_errors=True)
+    shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_calib'), ignore_errors=True)
     node_module.PLAN_AHEAD_DELAY = 1e6
     # no mowbite/hold read (no broker here: it would hold leftovers_auto's mower in), test_hold does that itself
     node_module.HOLD = False
@@ -671,9 +687,10 @@ def test_rpc_methods_registered(planner):
     for t in threading.enumerate():  # the first registration runs on a thread of its own
         if t is not threading.current_thread() and t.daemon:
             t.join(1.0)
-    methods = ['planner.angle.reset', 'planner.area.set', 'planner.drive', 'planner.leftovers', 'planner.log',
-               'planner.plan', 'planner.settings', 'planner.settings.set', 'planner.simulate',
-               'planner.simulate.cancel', 'planner.simulate.status']
+    methods = ['planner.angle.reset', 'planner.area.set', 'planner.calib.result', 'planner.calib.start',
+               'planner.calib.stop', 'planner.drive', 'planner.leftovers', 'planner.log', 'planner.plan',
+               'planner.settings', 'planner.settings.set', 'planner.simulate', 'planner.simulate.cancel',
+               'planner.simulate.status']
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again
@@ -2158,3 +2175,146 @@ def test_leftovers_auto_held(planner, monkeypatch):
     assert any('not sent out for the leftovers, held (held by the MowBite Updater' in line for _, line in rospy.log)
     assert run(-1.0, 5.0) == ['mower_logic:idle/start_mowing']
     assert not any('held' in line for _, line in rospy.log)
+
+
+# planner.calib.*: OpenMower's parameters the recording takes as old
+CALIB = {'/ll/services/diff_drive/ticks_per_m': 2025.0, '/ll/services/diff_drive/wheel_distance_m': 0.3556,
+         '/xbot_positioning/antenna_offset_x': -0.1, '/xbot_positioning/antenna_offset_y': 0.0}
+CALIB_RESULT = {'ready': True, 'version': 'mowbite-calib/1', 'based_on': {'m': 42.0, 'turns': 6.1, 'runs': 7},
+                'warnings': [], 'values': [], 'info': {}}
+
+
+def gps_message(fixed=True, x=1.0, y=2.0):
+    m = node_module.AbsolutePose(flags=2 if fixed else 4, position_accuracy=0.014, motion_vector_valid=1)
+    m.pose.pose.position.x, m.pose.pose.position.y = x, y
+    return m
+
+
+def calib_ready(monkeypatch, result=None):
+    """OpenMower's topics and parameters there, the steps by hand, the evaluation result (a stand-in) where given."""
+    rospy.params.update(CALIB)
+    imu = node_module.Imu()
+    imu.header.frame_id = 'base_link'
+    rospy.messages.update({node_module.CALIB_GPS: gps_message(), node_module.CALIB_IMU: imu,
+                           node_module.CALIB_TWIST: node_module.TwistStamped()})
+    monkeypatch.setattr(node_module, 'CALIB_TICK', 3600.0)
+    asked = []
+    if result is not None:
+        monkeypatch.setattr(node_module, 'run_calib', lambda path, interim=False: asked.append((path, interim)) or
+                            dict(result))
+    return asked
+
+
+def calib_progress():
+    return [json.loads(m.payload) for topic, m in rospy.published
+            if topic == '/xbot_monitoring/mqtt_publish' and m.topic == node_module.CALIB_TOPIC]
+
+
+def calib_threads(name):
+    for t in threading.enumerate():
+        if t.name == name:
+            t.join(120.0)
+
+
+def test_calib_refused(planner, monkeypatch):
+    """planner.calib.start says why it doesn't record: the mode, a topic without messages, no RTK fixed, a parameter
+    not set, too little disk; result and stop without one."""
+    assert rpc('planner.calib.start', {'mode': 'walk'})[1][1] == 'mode must be one of joystick, mow'
+    assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'nothing on /ll/position/gps'
+    calib_ready(monkeypatch)
+    rospy.messages[node_module.CALIB_GPS] = gps_message(fixed=False)
+    assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'no RTK fixed'
+    rospy.messages[node_module.CALIB_GPS] = gps_message()
+    del rospy.params['/xbot_positioning/antenna_offset_y']
+    assert rpc('planner.calib.start', {'mode': 'mow'})[1][1] == \
+        "OpenMower's parameter /xbot_positioning/antenna_offset_y isn't set"
+    rospy.params.update(CALIB)
+    monkeypatch.setattr(node_module.calibrecord, 'FREE', 1 << 60)
+    assert rpc('planner.calib.start', {'mode': 'mow'})[1][1].startswith('only ')
+    assert rpc('planner.calib.result')[1][1] == 'no calibration recorded'
+    assert rpc('planner.calib.stop')[1][1] == 'no calibration is recorded'
+    assert not planner.calib.recorder.recording and not calib_progress()
+
+
+def test_calib_records_and_evaluates(planner, monkeypatch):
+    """Recorded what comes on OpenMower's topics (the old values its parameters), stopped, evaluated (in a process of
+    its own, here a stand-in), the result kept; the progress all along."""
+    asked = calib_ready(monkeypatch, CALIB_RESULT)
+    assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
+    assert calib_progress()[-1] == {'phase': 'recording', 'm': 0.0, 'turns': 0.0, 'runs': 0, 'ready': False,
+                                    'error': None}
+    assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'a calibration is recorded already'
+    assert rpc('planner.calib.result')[1][1] == 'the calibration is still recorded'
+    imu = node_module.Imu()
+    imu.angular_velocity.z, imu.linear_acceleration.z = 0.01, 9.81
+    twist, cmd = node_module.TwistStamped(), node_module.Twist()
+    twist.twist.linear.x = cmd.linear.x = 0.2
+    rospy.subscribers[node_module.CALIB_GPS](gps_message(x=3.0))
+    rospy.subscribers[node_module.CALIB_IMU](imu)
+    rospy.subscribers[node_module.CALIB_TWIST](twist)
+    rospy.subscribers[node_module.CALIB_CMD](cmd)
+    planner.calib.step(time.time())
+    assert rpc('planner.calib.stop') == ({'ok': True}, None)
+    assert node_module.CALIB_GPS not in rospy.subscribers  # (no longer)
+    calib_threads('calibration evaluation')
+    path = planner.calib.recorder.path
+    assert asked == [(path, False)]
+    rec = calibread.read(path)
+    assert rec.mode == 'joystick' and rec.source == 'openmower' and rec.imu_frame == 'base_link'
+    assert rec.params == {'ticks_per_m': 2025.0, 'wheel_distance_m': 0.3556, 'antenna_offset_x': -0.1,
+                          'antenna_offset_y': 0.0}
+    assert list(rec.columns['gps']['x']) == [3.0] and list(rec.columns['imu']['az']) == [9.81]
+    assert list(rec.columns['twist']['v']) == [0.2] and list(rec.columns['cmd']['v']) == [0.2]
+    assert rec.end['why'] == 'stop'
+    assert calib_progress()[-1] == {'phase': 'done', 'm': 42.0, 'turns': 6.1, 'runs': 7, 'ready': True, 'error': None}
+    assert rpc('planner.calib.result') == (CALIB_RESULT, None)
+
+
+def test_calib_mow_ends_with_the_mow(planner, monkeypatch):
+    """Mode mow: the mow finishing (JOB_COMPLETE) ends it; an evaluation that fails says why."""
+    calib_ready(monkeypatch, {'error': 'no header: the recording is empty'})
+    assert rpc('planner.calib.start', {'mode': 'mow'}) == ({'ok': True}, None)
+    event('JOB_COMPLETE')
+    calib_threads('calibration evaluation')
+    assert not planner.calib.recorder.recording
+    assert calibread.read(planner.calib.recorder.path).end['why'] == 'stop'
+    assert calib_progress()[-1]['phase'] == 'done'
+    assert calib_progress()[-1]['error'] == 'no header: the recording is empty'
+    assert rpc('planner.calib.result')[1][1] == 'no header: the recording is empty'
+
+
+def test_calib_ends_by_itself(planner, monkeypatch):
+    """With enough runs and turns it's evaluated as it stands, ready: it ends (enough); at its time limit (time)."""
+    asked = calib_ready(monkeypatch, CALIB_RESULT)
+    monkeypatch.setattr(node_module.calibrecord.Counts, 'enough', lambda self: True)
+    assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
+    calib = planner.calib
+    calib.step(time.time())
+    assert asked == []  # (not before CALIB_CHECK s)
+    calib.checked = 0.0
+    calib.step(time.time())
+    calib_threads('calibration check')
+    assert asked == [(calib.recorder.path, True)] and calib.enough
+    calib.step(time.time())
+    calib_threads('calibration evaluation')
+    assert calibread.read(calib.recorder.path).end['why'] == 'enough'
+    monkeypatch.setitem(node_module.calibrecord.LIMIT_S, 'joystick', 0.0)
+    assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
+    calib.step(time.time())
+    calib_threads('calibration evaluation')
+    assert calibread.read(calib.recorder.path).end['why'] == 'time'
+
+
+def test_calib_evaluated_after_a_restart(planner):
+    """A recording without its result (the node restarted while it recorded) is evaluated as the node starts, for
+    real (python3 -m mowbite_planner.calib)."""
+    folder = os.path.join(os.environ['ROS_HOME'], 'mowbite_calib')
+    os.makedirs(folder)
+    calibsim.joystick(0).recording(os.path.join(folder, 'recording.jsonl.gz'), end=None)
+    NODES[:] = [node_module.MowbitePlannerRos1()]
+    calib_threads('calibration evaluation')
+    result, error = rpc('planner.calib.result')
+    assert error is None and result['ready'] and result['based_on']['runs'] == 7
+    assert any(w.startswith('the recording stops in the middle') for w in result['warnings'])
+    assert [v['name'] for v in result['values'] if v['ok']] == ['ticks_per_m', 'wheel_distance_m',
+                                                                 'antenna_offset_x', 'antenna_offset_y']

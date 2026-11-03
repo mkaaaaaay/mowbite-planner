@@ -32,8 +32,8 @@ settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbi
 until the next start only), plans_dir (where the plans are kept, the last DISK_PLANS of this planner code, default
 $ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
 map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none), workers (processes of their own that
-plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once too; 0: all in this one). The request
-always gives the lane
+plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once too; 0: all in this one), calib_dir
+(planner.calib's recording and result, default $ROS_HOME/mowbite_calib). The request always gives the lane
 spacing (with mower_width the overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a
 concentric fill_pattern; settings beat the first four (an area's own outline_count, ... beat those), not the others
 (an area's planner property can). The angle too, unless
@@ -114,6 +114,12 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         planned once, the same answer for each (kept: true for those that joined it), one without
                         ahead takes such a request planned ahead on before the others. slot (a string the app picks):
                         a request with that slot still waiting is answered with the error SUPERSEDED instead
+  planner.calib.start   records a drive for the calibration (mowbite_planner.calib, see Calibration): {mode: joystick
+                        (driven by hand in OpenMower's recording mode) or mow (the next mow)}, {ok: true} or an error
+                        with why (no RTK fixed, nothing on one of its topics, too little disk, one recorded already)
+  planner.calib.stop    ends it, then it's evaluated ({ok: true})
+  planner.calib.result  the last one's evaluation: {ready, version, based_on: {m, turns, runs}, warnings, values,
+                        info} (mowbite-calib/1); an error while it's recorded or evaluated, or without one
 
 leftovers_auto: after every finished mow planner.leftovers by itself, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2
 at least the mower is sent out again for them (the start_mowing action), once it's idle in its dock with no emergency
@@ -161,25 +167,30 @@ import math
 from concurrent.futures import Future
 import os
 import pickle
+import shutil
+import subprocess
+import sys
 import threading
 import time
 import weakref
 
 import rospy
 from shapely.geometry import Point as Spot
-from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion
+from geometry_msgs.msg import Point, Point32, Polygon, Pose, PoseStamped, Quaternion, Twist, TwistStamped
 from mower_msgs.msg import HighLevelStatus, Status
 from nav_msgs.msg import Path
+from sensor_msgs.msg import Imu
 from slic3r_coverage_planner.msg import Path as PlannerPath
 from slic3r_coverage_planner.srv import PlanPath, PlanPathRequest, PlanPathResponse
 from std_msgs.msg import Empty, Header, String
 from xbot_mqtt.msg import MqttPublish, RpcError, RpcRequest, RpcResponse
 from xbot_mqtt.srv import RegisterMethodsSrv
+from xbot_msgs.msg import AbsolutePose
 
 import mowbite_planner
 from mowbite_planner import (CoveragePlan, NothingLeft, PlannerConfig, PlanningError, Pose2D, SegmentInfo,
                              plan_coverage, quaternion_to_yaw, yaw_to_quaternion)
-from mowbite_planner import backing
+from mowbite_planner import backing, calibrecord
 from mowbite_planner import config as limits
 from mowbite_planner.config import IGNORED
 from mowbite_planner.planner import plan_footprint, set_workers
@@ -303,7 +314,8 @@ SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
               'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
               'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
 # RPC methods answered on a thread of their own (they take a while, the others go on meanwhile)
-BACKGROUND = ('planner.simulate', 'planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
+BACKGROUND = ('planner.simulate', 'planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive',
+              'planner.calib.start')
 # the planner's jobs by urgency (Worker): mower_logic waits for its plan, then what was asked for over RPC, then the
 # checks after a mow, planning ahead last (the node's own and planner.plan's ahead); their names in the progress, the
 # waiting jobs shown there at most; JSON-RPC's code for a request superseded by one with its slot (-32001: the map
@@ -332,6 +344,25 @@ WEB_MAX_REQUEST = 10 * 1024 * 1024
 METHOD_NOT_FOUND = -32601
 # planner.log: the node's last log lines kept in memory
 LOG_LINES = 2000
+# planner.calib.* (Calibration): OpenMower's topics recorded, its parameters the values in use (old), s to wait for a
+# topic's first message at the start, between two steps of the recording, between two evaluations of it while it's
+# recorded (once there are enough runs and turns, by mode), the most an evaluation may take and its niceness; the
+# progress topic and s between two of its messages at least
+CALIB_GPS = '/ll/position/gps'
+CALIB_IMU = '/ll/imu/data_raw'
+CALIB_TWIST = '/ll/diff_drive/measured_twist'
+CALIB_CMD = '/ll/cmd_vel'
+CALIB_PARAMS = {'ticks_per_m': '/ll/services/diff_drive/ticks_per_m',
+                'wheel_distance_m': '/ll/services/diff_drive/wheel_distance_m',
+                'antenna_offset_x': '/xbot_positioning/antenna_offset_x',
+                'antenna_offset_y': '/xbot_positioning/antenna_offset_y'}
+CALIB_WAIT = 2.0
+CALIB_TICK = 0.5
+CALIB_CHECK = {'joystick': 60.0, 'mow': 300.0}
+CALIB_EVALUATE = 1200.0
+CALIB_NICE = 10
+CALIB_TOPIC = 'mowbite/planner/calib'
+CALIB_EVERY = 1.0
 
 
 class LogLines(logging.Handler):
@@ -709,6 +740,221 @@ class WebPage:
         self.send(req, 200, out.encode(), 'application/json')
 
 
+class Calibration:
+    """planner.calib.* (OpenMower's way to the calibration, mowbite_planner.calib): start records OpenMower's GNSS,
+    IMU, odometry and cmd_vel (calibrecord.Recorder into folder, the one before gone) once it can (RTK fixed, each
+    topic there, disk space), stop ends it. It ends by itself at its time or size limit, after a mow in mode mow
+    (JOB_COMPLETE), and with enough data: once the runs and turns counted while it's recorded are enough, it's
+    evaluated as it stands every CALIB_CHECK s until that's ready. Then it's evaluated (run_calib: a process of its
+    own) into folder/result.json, result answers with it. A recording found without its result (the node restarted)
+    is evaluated as the node starts. Not in the worker: it never looks at a plan's shapes.
+    How far it got goes to CALIB_TOPIC (retained, at most every CALIB_EVERY s): {phase (recording, evaluating, done),
+    m, turns, runs (as counted while recording, then the evaluation's), ready (enough data: the evaluation's), error
+    (why it ended without a result)}."""
+
+    def __init__(self, folder, publish, software):
+        self.recorder = calibrecord.Recorder(folder)
+        self.publish, self.software = publish, software
+        self.lock = threading.Lock()
+        self.subs = []
+        self.phase, self.error, self.ready, self.based_on, self.sent = None, None, False, None, 0.0
+        self.checked, self.checking, self.enough = 0.0, False, False
+        self.wake = threading.Event()  # (the recording's steps end at once with it)
+        if os.path.exists(self.recorder.path) and not os.path.exists(self.recorder.result):
+            rospy.loginfo('MowBite Planner: the calibration recorded before the node started is evaluated')
+            self.phase = 'evaluating'
+            threading.Thread(target=self.evaluate, name='calibration evaluation', daemon=True).start()
+
+    def rpc_start(self, params):
+        mode = params.get('mode')
+        if mode not in calibrecord.LIMIT_S:
+            raise PlanningError('mode must be one of %s' % ', '.join(sorted(calibrecord.LIMIT_S)))
+        with self.lock:
+            if self.phase == 'evaluating':
+                raise PlanningError('the last calibration is being evaluated')
+            if self.recorder.recording:
+                raise PlanningError('a calibration is recorded already')
+            if not self.first(CALIB_GPS, AbsolutePose).flags & AbsolutePose.FLAG_GPS_RTK_FIXED:
+                raise PlanningError('no RTK fixed')
+            imu = self.first(CALIB_IMU, Imu)
+            self.first(CALIB_TWIST, TwistStamped)
+            old = {}
+            for name, key in CALIB_PARAMS.items():
+                value = rospy.get_param(key, None)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise PlanningError('OpenMower\'s parameter %s isn\'t set' % key)
+                old[name] = float(value)
+            try:
+                self.recorder.start(mode, old, imu.header.frame_id or None, self.software, time.time())
+            except calibrecord.Refused as e:
+                raise PlanningError(str(e))
+            except OSError as e:
+                raise PlanningError('not recorded: %s' % e)
+            self.phase, self.error, self.ready, self.based_on = 'recording', None, False, None
+            self.checked, self.enough, self.wake = time.time(), False, threading.Event()
+            self.subs = [rospy.Subscriber(CALIB_GPS, AbsolutePose, self.on_gps, queue_size=50),
+                         rospy.Subscriber(CALIB_IMU, Imu, self.on_imu, queue_size=200),
+                         rospy.Subscriber(CALIB_TWIST, TwistStamped, self.on_twist, queue_size=50),
+                         rospy.Subscriber(CALIB_CMD, Twist, self.on_cmd, queue_size=50)]
+            threading.Thread(target=self.loop, args=(self.wake,), name='calibration recording', daemon=True).start()
+        rospy.loginfo('MowBite Planner: recording a calibration (%s)', mode)
+        self.send(at_once=True)
+        return {'ok': True}
+
+    @staticmethod
+    def first(topic, kind):
+        try:
+            return rospy.wait_for_message(topic, kind, timeout=CALIB_WAIT)
+        except rospy.ROSException:
+            raise PlanningError('nothing on %s' % topic)
+
+    def rpc_stop(self, params):
+        if not self.recorder.recording:
+            raise PlanningError('no calibration is recorded')
+        self.finish('stop')
+        return {'ok': True}
+
+    def rpc_result(self, params):
+        if self.recorder.recording:
+            raise PlanningError('the calibration is still recorded')
+        if self.phase == 'evaluating':
+            raise PlanningError('the calibration is being evaluated')
+        try:
+            with open(self.recorder.result) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            raise PlanningError(self.error or 'no calibration recorded')
+
+    def job_complete(self):
+        """A mow finished: in mode mow that ends the recording."""
+        if self.recorder.recording and self.recorder.mode == 'mow':
+            self.finish('stop')
+
+    def on_gps(self, msg):
+        p, motion = msg.pose.pose.position, bool(msg.motion_vector_valid)
+        fix = 'fixed' if msg.flags & AbsolutePose.FLAG_GPS_RTK_FIXED else \
+            'float' if msg.flags & AbsolutePose.FLAG_GPS_RTK_FLOAT else 'single'
+        self.recorder.add('gps', time.time(), x=float(p.x), y=float(p.y), z=float(p.z),
+                          acc=float(msg.position_accuracy), fix=fix,
+                          vh=float(msg.vehicle_heading) if msg.orientation_valid else None,
+                          mh=float(msg.motion_heading) if motion else None,
+                          ve=float(msg.motion_vector.x) if motion else None,
+                          vn=float(msg.motion_vector.y) if motion else None)
+
+    def on_imu(self, msg):
+        g, a = msg.angular_velocity, msg.linear_acceleration
+        self.recorder.add('imu', time.time(), gx=float(g.x), gy=float(g.y), gz=float(g.z), ax=float(a.x),
+                          ay=float(a.y), az=float(a.z))
+
+    def on_twist(self, msg):
+        self.recorder.add('twist', time.time(), v=float(msg.twist.linear.x), w=float(msg.twist.angular.z))
+
+    def on_cmd(self, msg):
+        self.recorder.add('cmd', time.time(), v=float(msg.linear.x), w=float(msg.angular.z))
+
+    def loop(self, wake):
+        while self.recorder.recording and not wake.wait(CALIB_TICK):
+            self.step(time.time())
+
+    def step(self, now):
+        """What came written; it ends where it has to, or is evaluated as it stands where it may be enough."""
+        ended = self.recorder.tick(now)
+        if ended is not None:
+            self.finish(*ended)
+        elif self.enough:
+            self.finish('enough')
+        elif self.recorder.recording:
+            counts = self.recorder.counts
+            if counts.enough() and not self.checking and now - self.checked >= CALIB_CHECK[self.recorder.mode]:
+                self.checking = True
+                threading.Thread(target=self.check, name='calibration check', daemon=True).start()
+            self.send()
+
+    def check(self):
+        """Evaluated as it stands: ready, it ends (with the next step)."""
+        try:
+            self.recorder.flush()
+            self.ready = self.enough = bool(run_calib(self.recorder.path, interim=True).get('ready'))
+        finally:
+            self.checked, self.checking = time.time(), False
+
+    def finish(self, why, reason=None):
+        with self.lock:
+            if not self.recorder.recording:
+                return
+            for sub in self.subs:
+                sub.unregister()
+            self.subs = []
+            failed = self.recorder.end(why, time.time(), reason)
+            self.phase = 'evaluating'
+            self.wake.set()
+        if failed:
+            rospy.logwarn('MowBite Planner: the calibration\'s recording not ended well: %s', failed)
+        rospy.loginfo('MowBite Planner: calibration recorded (%s%s), evaluating it', why,
+                      ': ' + reason if reason else '')
+        threading.Thread(target=self.evaluate, name='calibration evaluation', daemon=True).start()
+
+    def evaluate(self):
+        self.send(at_once=True)
+        result = run_calib(self.recorder.path)
+        error = result.get('error', 'the evaluation gave no values') if 'values' not in result else None
+        if error is None:
+            try:
+                temp = self.recorder.result + '.tmp'
+                with open(temp, 'w') as f:
+                    json.dump(result, f)
+                os.replace(temp, self.recorder.result)
+            except OSError as e:
+                error = 'the result not kept: %s' % e
+        with self.lock:
+            self.phase, self.error = 'done', error
+            self.ready, self.based_on = (bool(result.get('ready')), result.get('based_on')) if error is None else \
+                (False, None)
+        if error:
+            rospy.logwarn('MowBite Planner: calibration not evaluated: %s', error)
+        else:
+            rospy.loginfo('MowBite Planner: calibration evaluated, %s', ', '.join(
+                '%s %s' % (v['name'], v['value'] if v['ok'] else '-') for v in result['values']))
+        self.send(at_once=True)
+
+    def send(self, at_once=False):
+        now = time.time()
+        if not at_once and now - self.sent < CALIB_EVERY:
+            return
+        self.sent = now
+        counts = self.recorder.counts.progress() if self.recorder.counts else {'m': 0.0, 'turns': 0.0, 'runs': 0}
+        message = dict(self.based_on or counts, phase=self.phase, ready=self.ready, error=self.error)
+        try:
+            self.publish(json.dumps(message))
+        except Exception as e:  # noqa: BLE001 - showing progress must not take the recording down
+            rospy.logwarn('MowBite Planner: calibration progress not published: %s', e)
+
+
+def run_calib(path, interim=False):
+    """mowbite_planner.calib on the recording at path in a process of its own (niced, CALIB_EVALUATE s at most): its
+    result, else {'error': why}."""
+    command = [sys.executable, '-m', 'mowbite_planner.calib'] + (['--interim'] if interim else []) + [path]
+    if shutil.which('nice'):
+        command = ['nice', '-n', str(CALIB_NICE)] + command
+    roots = [os.path.dirname(p) for p in mowbite_planner.__path__ if os.path.exists(os.path.join(p, 'calib.py'))]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(roots + [os.environ.get('PYTHONPATH', '')]).rstrip(os.pathsep))
+    try:
+        done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=CALIB_EVALUATE,
+                              env=env)
+    except subprocess.TimeoutExpired:
+        return {'error': 'the evaluation took over %.0f s' % CALIB_EVALUATE}
+    except OSError as e:
+        return {'error': 'no evaluation: %s' % e}
+    try:
+        result = json.loads(done.stdout.decode() or 'null')
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        lines = done.stderr.decode(errors='replace').strip().splitlines()
+        return {'error': 'the evaluation failed: %s' % (lines[-1] if lines else 'exit code %d' % done.returncode)}
+    return result
+
+
 class HoldReader:
     """The MowBite Updater's hold of the starts (HOLD_TOPIC, retained, {"until": unix s}, none or empty: no hold) while
     it restarts OpenMower or the planner. held() says why the mower may not be sent out: a hold whose end is still to
@@ -828,6 +1074,10 @@ class MowbitePlannerRos1:
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
         self.code = code_version()
         self.drop_old_plans()
+        # planner.calib.*: the recording and its result in calib_dir
+        self.calib = Calibration(os.path.expanduser(rospy.get_param('~calib_dir', os.path.join(
+            os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_calib'))), lambda payload: mqtt.publish(
+                MqttPublish(topic=CALIB_TOPIC, payload=payload, retain=True)), self.code)
         self.ahead = None
         self.ahead_lock = threading.Lock()
         self.ahead_count = 0  # (the latest plan_ahead, one before it ends early)
@@ -891,7 +1141,9 @@ class MowbitePlannerRos1:
                         'planner.simulate': self.rpc_simulate,
                         'planner.simulate.status': self.rpc_simulate_status,
                         'planner.simulate.cancel': self.rpc_simulate_cancel,
-                        'planner.angle.reset': self.rpc_angle_reset, 'planner.log': self.rpc_log}
+                        'planner.angle.reset': self.rpc_angle_reset, 'planner.log': self.rpc_log,
+                        'planner.calib.start': self.calib.rpc_start, 'planner.calib.stop': self.calib.rpc_stop,
+                        'planner.calib.result': self.calib.rpc_result}
         if rospy.get_param('~rpc', True):
             self.rpc = XbotRpc('mowbite_planner', self.methods)
         self.web = None
@@ -1200,6 +1452,7 @@ class MowbitePlannerRos1:
             return
         if event.get('type') != 'JOB_COMPLETE':
             return
+        self.calib.job_complete()
         armed, self.armed = self.armed, None
         if armed is not None and armed['served']:
             # (the leftovers of the mow before: no mow of its own, the lanes don't turn on, it isn't timed)
