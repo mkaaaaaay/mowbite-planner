@@ -1926,7 +1926,8 @@ class MowbitePlannerRos1:
                 continue
             cfg = keep[-1].config
             turned = -1.0 if cfg.drive == 'reverse' else 1.0  # (mowing it backs up: the blade behind on the track)
-            mowed = track_mowed(runs, cfg.mower_width, turned * cfg.blade_ahead, turned * cfg.blade_offset)
+            up = keep[-1].angle if keep[-1].stats.get('drive') == 'slope' else None  # (backing down the lanes)
+            mowed = track_mowed(runs, cfg.mower_width, turned * cfg.blade_ahead, turned * cfg.blade_offset, up)
             left = sum(p.area for p in polygons(keep[-1].free_space.difference(mowed)) if p.area >= LEFT_PIECE)
             got = []
             if left > LEFT_MOST * keep[-1].free_space.area:

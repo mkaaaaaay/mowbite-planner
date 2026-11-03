@@ -72,10 +72,11 @@ def drive_time(poses: Sequence[Pose2D], speeds: Optional[Mapping[str, float]] = 
 
 
 def track_mowed(runs: Sequence[Sequence[Sequence[float]]], mower_width: float, blade_ahead: float = 0.0,
-                blade_offset: float = 0.0):
+                blade_offset: float = 0.0, up: Optional[float] = None):
     """Where the blade went on a mow: runs are the driven points [(x, y), ...] of the mower's centre with the blade
-    running (OpenMower's position_history, a point every 0.1 to 2 m), each facing the next. The blade's way between
-    two points TRACK_GAP apart at most (further: a gap in the recording), mower_width wide. A geometry, for
+    running (OpenMower's position_history, a point every 0.1 to 2 m), each facing the next; with up (drive slope: the
+    plan's angle) facing up the lanes all along them, turned round where it drives against that way. The blade's way
+    between two points TRACK_GAP apart at most (further: a gap in the recording), mower_width wide. A geometry, for
     plan_coverage's mowed."""
     half, strips = 0.5 * mower_width, []
     for run in runs:
@@ -85,6 +86,8 @@ def track_mowed(runs: Sequence[Sequence[Sequence[float]]], mower_width: float, b
         for i, (x, y) in enumerate(pts):
             a, b = (pts[i], pts[i + 1]) if i + 1 < len(pts) else (pts[i - 1], pts[i]) if i else (pts[i], pts[i])
             h = math.atan2(b[1] - a[1], b[0] - a[0])
+            if up is not None and math.cos(h - up) < 0.0:  # (backing down: the blade the other way round)
+                h += math.pi
             blade.append((x + blade_ahead * math.cos(h) - blade_offset * math.sin(h),
                           y + blade_ahead * math.sin(h) + blade_offset * math.cos(h)))
         line: List[Any] = []

@@ -1816,6 +1816,10 @@ def test_planner_drive_slope(planner, stub_planner, monkeypatch):
     places = rpc('planner.drive', {'job_id': 'down'})[0]['areas']['a']['places']
     assert len(places) == 1 and places[0][:2] == [19.9, 5.0] and places[0][2] > 0.1
     assert rpc('planner.drive', {'job_id': 'up'})[0]['areas']['a']['places'] == []
+    # (planner.leftovers so too: the blade where the mower faces, report.track_mowed's up)
+    ups, mowed = [], node_module.track_mowed
+    monkeypatch.setattr(node_module, 'track_mowed', lambda *args: ups.append(args[4:]) or mowed(*args))
+    assert rpc('planner.leftovers', {'job_id': 'down'})[1] is None and ups == [(0.0,)]
 
 
 def test_body_reaches_over_into_navigation_areas(planner):

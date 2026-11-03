@@ -2565,6 +2565,17 @@ def test_leftovers():
         plan_coverage(GARDEN, [TREE, BED], PlannerConfig(), mowed=mowed)
 
 
+
+def test_track_mowed_slope():
+    """With up (drive slope) the mower faces up the lanes all along them: backing down, the blade ahead of it is
+    behind on the track, up the lane at the lane's start; going up as ever."""
+    down, upward = [[(5.0 - 0.1 * i, 0.0) for i in range(31)]], [[(2.0 + 0.1 * i, 0.0) for i in range(31)]]
+    assert track_mowed(down, 0.2, 0.3).bounds == pytest.approx((1.6, -0.1, 4.8, 0.1))
+    assert track_mowed(down, 0.2, 0.3, up=0.0).bounds == pytest.approx((2.2, -0.1, 5.4, 0.1))
+    assert track_mowed(upward, 0.2, 0.3, up=0.0).equals(track_mowed(upward, 0.2, 0.3))
+    assert track_mowed(down, 0.2, 0.3, 0.05, up=0.0).bounds == pytest.approx((2.2, -0.05, 5.4, 0.15))  # (left of up)
+
+
 def test_mop_up():
     """mop_up (on by default): what the path leaves unmowed mowed by moves the body fits, as detours from the loops and
     drives back to where they left and from the end on (complete.py): less left unmowed than off, nothing sticking out,
