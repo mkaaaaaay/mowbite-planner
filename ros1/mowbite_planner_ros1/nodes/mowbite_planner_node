@@ -867,14 +867,19 @@ class Calibration:
             counts = self.recorder.counts
             if counts.enough() and not self.checking and now - self.checked >= CALIB_CHECK[self.recorder.mode]:
                 self.checking = True
-                threading.Thread(target=self.check, name='calibration check', daemon=True).start()
+                threading.Thread(target=self.check, args=(self.recorder.started,), name='calibration check',
+                                 daemon=True).start()
             self.send()
 
-    def check(self):
-        """Evaluated as it stands: ready, it ends (with the next step)."""
+    def check(self, started):
+        """The recording begun at started evaluated as it stands: ready, it ends (with the next step). (Ended
+        meanwhile, or another begun: nothing.)"""
         try:
             self.recorder.flush()
-            self.ready = self.enough = bool(run_calib(self.recorder.path, interim=True).get('ready'))
+            ready = bool(run_calib(self.recorder.path, interim=True).get('ready'))
+            with self.lock:
+                if self.recorder.recording and self.recorder.started == started:
+                    self.ready = self.enough = ready
         finally:
             self.checked, self.checking = time.time(), False
 

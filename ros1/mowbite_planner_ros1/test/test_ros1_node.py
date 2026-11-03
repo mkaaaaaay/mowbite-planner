@@ -2303,6 +2303,12 @@ def test_calib_ends_by_itself(planner, monkeypatch):
     calib.step(time.time())
     calib_threads('calibration evaluation')
     assert calibread.read(calib.recorder.path).end['why'] == 'time'
+    # (a check of a recording ended since: it doesn't end the next one)
+    assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
+    calib.check(calib.recorder.started - 1.0)
+    assert not calib.enough and not calib.ready and calib.recorder.recording
+    assert rpc('planner.calib.stop') == ({'ok': True}, None)
+    calib_threads('calibration evaluation')
 
 
 def test_calib_evaluated_after_a_restart(planner):
