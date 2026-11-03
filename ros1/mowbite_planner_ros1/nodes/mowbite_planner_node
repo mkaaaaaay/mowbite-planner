@@ -2190,7 +2190,8 @@ class MowbitePlannerRos1:
 
     def drive_check(self, job_id=None, name=None, area_id=None):
         """planner.drive: the track of a job (its position_history file, the latest without one) against the plans'
-        body_space: where the body at a driven point (facing the next one) got into the margins."""
+        body_space: where the body at a driven point (facing the next one, the one before where the plan backs up: drive
+        reverse all of it, slope going down the lanes) got into the margins."""
         if self.current.planner == 'slic3r':
             raise PlanningError('planner slic3r: no body checked')
         files = self.track_files(job_id, name)
@@ -2233,6 +2234,10 @@ class MowbitePlannerRos1:
             poses = [(p, on) for p, on in track if near.contains(Spot(p.x, p.y))]
             if keep[-1].config.drive == 'reverse':  # (mowing it backs up: facing the point before)
                 poses = [(Pose2D(p.x, p.y, p.yaw + math.pi) if on else p, on) for p, on in poses]
+            elif keep[-1].stats.get('drive') == 'slope':  # (facing up the lanes all along it: backing down there)
+                up = keep[-1].angle
+                poses = [(Pose2D(p.x, p.y, p.yaw + math.pi) if on and math.cos(p.yaw - up) < 0.0 else p, on)
+                         for p, on in poses]
             outs = fp.out_by([(None, p) for p, _ in poses]) if poses else []
             # (with the blade off out of it: against those too, their real edges robot_width / 2 out from the lines)
             off = [k for k, ((m, _), (_, on)) in enumerate(zip(outs, poses)) if m > DRIVE_OFF and not on]

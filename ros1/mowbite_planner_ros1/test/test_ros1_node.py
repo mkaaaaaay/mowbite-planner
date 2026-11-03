@@ -3,6 +3,7 @@
     python3 -m pytest ros1/mowbite_planner_ros1/test   (shapely is enough)
 """
 
+import dataclasses
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -1794,6 +1795,27 @@ def test_planner_drive_openmowers_drives(planner):
     assert error is None and len(places) == 1 and places[0][1] == -0.4 and places[0][2] > 0.3
     track_file('job3', [(True, over_nav), (True, [(19.0, 6.0), (19.5, 6.0), (20.05, 6.0), (20.3, 6.0)])])
     assert [p[:2] for p in rpc('planner.drive', {'job_id': 'job3'})[0]['areas']['a']['places']] == [[20.3, 6.0]]
+
+
+def test_planner_drive_slope(planner, stub_planner, monkeypatch):
+    """planner.drive with drive slope: the mower faces up the lanes (the plan's angle) all along them, the body checked
+    facing so where it backs down; going up it faces the way it drives."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
+    send_map(the_map())
+    track_file('down', [(True, [(19.9 - x / 10.0, 5.0) for x in range(13)])])
+    track_file('up', [(True, [(18.4 + x / 10.0, 5.0) for x in range(13)])])
+    assert rpc('planner.drive', {'job_id': 'down'})[0]['areas']['a']['places'] == []
+
+    def slope(*args, **kw):  # (the stand-in's plan as backing.updown's says: up the lanes at angle 0)
+        plan = stub_planner(*args, **kw)
+        return plan if stub_planner.config().drive != 'slope' else \
+            dataclasses.replace(plan, angle=0.0, stats=dict(plan.stats, drive='slope'))
+    monkeypatch.setattr(node_module, 'plan_coverage', slope)
+    rospy.params['/move_base_flex/FTCPlanner/back_up_with_plan'] = True
+    rpc('planner.settings.set', {'drive': 'slope'})
+    places = rpc('planner.drive', {'job_id': 'down'})[0]['areas']['a']['places']
+    assert len(places) == 1 and places[0][:2] == [19.9, 5.0] and places[0][2] > 0.1
+    assert rpc('planner.drive', {'job_id': 'up'})[0]['areas']['a']['places'] == []
 
 
 def test_body_reaches_over_into_navigation_areas(planner):
