@@ -244,7 +244,14 @@ def planner():
     node_module.HOLD = False
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
     node_module.TRACK_WAIT = 0.0
-    return node_module.MowbitePlannerRos1()
+    # (the progress of the tests' nodes before off: a change of what waits is sent a while after, into this test)
+    for node in NODES:
+        node.progress.publish = lambda payload: None
+    NODES[:] = [node_module.MowbitePlannerRos1()]
+    return NODES[0]
+
+
+NODES = []
 
 
 def poses(res):
@@ -1841,6 +1848,91 @@ def test_worker_most_urgent_first():
         worker.run(node_module.ASKED, lambda: 1 / 0)
 
 
+def test_worker_joins_moves_up_and_supersedes():
+    """The same job (same) asked for again joins the one waiting or running: planned once, the same result for each;
+    asked for more urgently it's moved up; who waits with a slot for a job not begun is superseded by the next request
+    with it (the job dropped where nobody waits for it any more); waiting(): in the order they'll run, with the RPC ids
+    waiting for each."""
+    worker = node_module.Worker()
+    go, calls, got, threads = threading.Event(), [], {}, []
+
+    def job(name):
+        calls.append(name)
+        return name
+
+    def ask(key, urgency, fn, *args, **what):
+        def asked():
+            try:
+                got[key] = worker.submit(urgency, fn, *args, **what)
+            except node_module.Superseded as e:
+                got[key] = e
+        threads.append(threading.Thread(target=asked))
+        threads[-1].start()
+        time.sleep(0.1)
+
+    ask('block', node_module.ASKED, go.wait, 30, same='block')
+    ask('ahead a', node_module.AHEAD, job, 'a', area_id='a', same='a')
+    ask('ahead b', node_module.AHEAD, job, 'b', area_id='b', same='b', rid='r1')
+    ask('asked a', node_module.ASKED, job, 'a', area_id='a', same='a', rid='r2')
+    ask('view 1', node_module.ASKED, job, 'c', area_id='c', same='c', rid='r3', slot='view')
+    ask('view 2', node_module.ASKED, job, 'd', area_id='d', same='d', rid='r4', slot='view')
+    ask('block 2', node_module.ASKED, job, 'x', same='block', rid='r5')
+    assert worker.waiting() == (3, [{'area_id': 'a', 'job': 'plan', 'rank': 'asked', 'ids': ['r2']},
+                                    {'area_id': 'd', 'job': 'plan', 'rank': 'asked', 'ids': ['r4']},
+                                    {'area_id': 'b', 'job': 'plan', 'rank': 'ahead', 'ids': ['r1']}])
+    assert isinstance(got['view 1'], node_module.Superseded)
+    go.set()
+    for t in threads:
+        t.join(30)
+    assert calls == ['a', 'd', 'b'] and worker.waiting() == (0, [])
+    assert got['block'] == (True, False) and got['block 2'] == (True, True)
+    assert got['ahead a'] == ('a', False) and got['asked a'] == ('a', True) and got['view 2'] == ('d', False)
+
+
+def test_queue_over_rpc(planner, stub_planner, monkeypatch):
+    """planner.plan's ahead and slot over RPC: the same request joins the one planned (kept), a request with a slot
+    still waiting gets SUPERSEDED, the waiting ones in the progress (asked before ahead, their RPC ids), none at the
+    end; ahead not true or false, a slot not a string: the caller's mistake."""
+    send_map(the_map())
+    go, began = threading.Event(), threading.Event()
+
+    def slow(*args, **kw):
+        began.set()
+        assert go.wait(60)
+        return stub_planner(*args, **kw)
+
+    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    rospy.published.clear()
+
+    def send(rid, params):
+        rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method='planner.plan', params=json.dumps(params),
+                                                                      id=rid))
+        time.sleep(0.1)
+
+    small = [[0, 0], [6, 0], [6, 4], [0, 4]]
+    send('p1', {'area_id': 'a'})
+    assert began.wait(60)
+    send('p2', {'outline': small, 'ahead': True})
+    send('p3', {'outline': [[0, 0], [5, 0], [5, 4], [0, 4]], 'slot': 'view'})
+    send('p4', {'outline': [[0, 0], [4, 0], [4, 4], [0, 4]], 'slot': 'view'})
+    send('p5', {'area_id': 'a', 'ahead': True})
+    time.sleep(1.5)
+    waiting = [m['waiting'] for m in progress_messages() if m['running']][-1]
+    assert [(w['ids'], w['rank'], w['job']) for w in waiting] == [(['p4'], 'asked', 'plan'), (['p2'], 'ahead', 'plan')]
+    go.set()
+    for t in threading.enumerate():
+        if t.name == 'rpc planner.plan':
+            t.join(60)
+    got = {m.id: (topic, m) for topic, m in answers()}
+    assert set(got) == {'p1', 'p2', 'p3', 'p4', 'p5'} and len(stub_planner.calls) == 3
+    assert got['p3'][0] == '/xbot/rpc/error' and got['p3'][1].code == node_module.SUPERSEDED
+    assert json.loads(got['p5'][1].result)['kept'] and not json.loads(got['p1'][1].result)['kept']
+    time.sleep(1.5)  # (the last planning's of an outline: the queue told after it)
+    assert progress_messages()[-1]['waiting_n'] == 0
+    assert rpc('planner.plan', {'area_id': 'a', 'ahead': 'yes'})[1][0] == node_module.RpcError.ERROR_INVALID_PARAMS
+    assert rpc('planner.plan', {'area_id': 'a', 'slot': 3})[1][0] == node_module.RpcError.ERROR_INVALID_PARAMS
+
+
 def test_quick_rpcs_answer_while_it_plans(planner, stub_planner, monkeypatch):
     """While a planning runs, planner.settings and planner.log answer at once; planner.plan once it's planned."""
     send_map(the_map())
@@ -1919,7 +2011,8 @@ def test_progress(planner, stub_planner, monkeypatch):
     assert error is None and len(seen) >= 3
     first, last = seen[0], seen[-1]
     assert set(last) == {'area_id', 'key', 'running', 'stage', 'done', 'of', 'started', 'elapsed_s', 'estimate_s',
-                         'error'}
+                         'error', 'waiting_n', 'waiting'}
+    assert last['waiting_n'] == 0 and last['waiting'] == []
     assert first['area_id'] == 'a' and first['running'] and first['stage'] == 'angles' and first['estimate_s'] is None
     assert last == dict(last, area_id='a', key=first['key'], running=False, stage='done', done=last['of'], error=None)
     assert [m['done'] for m in seen] == sorted(m['done'] for m in seen) and seen[-2]['done'] > 0

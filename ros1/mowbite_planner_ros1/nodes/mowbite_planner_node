@@ -108,7 +108,12 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         before setting them, poses...) with the node's settings and mower_logic's parameters.
                         Not in it: the increment mower_logic adds to the angle after every finished job. kept: the
                         plan was there already (planned ahead or asked for before). duration: {min, model_min, factor,
-                        runs}, how long mowing it takes, see TIMING_RUNS
+                        runs}, how long mowing it takes, see TIMING_RUNS. ahead: true, it waits behind what's asked
+                        for and the checks after a mow (with the node's own planning ahead: the app's preview of the
+                        areas not looked at). The same request (but ahead and slot) waiting or planned meanwhile is
+                        planned once, the same answer for each (kept: true for those that joined it), one without
+                        ahead takes such a request planned ahead on before the others. slot (a string the app picks):
+                        a request with that slot still waiting is answered with the error SUPERSEDED instead
 
 leftovers_auto: after every finished mow planner.leftovers by itself, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2
 at least the mower is sent out again for them (the start_mowing action), once it's idle in its dock with no emergency
@@ -124,7 +129,10 @@ plan_path, planning ahead, the checks after a mow) waits its turn in one worker 
 RPCs answer at once meanwhile (planner.settings.set counts from the next planning on). How far a planning got goes to
 mowbite/planner/progress (retained, through xbot_monitoring, see PlanProgress): {area_id, key (the plan's), running,
 stage (angles, spacing, route, mop_up, done; only to show), done of of (growing), started (unix s), elapsed_s,
-estimate_s (what that area's last planning took, null before one), error}.
+estimate_s (what that area's last planning took, null before one), error, waiting_n (the jobs waiting in the worker),
+waiting (the first WAITING_SHOWN of them in the order they'll run: [{area_id (null: none, or mower_logic's), job (plan,
+drive, leftovers, mower, after_mow), rank (mower, asked, after_mow, ahead), ids (the RPC requests waiting for it, none
+for the node's own)}])}, also as the queue changes when nothing plans.
 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
@@ -153,7 +161,6 @@ import math
 from concurrent.futures import Future
 import os
 import pickle
-import queue
 import threading
 import time
 import weakref
@@ -298,8 +305,13 @@ SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
 # RPC methods answered on a thread of their own (they take a while, the others go on meanwhile)
 BACKGROUND = ('planner.simulate', 'planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
 # the planner's jobs by urgency (Worker): mower_logic waits for its plan, then what was asked for over RPC, then the
-# checks after a mow, planning ahead last
+# checks after a mow, planning ahead last (the node's own and planner.plan's ahead); their names in the progress, the
+# waiting jobs shown there at most; JSON-RPC's code for a request superseded by one with its slot (-32001: the map
+# changed, -32002: the answer too big)
 MOWER, ASKED, AFTER_MOW, AHEAD = range(4)
+RANKS = ('mower', 'asked', 'after_mow', 'ahead')
+WAITING_SHOWN = 20
+SUPERSEDED = -32003
 # mowbite/planner/progress (PlanProgress): s between two messages at least (the one as a planning ends at once), done
 # of this many, s it grows towards 90 % in without a planning of that area before
 PROGRESS_TOPIC = 'mowbite/planner/progress'
@@ -348,91 +360,191 @@ class LogLines(logging.Handler):
 LOG = LogLines()
 
 
+class Superseded(Exception):
+    """A request still waiting in the worker, superseded by another with its slot (planner.plan)."""
+
+
+class _Job:
+    """A job waiting in the worker or running there: whoever waits for it, (their future, RPC request id, slot)."""
+
+    def __init__(self, urgency, order, fn, args, job, area_id, same, waiter):
+        self.urgency, self.order, self.fn, self.args = urgency, order, fn, args
+        self.job, self.area_id, self.same, self.waiters = job, area_id, same, [waiter]
+
+
 class Worker:
     """Everything that plans or looks at a plan's shapes, one job at a time on a thread of its own: planner.plan,
     .leftovers and .drive, mower_logic's plan_path, planning ahead, the checks after a mow. Two threads at one shape can
     crash GEOS (shapely lets go of the GIL, a prepared geometry builds its indexes when first asked), and the other RPCs
     answer meanwhile. The most urgent job first (MOWER ... AHEAD), of those the one asked for first; a job a job asks for
-    runs at once."""
+    runs at once. changed(): the jobs waiting changed (called outside the worker's lock)."""
 
     def __init__(self):
-        self.jobs = queue.PriorityQueue()
+        self.cond = threading.Condition()
+        self.jobs, self.running = [], None
         self.order = itertools.count()
+        self.changed = lambda: None
         self.thread = threading.Thread(target=self.serve, name='planner worker', daemon=True)
         self.thread.start()
 
-    def run(self, urgency, fn, *args, **kw):
-        """fn(*args, **kw) in the worker: its result, or its exception raised here."""
+    def run(self, urgency, fn, *args, **what):
+        """fn(*args) in the worker: its result, or its exception raised here (what: see submit)."""
+        return self.submit(urgency, fn, *args, **what)[0]
+
+    def submit(self, urgency, fn, *args, job='plan', area_id=None, rid=None, same=None, slot=None):
+        """fn(*args) in the worker: (its result, whether it joined a job waiting or running with the same same (not
+        None): that one's result), its exception raised here. job, area_id and rid (the RPC request's id): what waiting
+        tells of it. slot: who waits with it for a job not begun yet gets Superseded instead, a job nobody waits for
+        any more is dropped. A job asked for more urgently than it waits is moved up."""
         if threading.current_thread() is self.thread:
-            return fn(*args, **kw)
-        job = Future()
-        self.jobs.put((urgency, next(self.order), job, fn, args, kw))
-        return job.result()
+            return fn(*args), False
+        future, gone = Future(), []
+        with self.cond:
+            if slot is not None:
+                for queued in self.jobs:
+                    gone += [w for w in queued.waiters if w[2] == slot]
+                    queued.waiters = [w for w in queued.waiters if w[2] != slot]
+                self.jobs = [queued for queued in self.jobs if queued.waiters]
+            running = [self.running] if self.running is not None else []
+            found = next((j for j in running + self.jobs if j.same == same), None) if same is not None else None
+            if found is not None:
+                found.waiters.append((future, rid, slot))
+                found.urgency = min(found.urgency, urgency)
+            else:
+                self.jobs.append(_Job(urgency, next(self.order), fn, args, job, area_id, same, (future, rid, slot)))
+            self.cond.notify()
+        for waiter in gone:
+            waiter[0].set_exception(Superseded('superseded by a newer request'))
+        self.changed()
+        return future.result(), found is not None
+
+    def waiting(self):
+        """(how many jobs wait, the first WAITING_SHOWN of them in the order they'll run: [{area_id, job, rank,
+        ids}])."""
+        with self.cond:
+            jobs = sorted(self.jobs, key=lambda j: (j.urgency, j.order))
+            shown = [{'area_id': j.area_id, 'job': j.job, 'rank': RANKS[j.urgency],
+                      'ids': [rid for _, rid, _ in j.waiters if rid]} for j in jobs[:WAITING_SHOWN]]
+        return len(jobs), shown
 
     def serve(self):
         while True:
-            _, _, job, fn, args, kw = self.jobs.get()
+            with self.cond:
+                while not self.jobs:
+                    self.cond.wait()
+                job = min(self.jobs, key=lambda j: (j.urgency, j.order))
+                self.jobs.remove(job)
+                self.running = job
+            self.changed()
+            result, error = None, None
             try:
-                job.set_result(fn(*args, **kw))
+                result = job.fn(*job.args)
             except BaseException as e:  # noqa: BLE001 - handed to whoever waits
-                job.set_exception(e)
+                error = e
+            with self.cond:
+                self.running = None
+                waiters = list(job.waiters)
+            for future, _, _ in waiters:
+                if error is not None:
+                    future.set_exception(error)
+                else:
+                    future.set_result(result)
 
 
 class PlanProgress:
     """mowbite/planner/progress (retained, QoS 1, through xbot_monitoring): how far the planning that runs got, at most
     every PROGRESS_EVERY s and once more as it ends. done of PROGRESS_OF grows with plan_coverage's steps and between
     them with the time that area's last planning took (estimate_s; without one more slowly), so a bar keeps moving while
-    a long step runs in a process of its own."""
+    a long step runs in a process of its own. A planning of no area of the map (an outline asked for) isn't shown: the
+    messages stay the last area's. waiting() (the worker's): what waits, in every message; when no area's planning runs
+    a change of it is sent too (a while after it, if it's still changed then: a job begun at once isn't)."""
 
-    def __init__(self, publish):
-        self.publish = publish
+    def __init__(self, publish, waiting=lambda: (0, [])):
+        self.publish, self.waiting = publish, waiting
         self.lock = threading.Lock()
-        self.area, self.running, self.sent = None, False, 0.0
+        self.area, self.key, self.stage, self.done, self.running, self.sent = None, None, None, 0, False, 0.0
+        self.started, self.ended, self.error, self.unshown = None, None, None, False
+        self.told = (0, [])  # (the waiting jobs the last message had)
+        self.later = None  # (the timer sending a change of them)
         self.took = {}  # area id: s its last planning took
 
     def begin(self, area_id, key):
         """A planning of area_id begins, key: the plan's."""
         with self.lock:
+            self.unshown = area_id is None
+            if self.unshown:
+                return
             self.area, self.key, self.stage, self.part, self.done = area_id, key, 'angles', 0.0, 0
-            self.started, self.error, self.running = time.time(), None, True
+            self.started, self.ended, self.error, self.running = time.time(), None, None, True
         self.send()
         threading.Thread(target=self.tick, name='planner progress', daemon=True).start()
 
     def step(self, stage, done, of):
         """plan_coverage's progress."""
         with self.lock:
+            if self.unshown:
+                return
             self.stage, self.part = stage, max(self.part, float(done) / max(1, of))
 
     def end(self, error=None):
         """It ended, error: why it failed."""
         with self.lock:
-            if not self.running:
+            shown, self.unshown = not self.unshown, False
+            if shown and not self.running:
                 return
-            self.running, self.error = False, error
-            if error is None:
-                self.took[self.area] = time.time() - self.started
-                self.stage, self.done = 'done', PROGRESS_OF
-        self.send(at_once=True)
+            if shown:
+                self.running, self.error, self.ended = False, error, time.time()
+                if error is None:
+                    self.took[self.area] = self.ended - self.started
+                    self.stage, self.done = 'done', PROGRESS_OF
+        if shown:
+            self.send(at_once=True)
+        self.queue_changed()  # (what waits now, where that wasn't told yet)
 
     def tick(self):
         while self.running:
             time.sleep(PROGRESS_EVERY / 4.0)
             self.send()
 
-    def send(self, at_once=False):
+    def queue_changed(self):
+        """The jobs waiting changed (Worker.changed): sent a while after, see send."""
+        with self.lock:
+            if self.later is None:
+                self.later = threading.Timer(PROGRESS_EVERY / 4.0, self.send_queue)
+                self.later.daemon = True
+                self.later.start()
+
+    def send_queue(self):
+        with self.lock:
+            self.later = None
+        self.send(queue=True)
+
+    def send(self, at_once=False, queue=False):
         with self.lock:
             now = time.time()
-            if self.area is None or not at_once and (not self.running or now - self.sent < PROGRESS_EVERY):
+            waiting = self.waiting()
+            if queue:  # (while a planning runs its messages tell it)
+                if self.running or waiting == self.told:
+                    return
+                if now - self.sent < PROGRESS_EVERY:
+                    self.later = threading.Timer(PROGRESS_EVERY - (now - self.sent), self.send_queue)
+                    self.later.daemon = True
+                    self.later.start()
+                    return
+            elif self.area is None or not at_once and (not self.running or now - self.sent < PROGRESS_EVERY):
                 return
-            elapsed, estimate = now - self.started, self.took.get(self.area)
+            estimate = self.took.get(self.area)
+            elapsed = None if self.started is None else (self.ended or now) - self.started
             if self.running:
                 timed = min(0.95, elapsed / estimate) if estimate else 0.9 * elapsed / (elapsed + PROGRESS_SLOW)
                 self.done = max(self.done, int(PROGRESS_OF * min(0.99, max(self.part, timed))))
-            self.sent = now
+            self.sent, self.told = now, waiting
             message = {'area_id': self.area, 'key': self.key, 'running': self.running, 'stage': self.stage,
-                       'done': self.done, 'of': PROGRESS_OF, 'started': round(self.started, 1),
-                       'elapsed_s': round(elapsed, 1), 'estimate_s': round(estimate, 1) if estimate else None,
-                       'error': self.error}
+                       'done': self.done, 'of': PROGRESS_OF,
+                       'started': round(self.started, 1) if self.started is not None else None,
+                       'elapsed_s': round(elapsed, 1) if elapsed is not None else None,
+                       'estimate_s': round(estimate, 1) if estimate else None, 'error': self.error,
+                       'waiting_n': waiting[0], 'waiting': waiting[1]}
         try:
             self.publish(json.dumps(message))
         except Exception as e:  # noqa: BLE001 - showing progress must not take a planning down
@@ -441,6 +553,15 @@ class PlanProgress:
 
 class Cancelled(Exception):
     """planner.simulate.cancel: the simulation that runs ends."""
+
+
+# the id of the RPC request the thread answers (XbotRpc.answer), for the worker's waiting jobs
+REQUEST = threading.local()
+
+
+def asked_id():
+    """The id of the RPC request this thread answers, None: none."""
+    return getattr(REQUEST, 'id', None) or None
 
 
 class XbotRpc:
@@ -478,6 +599,7 @@ class XbotRpc:
             params = json.loads(req.params) if req.params else None
         except ValueError:
             params = []
+        REQUEST.id = req.id
         result, error = call(self.methods, req.method, params)
         if error is None and too_big(result):  # (over MQTT: the broker would drop it without a word)
             error = (ANSWER_TOO_BIG, too_big(result))
@@ -492,6 +614,11 @@ class XbotRpc:
             self.error.publish(RpcError(code=code, message=message, id=req.id))
 
 
+def same_request(params):
+    """What makes two planner.plan requests the same (their answer the same): their params but ahead and slot."""
+    return json.dumps({k: v for k, v in params.items() if k not in ('ahead', 'slot')}, sort_keys=True)
+
+
 def call(methods, method, params):
     """An RPC method of methods with params (None: none): (its result as JSON, None) or (None, (code, message)), a
     PlanningError the caller's mistake."""
@@ -504,6 +631,9 @@ def call(methods, method, params):
     except PlanningError as e:
         rospy.loginfo('MowBite Planner: %s: %s', method, e)
         return None, (RpcError.ERROR_INVALID_PARAMS, str(e))
+    except Superseded as e:
+        rospy.loginfo('MowBite Planner: %s: %s', method, e)
+        return None, (SUPERSEDED, str(e))
     except Exception as e:  # noqa: BLE001 - an RPC must not take the planner down
         rospy.logerr('MowBite Planner: %s failed: %s: %s', method, type(e).__name__, e, exc_info=True)
         return None, (RpcError.ERROR_INTERNAL, 'internal error: %s' % e)
@@ -662,7 +792,8 @@ class MowbitePlannerRos1:
         self.worker = Worker()
         mqtt = rospy.Publisher('/xbot_monitoring/mqtt_publish', MqttPublish, queue_size=10)
         self.progress = PlanProgress(lambda payload: mqtt.publish(MqttPublish(topic=PROGRESS_TOPIC, payload=payload,
-                                                                              retain=True)))
+                                                                              retain=True)), self.worker.waiting)
+        self.worker.changed = self.progress.queue_changed
         self.launch_width = float(rospy.get_param('~mower_width', 0.18))
         self.launch = dict(rospy.get_param('~settings', {}) or {})
         self.defaults = self.setup(self.launch_width, self.launch, {})
@@ -752,9 +883,11 @@ class MowbitePlannerRos1:
         set_workers(self.workers)
         self.methods = {'planner.settings': self.rpc_settings, 'planner.settings.set': self.rpc_settings_set,
                         'planner.area.set': self.rpc_area_set,
-                        'planner.plan': lambda params: self.worker.run(ASKED, self.rpc_plan, params),
-                        'planner.drive': lambda params: self.worker.run(ASKED, self.rpc_drive, params),
-                        'planner.leftovers': lambda params: self.worker.run(ASKED, self.rpc_leftovers, params),
+                        'planner.plan': self.rpc_plan_asked,
+                        'planner.drive': lambda params: self.worker.run(ASKED, self.rpc_drive, params, job='drive',
+                                                                        rid=asked_id()),
+                        'planner.leftovers': lambda params: self.worker.run(ASKED, self.rpc_leftovers, params,
+                                                                            job='leftovers', rid=asked_id()),
                         'planner.simulate': self.rpc_simulate,
                         'planner.simulate.status': self.rpc_simulate_status,
                         'planner.simulate.cancel': self.rpc_simulate_cancel,
@@ -1122,6 +1255,19 @@ class MowbitePlannerRos1:
         self.plan_ahead_later()
         return self.rpc_settings()
 
+    def rpc_plan_asked(self, params):
+        """planner.plan: rpc_plan in the worker, ahead and slot as the module's docstring says."""
+        ahead, slot = params.get('ahead', False), params.get('slot')
+        if not isinstance(ahead, bool):
+            raise PlanningError('ahead must be true or false')
+        if slot is not None and not isinstance(slot, str):
+            raise PlanningError('slot must be a string')
+        area_id = params.get('area_id')
+        result, joined = self.worker.submit(AHEAD if ahead else ASKED, self.rpc_plan, params, rid=asked_id(),
+                                            area_id=area_id if isinstance(area_id, str) else None,
+                                            same=same_request(params), slot=slot)
+        return dict(result, kept=True) if joined else result
+
     def rpc_plan(self, params, keep=None, mowed=None):
         """keep: a list the plan itself goes to too. mowed: where the blade went already, only what that left is planned
         (not kept: it's that one mow's)."""
@@ -1339,7 +1485,9 @@ class MowbitePlannerRos1:
         for name in ('poses', 'report', 'trace'):
             params.pop(name, None)
         keep = []
-        planned = self.worker.run(ASKED, self.rpc_plan, params, keep)
+        area_id = params.get('area_id')
+        planned = self.worker.run(ASKED, self.rpc_plan, params, keep,
+                                  area_id=area_id if isinstance(area_id, str) else None)
         if not keep:
             raise PlanningError('no plan to simulate')
         # (a copy of its own, simulated and evaluated here: the worker meanwhile at the one kept)
@@ -1453,7 +1601,7 @@ class MowbitePlannerRos1:
         """leftovers_auto: planner.leftovers of the finished mow, armed. Where its passes mow LEFTOVERS_AUTO_MIN m2 at
         least the mower is sent out for them as soon as it's ready (the mow's JOB_COMPLETE comes before it docks), while
         they're armed and not asked for yet."""
-        self.worker.run(AFTER_MOW, self.rpc_leftovers, {'job_id': job_id, 'arm': True})
+        self.worker.run(AFTER_MOW, self.rpc_leftovers, {'job_id': job_id, 'arm': True}, job='after_mow')
         armed = self.armed
         area = sum(p.stats['leftovers']['area'] for p in armed['plans'].values() if p is not None) if armed else 0.0
         if area < LEFTOVERS_AUTO_MIN:
@@ -1497,7 +1645,7 @@ class MowbitePlannerRos1:
         except Exception as e:  # noqa: BLE001 - timing must not take the planner down
             rospy.logerr('MowBite Planner: timing the mow failed: %s: %s', type(e).__name__, e, exc_info=True)
         try:
-            self.drive = got = self.worker.run(AFTER_MOW, self.drive_check, job_id)
+            self.drive = got = self.worker.run(AFTER_MOW, self.drive_check, job_id, job='after_mow')
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: drive not checked: %s', e)
             return
@@ -1676,8 +1824,7 @@ class MowbitePlannerRos1:
             t0 = time.perf_counter()
 
             def ahead(area):
-                return (count is None or count == self.ahead_count) and \
-                    self.worker.run(AHEAD, self.ahead_plan, area['id'])
+                return (count is None or count == self.ahead_count) and self.ahead_plan(area['id'])
 
             done = sum(ahead(area) for area in areas)
             if count is not None and count != self.ahead_count:
@@ -1686,8 +1833,10 @@ class MowbitePlannerRos1:
                 rospy.loginfo('MowBite Planner: %d areas planned ahead in %.1f s', done, time.perf_counter() - t0)
 
     def ahead_plan(self, area_id):
+        """area_id planned in the worker (with planner.plan's ahead for it: the same request)."""
+        params = {'area_id': area_id}
         try:
-            got = self.rpc_plan({'area_id': area_id})
+            got = self.worker.run(AHEAD, self.rpc_plan, params, area_id=area_id, same=same_request(params))
             if got.get('duration'):
                 rospy.loginfo('MowBite Planner: area %s takes about %.0f min', area_id, got['duration']['min'])
             return True
@@ -1877,7 +2026,7 @@ class MowbitePlannerRos1:
 
     def handle(self, req):
         """mower_logic's plan_path, in the worker before anything else waiting there."""
-        return self.worker.run(MOWER, self.plan_path, req)
+        return self.worker.run(MOWER, self.plan_path, req, job='mower')
 
     def plan_path(self, req):
         if self.current.planner == 'slic3r':  # mower_logic's request as it came
