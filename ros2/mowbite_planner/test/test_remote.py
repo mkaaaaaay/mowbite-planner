@@ -111,6 +111,19 @@ def test_the_reader_is_strict(monkeypatch):
             read_back('radius0', dict(good, **change))
 
 
+def test_a_pose_faces_the_way_driven():
+    """Straight on within FACING; on a tight arc (a corner of a few cm, the step's chord halfway between both headings)
+    too; sideways not, nor between two headings half a turn apart."""
+    step = 0.025
+    assert remote.faces(Pose2D(0, 0, 0.0), Pose2D(step, 0, 0.0), 0.0)
+    arc = [Pose2D(0.04 * math.sin(t), 0.04 - 0.04 * math.cos(t), t) for t in (0.0, 0.6, 1.2)]
+    for a, b in zip(arc, arc[1:]):
+        travel = math.atan2(b.y - a.y, b.x - a.x)
+        assert math.degrees(abs(travel - a.yaw)) > 15 and remote.faces(a, b, travel)
+    assert not remote.faces(Pose2D(0, 0, 0.0), Pose2D(0, step, 0.0), 0.5 * math.pi)
+    assert not remote.faces(Pose2D(0, 0, 0.0), Pose2D(0, step, math.pi), 0.5 * math.pi)
+
+
 def test_a_plan_breaking_a_rule_is_refused():
     """Its form (segments, sections, headings) and report.rules with the mower's geometry and body."""
     got = read_back('radius0')

@@ -262,7 +262,7 @@ def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = (
 
 def refused(plan: CoveragePlan) -> str:
     """Why a plan from elsewhere isn't driven here, '' where it is: its form (the segments in order over all poses, the
-    sections where they start, every pose facing the way it's driven to the next, no two on one spot) or what
+    sections where they start, every pose facing the way it's driven to the next (faces), no two on one spot) or what
     report.rules finds (with the geometry and body of here: plan_from)."""
     poses, segs = plan.poses, plan.segments
     n = len(poses)
@@ -291,12 +291,21 @@ def refused(plan: CoveragePlan) -> str:
             before = math.atan2(a.y - poses[i - 1].y, a.x - poses[i - 1].x) + math.pi
             if angle_diff(travel, a.yaw) < 0.5 * math.pi and angle_diff(before, a.yaw) < 0.5 * math.pi:
                 continue
-        if angle_diff(travel, a.yaw) > FACING:
+        if not faces(a, b, travel):
             return f'pose {i} doesn\'t face the way to the next one'
     if not -math.pi < poses[-1].yaw <= math.pi:
         return f'pose {n - 1}: heading out of range'
     hard = rules(plan)['hard']
     return '; '.join(hard)
+
+
+def faces(a: Pose2D, b: Pose2D, travel: float) -> bool:
+    """Whether a pose faces the way (travel) to the next, b: within FACING, or on an arc (a quarter turn at most from a
+    to b, a tight corner's steps of a few cm) of the heading halfway between both."""
+    if angle_diff(travel, a.yaw) <= FACING:
+        return True
+    turn = math.remainder(b.yaw - a.yaw, 2.0 * math.pi)
+    return abs(turn) <= 0.5 * math.pi and angle_diff(travel, a.yaw + 0.5 * turn) <= FACING
 
 
 # -- reading strictly ----------------------------------------------------------------------------------------------
