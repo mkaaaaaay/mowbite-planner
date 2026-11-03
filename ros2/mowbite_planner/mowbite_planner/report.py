@@ -108,48 +108,14 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     double_mowed_pct: how much more is mowed than the area, every further pass over a spot counted again
     (the sum of what each segment mows on its own, less what they mow together)."""
     cfg = plan.config
-    hard: List[str] = []
     soft: List[str] = []
     poses = plan.poses
     width = cfg.mower_width if cfg else 0.0
-    step = cfg.waypoint_spacing if cfg else 0.0
-
-    # where the mower's centre may go: the area shrunk (robot_space), on transits the drivable areas too, or robot_space
-    # where there's no way through them (planner._Route.go_to: with the body checked that's body_tolerance further out
-    # than transit_space has it, the body checked there)
-    inside = prep(plan.robot_space.buffer(TOLERANCE)) if plan.robot_space is not None else None
-    drivable = prep(union([plan.transit_space, plan.robot_space]).buffer(TOLERANCE)) \
-        if plan.transit_space is not None else inside
-    jumps = {s - 1 for s in plan.section_starts[1:]}
-    outside = 0
-    for seg in plan.segments:
-        where = drivable if seg.kind == TRANSIT else inside
-        if where is None:
-            continue
-        outside += sum(1 for p in poses[seg.start:seg.end + 1] if not where.covers(Point(p.x, p.y)))
-    if outside:
-        hard.append(f'{outside} poses outside the space the mower may drive in')
-    gaps = [i for i, (a, b) in enumerate(zip(poses, poses[1:]))
-            if i not in jumps and step > 0 and math.hypot(b.x - a.x, b.y - a.y) > step + 1e-6]
-    if gaps:
-        hard.append(f'{len(gaps)} gaps between poses wider than waypoint_spacing {step} m, the first after pose '
-                    f'{gaps[0]}')
-    if any(s.reverse for s in plan.segments) and (cfg is None or cfg.drive == 'forward'):
-        hard.append('drives backwards')
-    footprint = plan_footprint(plan, blade=False)
-    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
-        if footprint is not None else []
-    if body:
-        hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '
-                    f'({body[0]["x"]:.2f}, {body[0]["y"]:.2f})')
-    over = blade_over(plan)
-    if over:
-        deepest = max(over, key=lambda o: o['m'])
-        hard.append(f'the blade reaches over an area not to mow at {len(over)} poses, {deepest["m"]:.3f} m at the '
-                    f'most ({deepest["kind"]}) at ({deepest["x"]:.2f}, {deepest["y"]:.2f})')
+    kept = rules(plan)
+    hard = kept['hard']
 
     mowed = swept_area(plan, width).intersection(plan.free_space) if width > 0 else None
-    out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': body, 'blade_over': over}
+    out: Dict[str, Any] = {'hard': hard, 'soft': soft, 'body_out': kept['body_out'], 'blade_over': kept['blade_over']}
     if mowed is not None:
         target, pieces, got = left_of(plan, mowed)
         out.update(got)
@@ -192,6 +158,50 @@ def check_plan(plan: CoveragePlan) -> Dict[str, Any]:
     if total > 0 and kinds[TRANSIT] / total > 0.1:
         soft.append(f'{100 * kinds[TRANSIT] / total:.0f} % of the way are drives between the parts of the plan')
     return out
+
+
+def rules(plan: CoveragePlan) -> Dict[str, Any]:
+    """What check_plan finds wrong with the way the plan drives, what it leaves unmowed aside: {'hard': [...],
+    'body_out': [...], 'blade_over': [...]}."""
+    cfg = plan.config
+    hard: List[str] = []
+    poses = plan.poses
+    step = cfg.waypoint_spacing if cfg else 0.0
+
+    # where the mower's centre may go: the area shrunk (robot_space), on transits the drivable areas too, or robot_space
+    # where there's no way through them (planner._Route.go_to: with the body checked that's body_tolerance further out
+    # than transit_space has it, the body checked there)
+    inside = prep(plan.robot_space.buffer(TOLERANCE)) if plan.robot_space is not None else None
+    drivable = prep(union([plan.transit_space, plan.robot_space]).buffer(TOLERANCE)) \
+        if plan.transit_space is not None else inside
+    jumps = {s - 1 for s in plan.section_starts[1:]}
+    outside = 0
+    for seg in plan.segments:
+        where = drivable if seg.kind == TRANSIT else inside
+        if where is None:
+            continue
+        outside += sum(1 for p in poses[seg.start:seg.end + 1] if not where.covers(Point(p.x, p.y)))
+    if outside:
+        hard.append(f'{outside} poses outside the space the mower may drive in')
+    gaps = [i for i, (a, b) in enumerate(zip(poses, poses[1:]))
+            if i not in jumps and step > 0 and math.hypot(b.x - a.x, b.y - a.y) > step + 1e-6]
+    if gaps:
+        hard.append(f'{len(gaps)} gaps between poses wider than waypoint_spacing {step} m, the first after pose '
+                    f'{gaps[0]}')
+    if any(s.reverse for s in plan.segments) and (cfg is None or cfg.drive == 'forward'):
+        hard.append('drives backwards')
+    footprint = plan_footprint(plan, blade=False)
+    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
+        if footprint is not None else []
+    if body:
+        hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '
+                    f'({body[0]["x"]:.2f}, {body[0]["y"]:.2f})')
+    over = blade_over(plan)
+    if over:
+        deepest = max(over, key=lambda o: o['m'])
+        hard.append(f'the blade reaches over an area not to mow at {len(over)} poses, {deepest["m"]:.3f} m at the '
+                    f'most ({deepest["kind"]}) at ({deepest["x"]:.2f}, {deepest["y"]:.2f})')
+    return {'hard': hard, 'body_out': body, 'blade_over': over}
 
 
 def left_of(plan: CoveragePlan, mowed) -> Tuple[Any, List[Any], Dict[str, Any]]:

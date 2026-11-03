@@ -2,8 +2,10 @@
 fixed rules as the measuring tools count them (tools/metrics.py against what the map alone gives, tools/frozen.py),
 the plan's form (planrules.check_invariants), stats that tell what the poses do, the warnings the app reads, the same
 plan wherever and however it's planned (what a plan is measured against comes from the map and the request alone,
-metrics.Ref). Marked matrix: python3 -m pytest test -m 'not matrix' leaves them out."""
+metrics.Ref), read back from the form a house computer sends it in (remote.py). Marked matrix: python3 -m pytest test
+-m 'not matrix' leaves them out."""
 
+import dataclasses
 import json
 import math
 import os
@@ -20,7 +22,7 @@ from shapely.ops import unary_union
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', 'tools'), HERE]
 
-from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa: E402
+from mowbite_planner import PlannerConfig, PlanningError, plan_coverage, remote  # noqa: E402
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN  # noqa: E402
 from mowbite_planner.export import fingerprint, to_openmower_json  # noqa: E402
 from planrules import check_invariants  # noqa: E402
@@ -129,6 +131,7 @@ def test_every_plan(shape, body, setting):
     keeps_the_rules(plan, request(shape, body, setting))
     stats_tell_what_the_poses_do(plan)
     labels_fit_the_geometry(plan)
+    reads_back(plan, request(shape, body, setting))
 
 
 def keeps_the_rules(plan, r):
@@ -170,6 +173,21 @@ def stats_tell_what_the_poses_do(plan):
     assert counted[1] == ([fit['left']] if fit and fit['left'] else [])
     if not plan.config.body:
         assert plan.warnings[0] == plan.config.no_body
+
+
+def reads_back(plan, r):
+    """The plan as the house sends it (remote.py), read back on the mower with the config and geometry it works out
+    itself: every field the same, to the bit, and the mower takes it."""
+    args = tuple(r[k] for k in ('boundary', 'obstacles', 'cfg', 'start', 'end', 'drivable', 'keep_out', 'margins'))
+    got = remote.plan_from(remote.unpack(remote.pack(remote.plan_json(plan, r['cfg']))), args)
+    for f in dataclasses.fields(plan):
+        a, b = getattr(plan, f.name), getattr(got, f.name)
+        if f.name == 'levels':
+            a, b = [g.wkb for g in a], [g.wkb for g in b]
+        elif f.name not in remote.SENT + ('lane_spacing', 'config'):
+            a, b = a if a is None else a.wkb, b if b is None else b.wkb
+        assert a == b, f.name
+    assert remote.refused(got) == ''
 
 
 def labels_fit_the_geometry(plan):

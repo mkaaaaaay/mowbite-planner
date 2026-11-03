@@ -13,7 +13,7 @@ import time
 import types
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Polygon
 from shapely.prepared import prep
@@ -204,6 +204,23 @@ class _Area:
         return self.got(self.later(c, probe=probe), probe)
 
 
+def _spacings(cfg: PlannerConfig) -> List[float]:
+    """lane_spacing_mode 'auto': the SPACING_CANDIDATES lane spacings it tries, widest first."""
+    lo, hi = cfg.spacing_range
+    return [hi - (hi - lo) * i / max(1, SPACING_CANDIDATES - 1) for i in range(SPACING_CANDIDATES)]
+
+
+def _fixed(cfg: PlannerConfig, spacing: float) -> PlannerConfig:
+    return dataclasses.replace(cfg, lane_spacing_mode='fixed', overlap=1.0 - spacing / cfg.mower_width)
+
+
+def _turning(cfg: PlannerConfig) -> PlannerConfig:
+    """cfg as _plan_coverage plans with it: turn_radius 0 with the body checked is ZERO_TURN (see turn_radius)."""
+    if cfg.body and cfg.turn_radius == 0:
+        return dataclasses.replace(cfg, turn_radius=ZERO_TURN, turn_on_spot=True, lane_order='snake')
+    return cfg
+
+
 def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
     """lane_spacing_mode 'auto', with mop_up: the widest lane spacing of SPACING_CANDIDATES in spacing_range after which
     a narrower one doesn't leave LEFT_GAIN less unmowed, the blade TRACK narrower each side (the mower off its way), and
@@ -218,13 +235,10 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
     probed: Dict[float, float] = {}
     kept: Dict[float, Dict[str, Any]] = {}  # of the spacings planned through, what quick() needs
 
-    def fixed(spacing: float) -> PlannerConfig:
-        return dataclasses.replace(cfg, lane_spacing_mode='fixed', overlap=1.0 - spacing / cfg.mower_width)
-
     def quick(spacing: float) -> float:
         if spacing not in probed:
             probed[spacing] = left_alone(*kept[spacing]['alone']) if 'alone' in kept.get(spacing, {}) else \
-                _result(*probing[spacing])[0] if spacing in probing else area.one(fixed(spacing), probe=True)
+                _result(*probing[spacing])[0] if spacing in probing else area.one(_fixed(cfg, spacing), probe=True)
         return probed[spacing]
 
     def gain(spacing: float, narrower: float) -> bool:
@@ -234,25 +248,26 @@ def _auto(area: _Area, cfg: PlannerConfig) -> CoveragePlan:
 
     # (on real gardens the narrower lanes' plan left up to 0.2 m2 more than the widest's by the turns and corners now
     # and then, in the simulation too)
-    wide = area.later(fixed(widest), completed=True) if widest > hi + 1e-9 else None
-    spacings = [hi - (hi - lo) * i / max(1, SPACING_CANDIDATES - 1) for i in range(SPACING_CANDIDATES)]
+    wide = area.later(_fixed(cfg, widest), completed=True) if widest > hi + 1e-9 else None
+    spacings = _spacings(cfg)
     # (with processes for it and none for the widest's the second at once too: planned through more often than not;
     # three at once on a CM4's 4 cores took longer than two)
-    ahead = {s: area.later(fixed(s), probe=kept.setdefault(s, {})) for s in spacings[1:2] if _pool() and not wide}
+    ahead = {s: area.later(_fixed(cfg, s), probe=kept.setdefault(s, {})) for s in spacings[1:2]
+             if _pool() and not wide}
     probing: Dict[float, Tuple['Future', tuple, Dict[str, Any]]] = {}
     for i, spacing in enumerate(spacings):
         try:
             if best is not None and not gain(best_spacing, spacing):
                 break
             planning = ahead[spacing] if spacing in ahead else \
-                area.later(fixed(spacing), probe=kept.setdefault(spacing, {}))
+                area.later(_fixed(cfg, spacing), probe=kept.setdefault(spacing, {}))
             if i == 0 and _pool():  # (what the second's loops and lanes alone leave, asked for after it: beside it)
-                probing.update({s: area.later(fixed(s), probe=True) for s in spacings[1:2]})
+                probing.update({s: area.later(_fixed(cfg, s), probe=True) for s in spacings[1:2]})
             plan = area.got(planning, kept[spacing])
         except PlanningError as e:  # this spacing doesn't fit (too many poses), a narrower one may not either
             error = error or e
             if best is None and _pool():  # (the narrower ones are planned through till one fits: those at once)
-                ahead.update({s: area.later(fixed(s), probe=kept.setdefault(s, {})) for s in spacings[i + 1:]
+                ahead.update({s: area.later(_fixed(cfg, s), probe=kept.setdefault(s, {})) for s in spacings[i + 1:]
                               if s not in ahead})
             continue
         if best is None and i + 1 < len(spacings):
@@ -373,13 +388,27 @@ class _Timer:
         self.lap = now
 
 
+def _recorded_lines(cfg: PlannerConfig, outlines, away_from) -> Tuple[list, list]:
+    """The outlines and what the body keeps away from, the way the mower went recording them: drive reverse the body
+    turned round going the other way (see route.recorded)."""
+    if cfg.drive == 'reverse':
+        return [list(o)[::-1] for o in outlines], [list(o)[::-1] for o in away_from]
+    return outlines, away_from
+
+
+def _narrow(rings_of: Rings, passes, cfg: PlannerConfig):
+    """The strips too narrow for lanes that get a loop: those the lanes leave something of (levels.narrow_left)."""
+    narrow = rings_of.narrow
+    if not narrow.is_empty and passes and not (cfg.skip_outline_loops or cfg.skip_obstacle_loops):
+        narrow = narrow_left(narrow, passes, rings_of.remaining, 0.5 * cfg.mower_width)
+    return narrow
+
+
 def _as_recorded(route: _Route, cfg: PlannerConfig, footprint, outlines, away_from, margin_of) -> None:
     """The outermost loop the way the outline was recorded (rings.drive_ring): the body where it was then, the centre
     no further than RECORDED_CENTRE past the lines, a negative perimeter_offset that far (drive_space reaches
     body_tolerance past the first loop, with edge_margin 0 past the lines: rounding a corner cut it out)."""
-    if cfg.drive == 'reverse':
-        # (the body turned round going the other way: where the mower's was recording them, see route.recorded)
-        outlines, away_from = [list(o)[::-1] for o in outlines], [list(o)[::-1] for o in away_from]
+    outlines, away_from = _recorded_lines(cfg, outlines, away_from)
     route.recorded_fp = Footprint(recorded_space(outlines, away_from, margin_of, cfg), cfg.body_outline, 0.0,
                                   blade=footprint.blade)
     out = max(RECORDED_CENTRE, -(cfg.perimeter_offset or 0.0))
@@ -415,8 +444,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     timer = _Timer(time.perf_counter())
     cfg = config or PlannerConfig()
     cfg.validate()
-    if cfg.body and cfg.turn_radius == 0:  # (see turn_radius)
-        cfg = dataclasses.replace(cfg, turn_radius=ZERO_TURN, turn_on_spot=True, lane_order='snake')
+    cfg = _turning(cfg)
     reach_over = list(reach_over) + list(unmowed)
     margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
@@ -436,9 +464,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     passes, zones = [], []
     if cfg.fill_pattern != 'concentric' and not cfg.skip_lanes and not rings_of.lane_region.is_empty:
         passes, zones = lane_sets(rings_of.lane_region, rings_of.remaining, space.robot_space, angle, cfg)
-    narrow = rings_of.narrow
-    if not narrow.is_empty and passes and not (cfg.skip_outline_loops or cfg.skip_obstacle_loops):
-        narrow = narrow_left(narrow, passes, rings_of.remaining, 0.5 * cfg.mower_width)
+    narrow = _narrow(rings_of, passes, cfg)
     timer.took('lanes')
     loop_rings = rings_of.loop_rings(narrow)
     if probe is True:

@@ -63,13 +63,19 @@ def settings(cfg: PlannerConfig) -> PlannerConfig:
                                robot_outline=outline, blade_ahead=-cfg.blade_ahead, blade_offset=-cfg.blade_offset)
 
 
+def configs(cfg: PlannerConfig) -> Tuple[PlannerConfig, PlannerConfig]:
+    """(what a plan with cfg.drive slope or reverse is planned with, see settings; the config it has: cfg with the
+    body check turned on)."""
+    used = settings(cfg)
+    return used, cfg.with_overrides({'body_fit': used.body_fit, 'spin_margin': used.spin_margin})
+
+
 def planned(plan: Callable[[PlannerConfig], CoveragePlan], cfg: PlannerConfig, mowed=None) -> CoveragePlan:
     """The plan for cfg.drive slope or reverse as the mower drives it, plan(c) planning with c as plan_coverage does
     with drive forward. Its config: cfg with the body check turned on; its warnings say where that was."""
     if cfg.drive == 'slope' and mowed is not None:
         raise PlanningError('drive slope: no leftovers planned (the lanes go up and down only, no turns there)')
-    used = settings(cfg)
-    own = cfg.with_overrides({'body_fit': used.body_fit, 'spin_margin': used.spin_margin})
+    used, own = configs(cfg)
     base = plan(used)
     out = updown(base) if cfg.drive == 'slope' else reverse(base)
     notes = forced(cfg)
