@@ -2241,8 +2241,10 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
     its own, here a stand-in), the result kept; the progress all along."""
     asked = calib_ready(monkeypatch, CALIB_RESULT)
     assert rpc('planner.calib.start', {'mode': 'joystick'}) == ({'ok': True}, None)
-    assert calib_progress()[-1] == {'phase': 'recording', 'm': 0.0, 'turns': 0.0, 'runs': 0, 'ready': False,
-                                    'error': None}
+    counted = {'m': 0.0, 'turns': 0.0, 'runs': 0, 'still_s': 0.0, 'turns_left': 0, 'turns_right': 0,
+               'rotation_left': 0.0, 'rotation_right': 0.0, 'tight_left': 0.0, 'tight_right': 0.0}
+    need = node_module.calibrecord.needed('joystick')
+    assert calib_progress()[-1] == dict(counted, phase='recording', ready=False, error=None, need=need)
     assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'a calibration is recorded already'
     assert rpc('planner.calib.result')[1][1] == 'the calibration is still recorded'
     imu = node_module.Imu()
@@ -2266,7 +2268,9 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
     assert list(rec.columns['gps']['x']) == [3.0] and list(rec.columns['imu']['az']) == [9.81]
     assert list(rec.columns['twist']['v']) == [0.2] and list(rec.columns['cmd']['v']) == [0.2]
     assert rec.end['why'] == 'stop'
-    assert calib_progress()[-1] == {'phase': 'done', 'm': 42.0, 'turns': 6.1, 'runs': 7, 'ready': True, 'error': None}
+    # (m, turns and runs then the evaluation's)
+    assert calib_progress()[-1] == dict(counted, m=42.0, turns=6.1, runs=7, phase='done', ready=True, error=None,
+                                        need=need)
     assert rpc('planner.calib.result') == (CALIB_RESULT, None)
 
 

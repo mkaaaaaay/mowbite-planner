@@ -749,8 +749,10 @@ class Calibration:
     own) into folder/result.json, result answers with it. A recording found without its result (the node restarted)
     is evaluated as the node starts. Not in the worker: it never looks at a plan's shapes.
     How far it got goes to CALIB_TOPIC (retained, at most every CALIB_EVERY s): {phase (recording, evaluating, done),
-    m, turns, runs (as counted while recording, then the evaluation's), ready (enough data: the evaluation's), error
-    (why it ended without a result)}."""
+    m, turns, runs (as counted while recording, then the evaluation's), still_s, turns_left, turns_right,
+    rotation_left, rotation_right, tight_left, tight_right (as counted while recording, calibrecord.Counts.progress),
+    need (what the mode needs by those names and run_m, calibrecord.needed: it ends by itself once all are there),
+    ready (enough data: the evaluation's), error (why it ended without a result)}."""
 
     def __init__(self, folder, publish, software):
         self.recorder = calibrecord.Recorder(folder)
@@ -928,7 +930,9 @@ class Calibration:
             return
         self.sent = now
         counts = self.recorder.counts.progress() if self.recorder.counts else {'m': 0.0, 'turns': 0.0, 'runs': 0}
-        message = dict(self.based_on or counts, phase=self.phase, ready=self.ready, error=self.error)
+        message = dict(counts, **(self.based_on or {}), phase=self.phase, ready=self.ready, error=self.error)
+        if self.recorder.mode is not None:
+            message['need'] = calibrecord.needed(self.recorder.mode)
         try:
             self.publish(json.dumps(message))
         except Exception as e:  # noqa: BLE001 - showing progress must not take the recording down

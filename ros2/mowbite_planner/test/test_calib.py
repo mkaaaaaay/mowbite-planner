@@ -262,6 +262,27 @@ def test_record_counts_like_the_evaluation(tmp_path):
     assert counts.runs == result['based_on']['runs'] == 7
     assert abs(counts.m - result['based_on']['m']) < 2.0 and len(counts.turns[True]) == len(counts.turns[False]) == 3
     assert enough_at is not None and enough_at > twist['t'][-1] - 60
+    # the progress by the names of what the mode needs, all of it there (the stand at the start: 12 s less the ends)
+    got, need = counts.progress(), calibrecord.needed('joystick')
+    assert set(need) - {'run_m'} <= set(got) and got['turns_left'] == got['turns_right'] == 3
+    assert all(got[name] >= least for name, least in need.items() if name != 'run_m'), (got, need)
+    assert need == {'m': 20.0, 'runs': 4, 'run_m': 5.0, 'still_s': 10.0, 'turns_left': 3, 'turns_right': 3,
+                    'rotation_left': 2.5, 'rotation_right': 2.5, 'tight_left': 2.0, 'tight_right': 2.0}
+
+
+def test_record_counts_the_stands():
+    """Standing counts like the evaluation's stands (STAND_S s at least, STAND_TRIM off each end), the one going on
+    too; without them it isn't enough."""
+    counts = calibrecord.Counts(dict(calib.MIN['joystick'], runs=0, m=0.0, turns=0, rotation=0.0, antenna=0.0))
+    for k in range(121):  # (12 s still, then moving)
+        counts.add(k * 0.1, 0.0, 0.0)
+    assert counts.still_s() == pytest.approx(11.0) and counts.enough()
+    counts.add(12.1, 0.2, 0.0)
+    for k in range(20):  # (2 s: too short for a stand)
+        counts.add(13.0 + k * 0.1, 0.005, 0.0)
+    counts.add(15.0, 0.2, 0.0)
+    assert counts.progress()['still_s'] == 11.0
+    assert not calibrecord.Counts(calib.MIN['joystick']).enough()
 
 
 def test_recorder(tmp_path, monkeypatch):

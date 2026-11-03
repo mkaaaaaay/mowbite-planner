@@ -1,7 +1,8 @@
 """Recording a drive for the calibration on OpenMower (mowbite-calib/1, read by calibread): what the ROS 1 node hands
 it from OpenMower's topics, written as gzip'd JSON lines into one file of its folder (the one before goes, and its
-result) within the limits (LIMIT_S by mode, MAX_BYTES, FREE); how far it got (straight runs, turns between them) for
-the progress, and whether that's enough to ask the evaluation (calib.MIN). No ROS, nothing of the planner's core."""
+result) within the limits (LIMIT_S by mode, MAX_BYTES, FREE); how far it got (straight runs, turns between them each
+way, stands) for the progress with what the mode needs (needed), and whether that's enough to ask the evaluation
+(calib.MIN). No ROS, nothing of the planner's core."""
 
 import collections
 import gzip
@@ -14,7 +15,7 @@ import zlib
 from typing import Optional, Tuple
 
 from .calib import MIN
-from .calibfit import RUN_CURVE, RUN_USE, RUN_V, SMOOTH, TIGHT_R, TURN_MIN
+from .calibfit import RUN_CURVE, RUN_USE, RUN_V, SMOOTH, STAND_S, STAND_TRIM, STILL, TIGHT_R, TURN_MIN
 from .calibread import FORMAT
 
 RECORDING = 'recording.jsonl.gz'
@@ -52,10 +53,20 @@ def line(kind: str, t: float, fields: dict) -> Optional[str]:
     return json.dumps(out, separators=(',', ':'))
 
 
+def needed(mode: str) -> dict:
+    """What the mode needs (calib.MIN) by the names of Counts.progress (each way the same)."""
+    need = MIN[mode]
+    out = {'m': need['m'], 'runs': need['runs'], 'run_m': need['run_m'], 'still_s': need['stand_s']}
+    for side in ('left', 'right'):
+        out.update({'turns_' + side: need['turns'], 'rotation_' + side: need['rotation'],
+                    'tight_' + side: need['antenna']})
+    return out
+
+
 class Counts:
     """How far a recording got, from the odometry as it comes (like the evaluation finds it, roughly): straight runs of
     need['run_m'] m at least (runs, m), the turns between runs each way (rad) and the tight ones' rotation (the
-    antenna)."""
+    antenna), the stands (s, like calibfit's: |v| and |w| under STILL for STAND_S s, STAND_TRIM off each end)."""
 
     def __init__(self, need: dict) -> None:
         self.need, self.window, self.last = need, collections.deque(), None
@@ -64,8 +75,13 @@ class Counts:
         self.runs, self.m = 0, 0.0
         self.turns = {True: [], False: []}
         self.tight = {True: 0.0, False: 0.0}
+        self.stood, self.still = 0.0, None  # (s of the stands ended, [from, to] of the one going on)
 
     def add(self, t: float, v: float, w: float) -> None:
+        if abs(v) < STILL and abs(w) < STILL:
+            self.still = [t if self.still is None else self.still[0], t]
+        elif self.still is not None:
+            self.stood, self.still = self.stood + self.stand(*self.still), None
         window = self.window
         window.append((t, v, w))
         while window[0][0] < t - SMOOTH:
@@ -101,9 +117,16 @@ class Counts:
             self.rot, self.way = self.pending[0] + self.rot, self.pending[1] + self.way + self.run
         self.run, self.pending = 0.0, None
 
+    @staticmethod
+    def stand(t0: float, t1: float) -> float:
+        return t1 - t0 - 2 * STAND_TRIM if t1 - t0 >= STAND_S + 2 * STAND_TRIM else 0.0
+
+    def still_s(self) -> float:
+        return self.stood + (self.stand(*self.still) if self.still is not None else 0.0)
+
     def enough(self) -> bool:
         need = self.need
-        if self.runs < need['runs'] or self.m < need['m']:
+        if self.runs < need['runs'] or self.m < need['m'] or self.still_s() < need['stand_s']:
             return False
         for left in (True, False):
             turns = self.turns[left]
@@ -113,8 +136,16 @@ class Counts:
         return True
 
     def progress(self) -> dict:
+        """{m, turns (full turns), runs, still_s, and each way (left, right): turns_ (how many), rotation_ (their full
+        turns), tight_ (the tight ones' full turns)}."""
         turned = sum(self.turns[True]) + sum(self.turns[False])
-        return {'m': round(self.m, 1), 'turns': round(turned / (2 * math.pi), 1), 'runs': self.runs}
+        out = {'m': round(self.m, 1), 'turns': round(turned / (2 * math.pi), 1), 'runs': self.runs,
+               'still_s': round(self.still_s(), 1)}
+        for left, side in ((True, 'left'), (False, 'right')):
+            out.update({'turns_' + side: len(self.turns[left]),
+                        'rotation_' + side: round(sum(self.turns[left]) / (2 * math.pi), 2),
+                        'tight_' + side: round(self.tight[left] / (2 * math.pi), 2)})
+        return out
 
 
 class Recorder:
