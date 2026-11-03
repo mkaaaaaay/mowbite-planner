@@ -63,7 +63,7 @@ jobs:
             plans-${{ runner.arch }}.json
           retention-days: 7
 
-  # reported, not a gate yet: slot-rect and slot-outline part on arm64 (03.11.), being measured
+  # the plans rounded to 1e-9 must be the same, the bits are reported only (a yaw a bit off on arm64: slot, 03.11.)
   fingerprints-compare:
     needs: fingerprints
     runs-on: ubuntu-latest
@@ -73,5 +73,4 @@ jobs:
         with:
           pattern: fingerprints-*
           merge-multiple: true
-      - continue-on-error: true
-        run: python3 ros2/mowbite_planner/tools/fingerprints.py fingerprints-X64.json fingerprints-ARM64.json
+      - run: python3 ros2/mowbite_planner/tools/fingerprints.py fingerprints-X64.json fingerprints-ARM64.json
