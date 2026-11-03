@@ -2276,7 +2276,8 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
     counted = {'m': 0.0, 'turns': 0.0, 'runs': 0, 'still_s': 0.0, 'turns_left': 0, 'turns_right': 0,
                'rotation_left': 0.0, 'rotation_right': 0.0, 'tight_left': 0.0, 'tight_right': 0.0}
     need = node_module.calibrecord.needed('joystick')
-    assert calib_progress()[-1] == dict(counted, phase='recording', ready=False, error=None, need=need)
+    assert calib_progress()[-1] == dict(counted, phase='recording', ready=False, error=None, mode='joystick',
+                                        need=need)
     assert rpc('planner.calib.start', {'mode': 'joystick'})[1][1] == 'a calibration is recorded already'
     assert rpc('planner.calib.result')[1][1] == 'the calibration is still recorded'
     imu = node_module.Imu()
@@ -2302,7 +2303,7 @@ def test_calib_records_and_evaluates(planner, monkeypatch):
     assert rec.end['why'] == 'stop'
     # (m, turns and runs then the evaluation's)
     assert calib_progress()[-1] == dict(counted, m=42.0, turns=6.1, runs=7, phase='done', ready=True, error=None,
-                                        need=need)
+                                        mode='joystick', need=need)
     assert rpc('planner.calib.result') == (CALIB_RESULT, None)
 
 
@@ -2314,7 +2315,7 @@ def test_calib_mow_ends_with_the_mow(planner, monkeypatch):
     calib_threads('calibration evaluation')
     assert not planner.calib.recorder.recording
     assert calibread.read(planner.calib.recorder.path).end['why'] == 'stop'
-    assert calib_progress()[-1]['phase'] == 'done'
+    assert calib_progress()[-1]['phase'] == 'done' and calib_progress()[-1]['mode'] == 'mow'
     assert calib_progress()[-1]['error'] == 'no header: the recording is empty'
     assert rpc('planner.calib.result')[1][1] == 'no header: the recording is empty'
 
