@@ -227,6 +227,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
 # none of them is asked for again): the same request again (a preview, then the mow; mowing.plan, then planner.plan)
 # gets the plan at once
 CACHED_PLANS = 16
+# the planner's no to a request kept too (in memory): an area too small asked for again doesn't take as long again
+REFUSED = 64
 DISK_PLANS = 16
 # s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
 # mow and the app's preview find it
@@ -689,6 +691,7 @@ class MowbitePlannerRos1:
         self.set_lock = threading.Lock()
         self.plans = collections.OrderedDict()
         self.plans_lock = threading.Lock()
+        self.refused = collections.OrderedDict()  # key -> the planner's no (PlanningError) to it, the same at once
         self.planning = {}  # a lock for each plan being planned: asked for again meanwhile, it's waited for
         self.plans_dir = os.path.expanduser(rospy.get_param('~plans_dir', os.path.join(
             os.environ.get('ROS_HOME', '~/.ros'), 'mowbite_plans')))
@@ -1787,6 +1790,9 @@ class MowbitePlannerRos1:
                 self.plans.move_to_end(key)
                 self.local.kept = True
                 return self.told(plan, why), True
+            if key in self.refused:
+                kind, message = self.refused[key]
+                raise kind(message)
             busy = self.planning.setdefault(key, threading.Lock())
         with busy:  # (the same asked for meanwhile, planning ahead and a mow: it waits for this one's)
             try:
@@ -1802,6 +1808,11 @@ class MowbitePlannerRos1:
                                              progress=self.progress.step)
                     except Exception as e:
                         self.progress.end(str(e))
+                        if isinstance(e, PlanningError):  # (a no from the request alone, never a crash)
+                            with self.plans_lock:
+                                self.refused[key] = (type(e), str(e))
+                                while len(self.refused) > REFUSED:
+                                    self.refused.popitem(last=False)
                         raise
                     self.progress.end()
                     self.write_plan(key, plan)

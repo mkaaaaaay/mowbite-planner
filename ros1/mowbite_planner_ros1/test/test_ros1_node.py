@@ -1945,6 +1945,33 @@ def test_progress_of_a_failed_planning(planner, monkeypatch):
     assert last['running'] is False and last['error'] == 'no lanes fit' and last['stage'] != 'done'
 
 
+def test_a_no_kept(planner, monkeypatch):
+    """The planner's no to a request is kept: the same request again gets it at once (an area too small took a minute
+    each time on the mower), another is planned; a crash isn't kept."""
+    send_map(the_map())
+    calls = []
+
+    def failing(*args, **kw):
+        calls.append(1)
+        raise node_module.NothingLeft('nothing left')
+
+    monkeypatch.setattr(node_module, 'plan_coverage', failing)
+    for _ in range(3):
+        assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'nothing left'
+    for _ in range(2):
+        assert not poses(planner.handle(request(angle=0.3)))
+    assert calls == [1, 1]
+
+    def crashing(*args, **kw):
+        calls.append(1)
+        raise RuntimeError('out of memory')
+
+    monkeypatch.setattr(node_module, 'plan_coverage', crashing)
+    for _ in range(2):
+        assert not poses(planner.handle(request(angle=0.5)))
+    assert len(calls) == 4
+
+
 class HoldClient:
     """paho-mqtt's client as HoldReader uses it, its callbacks called by the test."""
 
