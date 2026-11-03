@@ -408,6 +408,7 @@ function row(name) {
   if (e.auto_value !== undefined) m += ', ' + e.auto_value + ': automatic';
   if (e.from && !changed(name)) m += ' · now from OpenMower (' + e.from.split('/').pop() + ')';
   if (e.stored) m += ' · saved';
+  if (e.ignored) m += ' · not in use: ' + e.ignored;
   if (scope === 'area') {
     const own = name in areaOwn(), back = pendingArea[name] === null;
     m = (own && !back ? 'this area only' : back ? 'back to all areas\'' : 'as all areas') + ' · all areas: ' +
@@ -719,6 +720,7 @@ function facts() {
   if (rep.left_m2 !== undefined) items.push(['left', rep.left_m2.toFixed(2) + ' m²']);
   items.push(['lanes at', Math.round(plan.angle * 180 / Math.PI) + '°']);
   if (plan.lane_spacing) items.push(['spacing', Math.round(plan.lane_spacing * 1000) / 10 + ' cm']);
+  if (plan.planned_on) items.push(['planned on', plan.planned_on === 'house' ? 'the house computer' : 'the mower']);
   if ((rep.body_out || []).length) items.push(['body sticks out', rep.body_out.length + '×']);
   box.textContent = '';
   for (const [k, v] of items) {
