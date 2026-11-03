@@ -19,7 +19,8 @@ wheels' difference in m/s there):
     and in arcs apart (each way's mean), wheel_distance_m = basis * runs' / turns' by the ticks (arcs where there are
     enough of them; without ticks none, not counted for ready). A turn with a run on one side only: the gyro's turn,
     scaled like the others.
-  - each wheel's ticks a metre from the runs (their real way and turn): info, a warning where they're apart.
+  - each wheel's ticks a metre from the runs (their real way and turn): info, a warning where they're apart; not
+    where the ticks are the wheels' speed summed up (ticks_source integrated: they show the speed's own calibration).
   - the antenna in each tight turn: its points against the body's track (the heading spread like the odometry's
     turn), left and right turns averaged, their difference counts into sigma (a pivot off the axle).
   - imu_roll/pitch (the IMU's tilt on level ground, atan2(ay, az) and atan2(-ax, hypot(ay, az)) of gravity): the
@@ -268,7 +269,8 @@ def _tilt(rec: Recording, fit: Fit, stands, need: dict, info: dict, warnings: Li
 def evaluate(path, interim: bool = False) -> dict:
     """The calibration from a recording (a path or a Recording): {ready, version, based_on: {m, turns (full turns),
     runs}, warnings, values: [{name, value, unit, old, sigma, quality, ok, warning}], info: {gyro_scale, gyro_bias,
-    gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_per_m_left, ticks_per_m_right}}. interim:
+    gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_source, ticks_per_m_left,
+    ticks_per_m_right}}. interim:
     one still recorded (no warning that it stops in the middle). CalibError: no recording that can be read."""
     rec = path if isinstance(path, Recording) else read(path)
     warnings = []
@@ -281,7 +283,7 @@ def evaluate(path, interim: bool = False) -> dict:
     names = list(PARAMS) + (['imu_roll', 'imu_pitch'] if rec.source == 'mowbite-os' else [])
     old = dict(rec.params, imu_roll=rec.imu_old[0], imu_pitch=rec.imu_old[1])
     info = dict.fromkeys(('gyro_scale', 'gyro_bias', 'gnss_delay_s', 'rtk_spread_m', 'slope_deg', 'speed_ratio',
-                          'turn_ratio', 'ticks_per_m_left', 'ticks_per_m_right'))
+                          'turn_ratio', 'ticks_source', 'ticks_per_m_left', 'ticks_per_m_right'))
     result = {'ready': False, 'version': FORMAT, 'based_on': {'m': 0.0, 'turns': 0.0, 'runs': 0},
               'warnings': warnings, 'info': info}
     try:
@@ -308,6 +310,7 @@ def evaluate(path, interim: bool = False) -> dict:
     wanted = [v for v in values if (not v['name'].startswith('imu_') or rec.imu_frame in (None, 'base_link')) and
               v['warning'] != NO_TICKS]
     _info(rec, fit, info)
+    info['ticks_source'] = rec.ticks_source if odo.L is not None else None
     _warn(rec, odo, fit, values, info, warnings)
     used = [s for s in fit.scales if s is not None]
     turned = sum(abs(t.true if t.true is not None else t.omega) for t in fit.turns
@@ -369,7 +372,7 @@ def _warn(rec: Recording, odo: Odometry, fit: Fit, values: List[dict], info: dic
     """With ticks each wheel's ticks a metre (info) and left and right apart (a: the wheels turn apart, b: one wheel
     smaller); driving mostly curved, RTK not fixed."""
     wd = next(v['value'] for v in values if v['name'] == 'wheel_distance_m') or rec.wheel_distance
-    sides = _sides(odo, fit, wd)
+    sides = _sides(odo, fit, wd) if rec.ticks_source == 'counter' else None
     if sides is not None:
         info['ticks_per_m_left'], info['ticks_per_m_right'] = round(sides[0], 1), round(sides[1], 1)
         b = sides[0] / sides[1] - 1

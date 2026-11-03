@@ -101,7 +101,23 @@ def test_no_ticks_no_wheel_distance(tmp_path, odometry):
     assert all(errs[n] < TARGETS[n] for n in ('ticks_per_m', 'antenna_offset_x', 'antenna_offset_y')), errs
     assert result['ready'] and result['based_on']['turns'] >= 6 and result['based_on']['runs'] == 7
     assert abs(result['info']['gyro_scale'] / m.gyro_scale - 1) < 0.005
-    assert result['info']['ticks_per_m_left'] is None
+    assert result['info']['ticks_per_m_left'] is None and result['info']['ticks_source'] is None
+
+
+def test_ticks_integrated(tmp_path):
+    """Ticks that are the wheels' speed summed up (MowBite OS on a Tron): the wheel distance from them, not each wheel's
+    ticks a metre (they show the speed's own calibration)."""
+    m = calibsim.program(0, wheel_diff=0.04)
+    path = m.recording(str(tmp_path / 'p.jsonl.gz'))
+    with gzip.open(path, 'rt') as f:
+        lines = f.read().split('\n')
+    lines[0] = json.dumps(dict(json.loads(lines[0]), ticks_source='integrated'))
+    with gzip.open(path, 'wt') as f:
+        f.write('\n'.join(lines))
+    result = evaluate(path)
+    info = result['info']
+    assert info['ticks_source'] == 'integrated' and info['ticks_per_m_left'] is None
+    assert values(result)['wheel_distance_m']['ok'] and not [w for w in result['warnings'] if 'smaller' in w]
 
 
 def test_ticks_off_not_taken(tmp_path):
@@ -138,6 +154,7 @@ def test_wheels_apart(tmp_path):
         warned = [w for w in result['warnings'] if w.startswith('left/right: the %s wheel' % side)]
         assert len(warned) == 1 and abs(float(re.search(r'([0-9.]+) % smaller', warned[0])[1]) - 4.0) < 0.5, warned
         info = result['info']
+        assert info['ticks_source'] == 'counter'
         truth = m.ticks * (1 + diff / 2) / (1 - m.slip), m.ticks * (1 - diff / 2) / (1 - m.slip)
         assert abs(info['ticks_per_m_left'] / truth[0] - 1) < 0.01
         assert abs(info['ticks_per_m_right'] / truth[1] - 1) < 0.01
@@ -228,6 +245,7 @@ def test_reader_refuses(tmp_path, line, why):
     (dict(HEADER, params={'ticks_per_m': 2025.0}), 'wheel_distance_m is not a number'),
     (dict(HEADER, basis={'ticks_per_m': 0, 'wheel_distance_m': 0.4}), 'ticks_per_m must be over 0'),
     (dict(HEADER, program={'a': {'b': {'c': 1}}}), 'nested deeper than 3'),
+    (dict(HEADER, ticks_source='guessed'), 'ticks_source must be one of'),
 ])
 def test_reader_refuses_header(tmp_path, header, why):
     with pytest.raises(CalibError, match=why):

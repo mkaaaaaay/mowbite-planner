@@ -14,6 +14,8 @@ import numpy as np
 
 FORMAT = 'mowbite-calib/1'
 SOURCES = ('openmower', 'mowbite-os')
+# where ticks come from: a wheel's counter, or its speed summed up (none given: counter)
+TICKS_SOURCES = ('counter', 'integrated')
 MODES = ('joystick', 'mow', 'program')
 FIXES = ('fixed', 'float', 'single', 'none')
 PHASES = ('stand', 'align', 'line', 'spin_left', 'spin_right')
@@ -101,6 +103,8 @@ def _header(line: dict) -> dict:
             _number(imu, name, 1)
     if line.get('imu_frame') is not None and not isinstance(line['imu_frame'], str):
         raise CalibError('line 1: imu_frame is not a string')
+    if line.get('ticks_source', 'counter') not in TICKS_SOURCES:
+        raise CalibError('line 1: ticks_source must be one of %s' % ', '.join(TICKS_SOURCES))
     return line
 
 
@@ -120,6 +124,7 @@ class Recording:
         imu = header.get('imu') or {}
         self.imu_old = (imu.get('roll'), imu.get('pitch'))
         self.imu_frame = header.get('imu_frame')
+        self.ticks_source = header.get('ticks_source', 'counter')
         self.columns = {}
         for kind, cols in data.items():
             t = np.array(cols['t'], dtype=float)
