@@ -1,0 +1,24 @@
+# MowBite Planner on a computer in the house (the planner setting remote_planning): plans for the mower over its MQTT
+# broker, the mower checks every plan itself and plans on its own where this isn't there. Built here from the planner's
+# repository (house/Dockerfile); the code it plans with it fetches from there by itself, the one the mower runs.
+#   MOWER_HOST=<the mower's address> docker compose up -d --build
+# HOUSE_WORKERS: processes that plan at once (3), MOWER_MQTT_USER and MOWER_MQTT_PASSWORD where the broker wants them
+services:
+  mowbite_house:
+    build:
+      context: https://github.com/mkaaaaaay/mowbite-planner.git#main
+      dockerfile: house/Dockerfile
+    image: mowbite_house
+    container_name: mowbite_house
+    restart: unless-stopped
+    environment:
+      - MOWER_MQTT_HOST=${MOWER_HOST:?the mower's address}
+      - MOWER_MQTT_PORT=${MOWER_MQTT_PORT:-1883}
+      - MOWER_MQTT_USER=${MOWER_MQTT_USER:-}
+      - MOWER_MQTT_PASSWORD=${MOWER_MQTT_PASSWORD:-}
+      - HOUSE_WORKERS=${HOUSE_WORKERS:-3}
+    volumes:
+      - mowbite_house:/data
+
+volumes:
+  mowbite_house:
