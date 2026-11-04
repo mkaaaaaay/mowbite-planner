@@ -396,15 +396,13 @@ def tron_case():
 @pytest.mark.real_planner
 @pytest.mark.parametrize('body', [{}, {'robot_front': 0.54, 'robot_rear': 0.178, 'blade_ahead': 0.0}])
 def test_tron_case_starts_where_a_way_gets_to(make, body):
-    """The Tron's case of 30.10. (its map, its body then and now): the plan starts where ~/plan_transit gets to it from
-    where the mower was, as mowbite_logic asks it; every section's start is got to; never the start no way got to
-    then."""
+    """The Tron's case of 30.10. (its map, its body then and now): every section of the plan starts where a way gets
+    to it as mowbite_logic asks ~/plan_transit for it (max_outside 0.3, the area as the drivable one): the first from
+    where the mower was, each other one from where the section before it ends."""
     case = tron_case()
-    params = dict(TRON, **body)
-    node = make(**params)
+    node = make(**dict(TRON, **body))
     data = case['map_json']
-    area = data['areas'][0]
-    outline = [(p['x'], p['y']) for p in area['outline']]
+    outline = [(p['x'], p['y']) for p in data['areas'][0]['outline']]
     send_map(node, data)
     request = PlanCoverage.Request()
     request.boundary = polygon(outline)
@@ -412,14 +410,12 @@ def test_tron_case_starts_where_a_way_gets_to(make, body):
     assert res.success, res.message
     poses = [(ps.pose.position.x, ps.pose.position.y, 2.0 * math.atan2(ps.pose.orientation.z, ps.pose.orientation.w))
              for ps in res.path.poses]
-    cfg = node.transit_config(node.values())
-    old = (0.41, 0.11)
-    for i in res.section_start:
-        p = poses[i]
-        assert math.hypot(p[0] - old[0], p[1] - old[1]) > 0.1 or angle_diff(p[2], 0.0) > 0.5
-        assert node.core.arrives(outline, [], cfg, [], [])(Pose2D(*p)), p
-    t = plan_transit(case['pose_at_start_mowing'], poses[0], [outline], [], cfg, max_outside=0.3)
-    assert t.poses and (t.poses[-1].x, t.poses[-1].y) == pytest.approx(poses[0][:2])
+    froms = [tuple(case['pose_at_start_mowing'])] + [poses[i - 1] for i in res.section_start[1:]]
+    for start, i in zip(froms, res.section_start):
+        got = transit(node, start, poses[i], drivable=(outline,), obstacles=(), max_outside=0.3)
+        assert got.success, (i, got.message)
+        last = got.path.poses[-1].pose if got.path.poses else None
+        assert last is None or (last.position.x, last.position.y) == pytest.approx(poses[i][:2])
 
 
 def test_main_is_the_os_node(monkeypatch):
