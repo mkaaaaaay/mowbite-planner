@@ -10,9 +10,14 @@ from .sweep import swept_area
 
 # also in setup.py and package.xml
 __version__ = '0.5.0'
+# the files kept next to the settings file (it, mowbite_planner_angle.json, mowbite_planner_timing.json,
+# mowbite_map_backups; not the plans, kept by the code that planned them): one more where a planner before can't read
+# them (MowBite OS keeps data_dir for the image it came from)
+FILES_VERSION = 1
 
 __all__ = [
     '__version__',
+    'FILES_VERSION',
     'CoveragePlan',
     'NothingLeft',
     'PlannerConfig',

@@ -732,3 +732,8 @@ def test_version_in_one_place():
         assert f"version='{mowbite_planner.__version__}'," in f.read()
     with open(os.path.join(here, 'package.xml')) as f:
         assert f'<version>{mowbite_planner.__version__}</version>' in f.read()
+
+
+def test_files_version():
+    """One number for the files kept next to the settings file, in the package (MowBite OS' table goes by it)."""
+    assert type(mowbite_planner.FILES_VERSION) is int and mowbite_planner.FILES_VERSION >= 1
