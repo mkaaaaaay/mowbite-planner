@@ -126,9 +126,9 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
     report.track_mowed): only what that left, see _plan_coverage. With set_workers the plans in processes of their
     own. The slots by the edge stay open (the loops go round one too narrow for the body, levels.body_free): the plan's
-    free_space, robot_space and transit_space are the map's as drawn. arrives(pose) (a robot that drives to the plan's
-    sections itself, MowBite OS: whether it gets to the pose facing its heading): every section starts where it does,
-    see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
+    free_space, robot_space and transit_space are the map's as drawn. arrives(pose, came_from) (a robot that drives to
+    the plan's sections itself, MowBite OS: whether it gets to the pose facing its heading from came_from, the end of
+    the section before; None for the first): every section starts where it does, see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
     see backing.py; without the body set forwards, said in the warnings."""
     cfg = config or PlannerConfig()
     cfg.validate()

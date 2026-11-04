@@ -628,7 +628,7 @@ def test_arrives_in_the_plans_key(make, planned):
     send_map(node, the_map())
 
     def arrives(key):
-        def gets_to(pose):
+        def gets_to(pose, came_from):
             return True
         if key is not None:
             gets_to.key = key

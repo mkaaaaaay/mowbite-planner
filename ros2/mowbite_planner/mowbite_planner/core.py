@@ -16,7 +16,8 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
   parameters    param(name, default): the robot's own (mower_logic's /mower_logic, the controller's FTC_PARAMS)
   events        on_event(payload) with every event of the mower's logic (STATE, JOB_COMPLETE, JOB_RESET)
   arrives       arrives(boundary, obstacles, cfg, drivable, keep_out): for a plan of those, whether the robot gets to
-                a pose facing its heading (plan_coverage's arrives, starts.py), None: it drives what it's given;
+                a pose facing its heading from where it is (plan_coverage's arrives(pose, came_from), starts.py),
+                None: it drives what it's given;
                 arrives.key (JSON, else True) is part of the plans' keys
   storage       the files it keeps: settings_file (next to it the angle steps, timing and the maps before), plans_dir,
                 history_dir (the robot's track, position_history)
@@ -568,8 +569,8 @@ class PlannerCore:
         return data
 
     def arrives(self, boundary, obstacles, cfg, drivable, keep_out):
-        """For a plan of these (plan_coverage's), arrives(pose): whether the robot gets to the pose facing its heading
-        (planner.starts), None: it drives what it's given."""
+        """For a plan of these (plan_coverage's), arrives(pose, came_from): whether the robot gets to the pose facing its
+        heading from came_from (planner.starts), None: it drives what it's given."""
         return None
 
     def classic_plan(self, boundary, obstacles, cfg, *rest, **more):

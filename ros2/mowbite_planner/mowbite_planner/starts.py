@@ -1,7 +1,8 @@
 """Where a robot that drives to the plan's sections itself gets to them (MowBite OS: the OS side passes arrives, its
-~/plan_transit in it). A section starts at its first pose arrives says it gets to facing its heading: the poses before
-it left out; where it gets to none of those tried, or the asks are spent, the section is left out (no start it can't
-get to, the OS takes the plan as it is)."""
+~/plan_transit in it). A section starts at its first pose arrives says it gets to facing its heading from where the
+robot is then (came_from: where the section before it that's kept ends; None for the first, the robot can be anywhere
+then): the poses before it left out; where it gets to none of those tried, or the asks are spent, the section is left
+out (no start it can't get to, the OS takes the plan as it is)."""
 
 import dataclasses
 import math
@@ -19,7 +20,7 @@ ARRIVE_STEP = 0.3
 ARRIVE_TRIES = 12
 ARRIVE_ASKS = 40
 
-Arrives = Callable[[Pose2D], bool]
+Arrives = Callable[[Pose2D, Optional[Pose2D]], bool]  # (pose, came_from)
 
 
 class _Spent(Exception):
@@ -27,22 +28,25 @@ class _Spent(Exception):
 
 
 def reached_starts(plan: CoveragePlan, arrives: Arrives) -> CoveragePlan:
-    """plan with every section starting where arrives(pose) says the robot gets to it, see the module. stats['starts']:
-    {'places': [[x, y, m of path left out]] where a section starts later (its first pose as planned), 'dropped' and
-    'untried': [[x, y]] of the sections left out (no pose tried it gets to; not asked about past ARRIVE_ASKS),
-    'unmowed_m2': what that leaves unmowed more, 'asks'}; the warnings say where. Raises PlanningError where it gets to
-    no section at all."""
+    """plan with every section starting where arrives(pose, came_from) says the robot gets to it, see the module.
+    stats['starts']: {'places': [[x, y, m of path left out]] where a section starts later (its first pose as planned),
+    'dropped' and 'untried': [[x, y]] of the sections left out (no pose tried it gets to; not asked about past
+    ARRIVE_ASKS), 'unmowed_m2': what that leaves unmowed more, 'asks'}; the warnings say where. Raises PlanningError
+    where it gets to no section at all."""
     poses, segments = plan.poses, plan.segments
-    known: Dict[Tuple[float, float, float], bool] = {}
+    known: Dict[Tuple[float, ...], bool] = {}
     asks = [0]
+    came: List[Optional[Pose2D]] = [None]  # where the robot is before the section (the end of the one before kept)
 
     def gets_to(p: Pose2D) -> bool:
-        key = (round(p.x, 3), round(p.y, 3), round(p.yaw, 3))
+        c = came[0]
+        key = (round(p.x, 3), round(p.y, 3), round(p.yaw, 3)) + \
+            (() if c is None else (round(c.x, 3), round(c.y, 3), round(c.yaw, 3)))
         if key not in known:
             if asks[0] >= ARRIVE_ASKS:
                 raise _Spent()
             asks[0] += 1
-            known[key] = bool(arrives(p))
+            known[key] = bool(arrives(p, c))
         return known[key]
 
     firsts = [k for k, s in enumerate(segments) if k == 0 or s.section != segments[k - 1].section]
@@ -53,7 +57,9 @@ def reached_starts(plan: CoveragePlan, arrives: Arrives) -> CoveragePlan:
     for n, k in enumerate(firsts):
         a = segments[k].start
         last = segments[firsts[n + 1] - 1].end if n + 1 < len(firsts) else len(poses) - 1
-        if a and same_position((poses[a - 1].x, poses[a - 1].y), (poses[a].x, poses[a].y)):
+        c = came[0]
+        if a and c is not None and same_position((c.x, c.y), (poses[a].x, poses[a].y)):
+            came[0] = poses[last]
             continue  # (there already)
         where = [round(poses[a].x, 2), round(poses[a].y, 2)]
         try:
@@ -65,10 +71,13 @@ def reached_starts(plan: CoveragePlan, arrives: Arrives) -> CoveragePlan:
         if got is None:
             dropped.append(where)
             cut.append((a, last + 1))
-        elif got > a:
-            m = sum(math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y) for i in range(a + 1, got + 1))
-            places.append(where + [round(m, 2)])
-            cut.append((a, got))
+        else:
+            came[0] = poses[last]
+            if got > a:
+                m = sum(math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y)
+                        for i in range(a + 1, got + 1))
+                places.append(where + [round(m, 2)])
+                cut.append((a, got))
     starts: Dict[str, Any] = {'places': places, 'dropped': dropped, 'untried': untried, 'unmowed_m2': 0.0,
                               'asks': asks[0]}
     if not cut:
