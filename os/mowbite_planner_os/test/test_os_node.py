@@ -455,6 +455,61 @@ def test_no_section_across_where_the_body_doesnt_get(make):
     assert any('left out' in w for w in plan.warnings)
 
 
+@fake_only
+def test_back_up_with_plan(make, planned):
+    """back_up_with_plan (false till M8): back_out ignored with why, planned without; true: planned (with the body set),
+    planner.settings says what it forces. drive slope and reverse forwards either way (their own step)."""
+    m8 = 'MowBite OS: drives forwards only for now (M8)'
+    node = make()
+    send_map(node, the_map(planner={'back_out': True, 'drive': 'reverse'}))
+    got, _ = rpc(node, 'planner.settings')
+    for name in ('drive', 'back_out'):
+        assert got['settings'][name]['ignored'] == m8, name
+    plan_area(node)
+    assert planned.config().back_out is False and planned.config().drive == 'forward'
+    body = {k: v for k, v in TRON.items() if k.startswith('robot_')}
+    node = make(back_up_with_plan=True, **body)
+    send_map(node, the_map(planner={'back_out': True, 'drive': 'reverse'}))
+    got, _ = rpc(node, 'planner.settings')
+    out = got['settings']['back_out']
+    assert 'ignored' not in out and out['forces']['body_fit'] is True and got['settings']['drive']['ignored'] == m8
+    plan_area(node)
+    assert planned.config().back_out is True and planned.config().drive == 'forward'
+
+
+@fake_only
+def test_home_facing_any_way(make, monkeypatch):
+    """Home from where a section ends (starts.py asks with no heading): a way there arriving facing any way."""
+    asked = []
+    monkeypatch.setattr(os_module, 'plan_transit', lambda start, goal, *args, **kw: asked.append((start, goal)))
+    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
+    assert gets_to(Pose2D(2.0, 2.5, None), Pose2D(1.0, 1.0, 0.0))
+    assert asked == [((1.0, 1.0, 0.0), (2.0, 2.5))]
+
+
+# a lawn with an arm narrower than the Tron turns in (on the spot, or round on arcs)
+ARM = [(0.0, 0.0), (5.0, 0.0), (5.0, 1.55), (8.5, 1.55), (8.5, 2.45), (5.0, 2.45), (5.0, 4.0), (0.0, 4.0)]
+
+
+@fake_only
+@pytest.mark.real_planner
+def test_every_section_ends_where_it_gets_away(make):
+    """A plan of a lawn with a narrow arm, the dock at its end: every section ends where mowbite_logic's way gets on
+    from, to the next section or home (the plan's first pose, facing any way)."""
+    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    plan = node_module.plan_coverage(ARM, [], cfg, (1.0, 1.0, 0.0), (8.0, 2.0),
+                                     arrives=node.core.arrives(ARM, [], cfg, [], []))
+    assert plan.stats['starts']['asks'] >= len(plan.section_starts)
+    for e, i in zip([i - 1 for i in plan.section_starts[1:]] + [len(plan.poses) - 1], plan.section_starts[1:] + [0]):
+        a, b = plan.poses[e], plan.poses[i]
+        got = transit(node, (a.x, a.y, a.yaw), (b.x, b.y, b.yaw), drivable=(ARM,), obstacles=(), max_outside=0.3,
+                      use_goal_heading=i > 0)
+        assert got.success, (e, got.message)
+
+
 def tron_case():
     with open(TRON_CASE) as f:
         return json.load(f)

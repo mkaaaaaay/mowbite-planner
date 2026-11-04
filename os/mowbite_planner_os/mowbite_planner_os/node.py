@@ -15,12 +15,18 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     perimeter_direction random, finished_mows, the finished mow's planner.drive and timing. The planning's progress
     (mowbite/planner/progress) out on bridge/publish.
   - mowbite_follower's speed_fast, speed_slow and max_angular from bridge/params: how long mowing takes.
-  - not here: the slic3r planner, leftovers_auto (MowBite OS' schedule starts the mower), the house computer; drive
-    slope and reverse planned forwards (MowBite OS drives forwards only for now). planner.settings says why.
+  - not here: the slic3r planner, leftovers_auto (MowBite OS' schedule starts the mower), the house computer.
+    planner.settings says why.
+  - back_up_with_plan (false): the robot backs up where a plan's poses face against the way (MowBite OS from M8):
+    back_out planned; false: ignored (planner.settings says why). drive slope and reverse stay forwards either way
+    (their own step: the sections are got to on the plan as driven forwards).
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
     through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see
     mowbite_planner.starts): the first from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is
-    small, the others from where the section before ends, as mowbite_logic drives there.
+    small, the others from where the section before ends, as mowbite_logic drives there. A section ends where the
+    robot gets away again driving forwards (to the next one, or to the closest place the body turns whatever way,
+    facing any way there), earlier where it ends in a dead end, left out where nothing of it does (back_out: backing up
+    out of it).
     transit_as_recorded (true): where no way gets to or from a pose by the edge, a way by the outermost loop's rules
     (plan_transit's as_recorded); false: not, for ~/plan_transit and the plans' sections alike.
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
@@ -99,9 +105,11 @@ class OsNode(base.MowbitePlannerNode):
         self.map_count = 0
         self._calib_root = None
         self._as_recorded = None
+        self._backs_up = None
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
         self.as_recorded()
+        self.backs_up()
         self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit)
 
     def calib_root(self) -> str:
@@ -117,6 +125,13 @@ class OsNode(base.MowbitePlannerNode):
                 description='where no way gets to or from a pose by the edge, a way by the outermost loop\'s rules '
                             '(~/plan_transit and the plans\' sections alike)')).value)
         return self._as_recorded
+
+    def backs_up(self) -> bool:
+        if self._backs_up is None:
+            self._backs_up = bool(self.declare_parameter('back_up_with_plan', False, ParameterDescriptor(
+                description='the robot backs up where a plan\'s poses face against the way (MowBite OS from M8): '
+                            'back_out planned; false: not (drive slope and reverse stay forwards either way)')).value)
+        return self._backs_up
 
     # the transport: mowbite_bridge
 
@@ -233,16 +248,20 @@ class OsNode(base.MowbitePlannerNode):
     def drive_ignored(self) -> str:
         return 'MowBite OS: drives forwards only for now (M8)'
 
+    def back_out_ignored(self) -> str:
+        return '' if self.backs_up() else self.drive_ignored()
+
     # how it gets to a plan's sections: ~/plan_transit
 
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
-        """Whether ~/plan_transit gets to a pose facing its heading, through the area and the drivable areas but the
-        obstacles and the areas to keep out of, by transit_as_recorded as ~/plan_transit. From came_from (where the
-        section before ends) the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE), none where the room the
-        centre has on a way parts the two (nothing planned then); the first section's (came_from None) the body checked
-        up to the pose (none of it outside): from ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the
-        closest place to there), from nearer where the lawn is too small for those. A pose none of them gets to isn't
-        got to: no start it can't get to (the Tron's case of 30.10.). None without the body: nothing to check."""
+        """Whether ~/plan_transit gets to a pose facing its heading (yaw None: there facing any way, the way out of
+        where a section ends), through the area and the drivable areas but the obstacles and the areas to keep out of,
+        by transit_as_recorded as ~/plan_transit. From came_from (where the section before ends) the way mowbite_logic
+        asks for (max_outside ARRIVE_OUTSIDE), none where the room the centre has on a way parts the two (nothing
+        planned then); the first section's (came_from None) the body checked up to the pose (none of it outside): from
+        ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where
+        the lawn is too small for those. A pose none of them gets to isn't got to: no start it can't get to (the Tron's
+        case of 30.10.). None without the body: nothing to check."""
         if not cfg.body:
             return None
         recorded = self.as_recorded()
@@ -256,8 +275,9 @@ class OsNode(base.MowbitePlannerNode):
             if ways[0] >= ARRIVE_WAYS:
                 raise _Spent()
             ways[0] += 1
+            goal = (p.x, p.y) if p.yaw is None else (p.x, p.y, p.yaw)
             try:
-                plan_transit(start, (p.x, p.y, p.yaw), areas, away, cfg, max_outside=max_outside, as_recorded=recorded)
+                plan_transit(start, goal, areas, away, cfg, max_outside=max_outside, as_recorded=recorded)
                 return True
             except PlanningError:
                 return False
