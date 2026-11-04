@@ -5,10 +5,11 @@ robot can be anywhere then): the poses before it left out; where it gets to none
 the section is left out (no start it can't get to, the OS takes the plan as it is).
 
 Where a section ends the robot has to get away again driving forwards: it does where its body turns on the spot there
-whatever way, where the next section is got to from there, or home is (the position of the plan's first pose: where it
-begins next to the dock). Where none of that holds it's a dead end (a strip narrower than the body turns in): the
-section ends at the last pose before it it gets away from (left out where there's none: MowBite OS till M8), or with
-back_out (a robot that backs up where the plan does) it backs up along its own way to there instead.
+whatever way, where the next section is got to from there, or the closest place where it turns whatever way is (any
+heading there: from there it gets anywhere it can, home too). Where none of that holds it's a dead end (a strip narrower
+than the body turns in): the section ends at the last pose before it it gets away from (left out where there's none:
+MowBite OS till M8), or with back_out (a robot that backs up where the plan does) it backs up along its own way to there
+instead.
 
 backed_out: back_out without arrives (OpenMower: mower_logic drives to the next section or home itself, its FTC turning
 on the spot where the section ends first): where that turn doesn't fit, the section backs up along its way to the last
@@ -18,8 +19,13 @@ import dataclasses
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from shapely.geometry import Point
+from shapely.ops import nearest_points
+
 from .backing import CORNER_COS, CORNER_STEP
 from .config import CoveragePlan, PlanningError, SegmentInfo
+from .footprint import Footprint
+from .geometry import QUAD_SEGS
 from .maneuvers import path_length, same_position
 from .mathutil import Pose2D, angle_diff
 from .sweep import body_out, plan_footprint, recorded_footprint, swept_area
@@ -77,8 +83,8 @@ class _Walk:
         self.cut: List[Tuple[int, int]] = []  # pose ranges [a, b) left out
         self.backs: Dict[int, int] = {}  # a section's last pose: the pose it backs up to from there
         self.got: Dict[str, list] = {k: [] for k in ('places', 'dropped', 'untried', 'ends', 'trapped', 'backed')}
-        self.home: Optional[Pose2D] = None
         self._fp: Any = False
+        self._room: Any = False
 
     def gets_to(self, p: Pose2D, c: Optional[Pose2D]) -> bool:
         key = _key(p) + (() if c is None else _key(c))
@@ -97,7 +103,7 @@ class _Walk:
         while n < len(self.bounds):
             if self.section(n):
                 n += 1
-        while self.kept and not self.kept[-1].out:  # (where the plan ends: home from there)
+        while self.kept and not self.kept[-1].out:  # (where the plan ends: away from there)
             if self.gets_away(self.kept[-1]):
                 self.kept[-1].out = True
             else:
@@ -137,8 +143,6 @@ class _Walk:
             place = _at(self.poses[a]) + [round(path_length(self.poses[a:got + 1]), 2)]
             self.got['places'].append(place)
             self.cut.append((a, got))
-        if self.home is None:
-            self.home = Pose2D(self.poses[got].x, self.poses[got].y, None)
         self.kept.append(_Kept(n, got, last, last, place))
 
     def footprint(self):
@@ -146,24 +150,36 @@ class _Walk:
             self._fp = plan_footprint(self.plan)
         return self._fp
 
+    def room(self):
+        """Where the body turns on the spot whatever way (spin_margin off the edges), None where nowhere."""
+        if self._room is False:
+            fp = self.footprint()
+            room = None if fp is None else Footprint(fp.space.buffer(-fp.spin_margin, QUAD_SEGS), fp.corners,
+                                                     blade=fp.blade).anywhere if fp.spin_margin > 0 else fp.anywhere
+            self._room = None if room is None or room.is_empty else room
+        return self._room
+
     def gets_away(self, sec: _Kept) -> bool:
         """Whether the robot gets away from where it is after sec (where it ends, or where it backed up to)."""
         return self.away(sec.at, sec.at != sec.last)
 
     def away(self, i: int, backwards: bool = False, asks: Optional[int] = None) -> bool:
         """Whether the robot gets away from pose i driving forwards: its body turning there whatever way (having backed
-        up to it: backwards), or home (asks: no more asked of arrives than that many in all, else no; what it said
-        already counts)."""
+        up to it: backwards), or a way to the closest place it does, facing any way (asks: no more asked of arrives than
+        that many in all, else no; what it said already counts)."""
         fp, p = self.footprint(), self.poses[i]
-        if fp is not None and fp.fits_turn(p.x, p.y, p.yaw, p.yaw + math.pi, backwards):
-            return True
-        if self.home is None:
+        if fp is None or fp.fits_turn(p.x, p.y, p.yaw, p.yaw + math.pi, backwards):
+            return True  # (without the body nothing to check)
+        room = self.room()
+        if room is None:
             return False
-        known = self.known.get(_key(self.home) + _key(p))
+        q = nearest_points(room, Point(p.x, p.y))[0]
+        to = Pose2D(q.x, q.y, None)
+        known = self.known.get(_key(to) + _key(p))
         if known is not None or asks is not None and self.asks >= asks:
             return bool(known)
         try:
-            return self.gets_to(self.home, p)
+            return self.gets_to(to, p)
         except _Spent:
             return False
 
@@ -194,8 +210,6 @@ class _Walk:
         self.got['trapped'].append(_at(self.poses[e]))
         if self.kept:
             self.kept[-1].out = False  # (known only to get to this one: away from there again)
-        else:
-            self.home = None
 
     def back_to(self, sec: _Kept, backwards: bool) -> Optional[int]:
         """The last pose of sec before its end the robot gets away from (having backed up to it: backwards):

@@ -41,13 +41,10 @@ def test_every_start_reached_leaves_the_plan():
     asked = []
     got = reached_starts(p, lambda pose, came: asked.append((pose, came)) or True)
     assert got.poses == p.poses and got.segments == p.segments and got.warnings == p.warnings
-    # each section's start, then home from where the plan ends (no body: it isn't known to turn there): the first
-    # pose's position, facing any way
-    assert [pose for pose, _ in asked[:2]] == [p.poses[i] for i in p.section_starts]
-    home, came = asked[2]
-    assert len(asked) == 3 and (home.x, home.y, home.yaw) == (p.poses[0].x, p.poses[0].y, None) and came == p.poses[-1]
+    # each section's start (without the body nothing checked where they end)
+    assert [pose for pose, _ in asked] == [p.poses[i] for i in p.section_starts]
     assert got.stats['starts'] == {'places': [], 'dropped': [], 'untried': [], 'ends': [], 'trapped': [],
-                                   'unmowed_m2': 0.0, 'asks': 3}
+                                   'unmowed_m2': 0.0, 'asks': 2}
 
 
 def ends(p):
@@ -67,7 +64,7 @@ def test_where_the_robot_comes_from():
     assert len(p.section_starts) == 3
     asked = []
     reached_starts(p, lambda pose, came: asked.append((pose, came)) or True)
-    assert [came for pose, came in asked if pose.yaw is not None] == [None, p.poses[ends(p)[0]], p.poses[ends(p)[1]]]
+    assert [came for _, came in asked] == [None, p.poses[ends(p)[0]], p.poses[ends(p)[1]]]
     gone = {(q.x, q.y, q.yaw) for q in sections(p)[1]}
     asked.clear()
     got = reached_starts(p, lambda pose, came: asked.append((pose, came)) or (pose.x, pose.y, pose.yaw) not in gone)
@@ -123,7 +120,7 @@ def test_the_asks_are_counted():
 def test_plan_coverage_passes_arrives():
     seen = []
     got = plan_coverage(LAWN, [HEDGE], CFG, arrives=lambda pose, came: seen.append(pose) or True)
-    assert got.poses == plan().poses and len([s for s in seen if s.yaw is not None]) == 2 and 'starts' in got.stats
+    assert got.poses == plan().poses and len(seen) == 2 and 'starts' in got.stats
     assert 'starts' not in plan().stats
 
 
@@ -172,8 +169,11 @@ def test_a_section_ends_earlier_where_it_gets_away():
     # MowBite OS till M8: the lane's end in the corridor is a dead end, the section ends at the last pose before it the
     # robot gets away from (here: turning on the spot, the square's edge, or home), the rest left out
     p = corridor()
-    got = reached_starts(p, out_of_square)
+    asked = []
+    got = reached_starts(p, lambda pose, came: asked.append(pose) or out_of_square(pose, came))
     end = got.poses[-1]
+    # (away to the closest place the body turns whatever way, facing any way: in the square by the corridor)
+    assert all(q.yaw is None and 3.0 < q.x < 4.0 and abs(q.y - 2.0) < 0.05 for q in asked[1:]) and len(asked) > 1
     assert got.poses == p.poses[:len(got.poses)] and 3.0 < end.x < 3.9
     assert got.stats['starts']['ends'] == [[8.5, 2.0, round(8.5 - end.x, 2)]]
     assert got.stats['starts']['unmowed_m2'] > 1.0 and 'back_out' not in got.stats
