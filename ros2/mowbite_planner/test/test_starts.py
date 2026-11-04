@@ -15,6 +15,7 @@ from mowbite_planner import PlannerConfig, PlanningError, plan_coverage  # noqa:
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, CoveragePlan, SegmentInfo  # noqa: E402
 from mowbite_planner.export import fingerprint, plan_pieces  # noqa: E402
 from mowbite_planner.mathutil import Pose2D  # noqa: E402
+from mowbite_planner.remote import refused  # noqa: E402
 from mowbite_planner.report import rules  # noqa: E402
 from mowbite_planner.starts import ARRIVE_ASKS, BACK_OUT_MAX, backed_out, reached_starts  # noqa: E402
 
@@ -267,6 +268,77 @@ def test_backing_up_round_a_sharp_corner():
     at = next(i for i, q in enumerate(got.poses) if i >= len(poses) and (q.x, q.y) == (6.0, 2.0))
     assert math.degrees(got.poses[at].yaw) == pytest.approx(60.0) and got.poses[at + 1].yaw == pytest.approx(0.0)
     backs_up_right(got)
+
+
+def test_backing_up_round_a_slight_bend():
+    # round a bend of 20 degrees each pose backing up faces against its step back (the heading it had going forwards
+    # there): the plan's form holds as the house computer's plans are checked (remote.refused), FTC backs up all along
+    a = math.radians(20.0)
+    ux, uy, nx, ny = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
+    arm = Polygon([(6.0 - 0.4 * nx, 2.0 - 0.4 * ny), (6.0 + 3.0 * ux - 0.4 * nx, 2.0 + 3.0 * uy - 0.4 * ny),
+                   (6.0 + 3.0 * ux + 0.4 * nx, 2.0 + 3.0 * uy + 0.4 * ny), (6.0 + 0.4 * nx, 2.0 + 0.4 * ny)])
+    joint = Polygon([(6.0 - 0.4 * nx, 2.0 - 0.4 * ny), (6.0, 1.6), (6.0, 2.4), (6.0 + 0.4 * nx, 2.0 + 0.4 * ny)])
+    space = unary_union([box(0.0, 0.0, 4.0, 4.0), box(3.9, 1.6, 6.0, 2.4), arm, joint.convex_hull])
+    p = corridor(((1.0, 6.0),), back_out=True)
+    poses = p.poses[:-1] + [Pose2D(6.0, 2.0, a)] + [Pose2D(6.0 + 0.1 * i * ux, 2.0 + 0.1 * i * uy, a)
+                                                    for i in range(1, 26)]
+    bent = CoveragePlan(**dict(vars(p), poses=poses, segments=[SegmentInfo(LANE, 0, len(poses) - 1, False, '', 0)],
+                               free_space=space, robot_space=space, transit_space=space, body_space=space))
+    assert refused(bent) == ''
+    for got in (reached_starts(bent, out_of_square, back_out=True), backed_out(bent)):
+        assert got.stats['back_out']['places'] and refused(got) == ''
+        backs_up_right(got)
+
+
+def test_a_section_going_on_where_one_ends():
+    # a section starting on the last pose of the one before (left out: nothing of it gets away): that pose stays the
+    # one before's, backing up from there once, no segment of the one left out
+    p = corridor(((1.0, 6.0),), back_out=True)
+    k = len(p.poses) - 1
+    poses = p.poses + [Pose2D(6.0 + 0.1 * i, 2.0, 0.0) for i in range(1, 26)]
+    two = CoveragePlan(**dict(vars(p), poses=poses, segments=[SegmentInfo(LANE, 0, k, False, '', 0),
+                                                              SegmentInfo(LANE, k, len(poses) - 1, False, '', 1)],
+                              section_starts=[0, k]))
+    for back_out in (False, True):
+        got = reached_starts(two, out_of_square, back_out=back_out)
+        assert got.stats['starts']['trapped'] == [[8.5, 2.0]] and got.poses[:20] == p.poses[:20]
+        assert len(got.section_starts) == 1 and all(s.start < s.end for s in got.segments)
+        assert len([s for s in got.segments if s.reverse]) == (1 if back_out else 0)
+        assert got.poses[-1].x < 3.9
+        backs_up_right(got)
+
+
+def test_back_out_ends_earlier_where_it_backs_up_to_nothing():
+    # a section from just past where the body turns having backed up to it: backing up gets nowhere, it ends earlier
+    # as without back_out (not left out)
+    for back_out in (False, True):
+        p = corridor(back_out=back_out)
+        poses = [Pose2D(3.54 + 0.01 * i, 2.0, 0.0) for i in range(486)]
+        fine = CoveragePlan(**dict(vars(p), poses=poses, segments=[SegmentInfo(LANE, 0, 485, False, '', 0)]))
+        got = reached_starts(fine, lambda pose, came: came is None, back_out=back_out)
+        assert len(got.stats['starts']['ends']) == 1 and got.stats['starts']['trapped'] == []
+        assert not any(s.reverse for s in got.segments)
+
+
+def test_ending_earlier_on_a_segments_end():
+    # cut back to where a segment ends: no segment of one pose left after it
+    p = corridor()
+    k = next(i for i, q in enumerate(p.poses) if q.x >= 3.6 - 1e-9)
+    split = CoveragePlan(**dict(vars(p), segments=[SegmentInfo(LANE, 0, k, False, '', 0),
+                                                   SegmentInfo(TRANSIT, k, len(p.poses) - 1, False, '', 0)]))
+    got = reached_starts(split, out_of_square)
+    assert got.stats['starts']['ends'] and all(s.start < s.end for s in got.segments)
+    assert refused(got) == ''
+
+
+def test_away_to_where_it_turns_in_its_own_part():
+    # the closest place it turns lies across a hedge (another part of the room): asked about one in its own part
+    p = corridor(extra=[(4.5, 2.6, 9.0, 6.0)])
+    hedge = box(4.5, 2.4, 9.0, 2.6)
+    parted = CoveragePlan(**dict(vars(p), transit_space=p.transit_space.difference(hedge)))
+    asked = []
+    reached_starts(parted, lambda pose, came: asked.append(pose) or out_of_square(pose, came))
+    assert asked[1:] and all(q.x < 4.0 for q in asked[1:])
 
 
 def test_back_out_pieces_go_with_what_they_back_out_of():

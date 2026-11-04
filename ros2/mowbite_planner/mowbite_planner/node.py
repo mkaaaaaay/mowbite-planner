@@ -50,7 +50,8 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
 A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, the settings it can't have, its own RPC
 methods, its transport (rpc_input, answer, rpc_end, map_input, events_input, send_out), its parameters (robot_param),
 writing the map (replace_map), when the map can't be planned (map_unusable), how it gets to a plan's sections
-(arrives), drive slope and reverse it can't drive (drive_ignored); main(node_class=it). SIGINT and SIGTERM end it
+(arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it can't drive
+(back_out_ignored, by default as drive); main(node_class=it). SIGINT and SIGTERM end it
 with destroy_node first (see main).
 """
 
@@ -479,6 +480,9 @@ class NodeCore(PlannerCore):
     def drive_ignored(self):
         return self.node.drive_ignored()
 
+    def back_out_ignored(self):
+        return self.node.back_out_ignored()
+
     def mower_ready(self):
         return self.node.mower_ready()
 
@@ -665,6 +669,9 @@ class MowbitePlannerNode(Node):
 
     def drive_ignored(self) -> str:
         return ''
+
+    def back_out_ignored(self) -> str:
+        return self.drive_ignored()
 
     def mower_ready(self) -> bool:
         return False

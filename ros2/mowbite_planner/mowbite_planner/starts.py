@@ -25,7 +25,7 @@ from shapely.ops import nearest_points
 from .backing import CORNER_COS, CORNER_STEP
 from .config import CoveragePlan, PlanningError, SegmentInfo
 from .footprint import Footprint
-from .geometry import QUAD_SEGS
+from .geometry import QUAD_SEGS, polygons
 from .maneuvers import path_length, same_position
 from .mathutil import Pose2D, angle_diff
 from .sweep import body_out, plan_footprint, recorded_footprint, swept_area
@@ -98,6 +98,11 @@ class _Walk:
     def came(self) -> Optional[Pose2D]:
         return self.poses[self.kept[-1].at] if self.kept else None
 
+    def own(self, a: int) -> int:
+        """Where a cut from a section's first pose a starts: past the last pose of the section kept before it where
+        that's the same pose (a section going on from there)."""
+        return a + 1 if self.kept and self.kept[-1].last == a else a
+
     def run(self) -> None:
         n = 0
         while n < len(self.bounds):
@@ -131,7 +136,7 @@ class _Walk:
                 return False
             self.kept[-1].out = True
         self.got['untried' if spent else 'dropped'].append(_at(self.poses[a]))
-        self.cut.append((a, last + 1))
+        self.cut.append((self.own(a), last + 1))
         return True
 
     def keep(self, n: int, got: int) -> None:
@@ -142,7 +147,7 @@ class _Walk:
         if got > a:
             place = _at(self.poses[a]) + [round(path_length(self.poses[a:got + 1]), 2)]
             self.got['places'].append(place)
-            self.cut.append((a, got))
+            self.cut.append((self.own(a), got))
         self.kept.append(_Kept(n, got, last, last, place))
 
     def footprint(self):
@@ -150,14 +155,24 @@ class _Walk:
             self._fp = plan_footprint(self.plan)
         return self._fp
 
-    def room(self):
-        """Where the body turns on the spot whatever way (spin_margin off the edges), None where nowhere."""
+    def room(self, p: Pose2D):
+        """Where the body turns on the spot whatever way (spin_margin off the edges) in the part of the transit space
+        p is in (the closest part), None where nowhere there."""
         if self._room is False:
             fp = self.footprint()
             room = None if fp is None else Footprint(fp.space.buffer(-fp.spin_margin, QUAD_SEGS), fp.corners,
                                                      blade=fp.blade).anywhere if fp.spin_margin > 0 else fp.anywhere
-            self._room = None if room is None or room.is_empty else room
-        return self._room
+            parts = list(polygons(self.plan.transit_space)) if self.plan.transit_space is not None else []
+            self._room = (None if room is None or room.is_empty else room, parts, {})
+        room, parts, of = self._room
+        if room is None or not parts:
+            return room
+        at = Point(p.x, p.y)
+        k = min(range(len(parts)), key=lambda j: parts[j].distance(at))
+        if k not in of:
+            mine = room.intersection(parts[k])
+            of[k] = None if mine.is_empty else mine
+        return of[k]
 
     def gets_away(self, sec: _Kept) -> bool:
         """Whether the robot gets away from where it is after sec (where it ends, or where it backed up to)."""
@@ -170,7 +185,7 @@ class _Walk:
         fp, p = self.footprint(), self.poses[i]
         if fp is None or fp.fits_turn(p.x, p.y, p.yaw, p.yaw + math.pi, backwards):
             return True  # (without the body nothing to check)
-        room = self.room()
+        room = self.room(p)
         if room is None:
             return False
         q = nearest_points(room, Point(p.x, p.y))[0]
@@ -189,14 +204,14 @@ class _Walk:
         sec = self.kept[-1]
         e = sec.last
         to = self.back_to(sec, self.back_out)
-        if to is not None and self.back_out:
-            m = path_length(self.poses[to:e + 1])
+        if self.back_out:
+            m = path_length(self.poses[to:e + 1]) if to is not None else math.inf
             if m <= BACK_OUT_MAX and self.fits_back(to, e):
                 self.backs[e] = to
                 self.got['backed'].append(_at(self.poses[e]) + [round(m, 2)])
                 sec.at, sec.out = to, True
                 return
-            to = self.back_to(sec, False)  # (backing up that far, or not fitting: it ends earlier instead)
+            to = self.back_to(sec, False)  # (none, backing up that far, or not fitting: it ends earlier instead)
         if to is not None and to > sec.first:
             self.cut.append((to + 1, e + 1))
             self.got['ends'].append(_at(self.poses[e]) + [round(path_length(self.poses[to:e + 1]), 2)])
@@ -206,7 +221,7 @@ class _Walk:
         self.kept.pop()
         if sec.place is not None:
             self.got['places'].remove(sec.place)
-        self.cut.append((sec.first, e + 1))
+        self.cut.append((self.own(sec.first), e + 1))
         self.got['trapped'].append(_at(self.poses[e]))
         if self.kept:
             self.kept[-1].out = False  # (known only to get to this one: away from there again)
@@ -377,14 +392,16 @@ def _at(p: Pose2D) -> list:
 
 
 def _back(plan: CoveragePlan, to: int, e: int) -> Optional[Tuple[List[Pose2D], List[SegmentInfo], int]]:
-    """Backing up from pose e to pose to of the same section: the poses (e first), each facing the way it did, the
-    segments (indices from e on) driven backwards over each one of plan's there, of its kind and source (its body's
-    rules: the outermost loop as recorded), maneuver 'back_out', the blade on, and the corners turned. FTC backs up from
-    a pose where it and the next one elsewhere both face against the way between them: at a corner sharper than a
-    quarter turn the pose would face along the next step, so it faces between both ways there and one CORNER_STEP on
-    along the next leg faces against it (as backing.corners). None where a corner turns about half round (no heading
-    between both ways)."""
-    src = [plan.poses[i] for i in range(e, to - 1, -1)]
+    """Backing up from pose e to pose to of the same section: the poses (e first), each facing against the step it
+    backs up from it (the heading the pose before it had driving that step forwards; pose to its own), the segments
+    (indices from e on) driven backwards over each one of plan's there, of its kind and source (its body's rules: the
+    outermost loop as recorded), maneuver 'back_out', the blade on, and the corners turned. FTC backs up from a pose
+    where it and the next one elsewhere both face against the way between them: at a corner sharper than a quarter turn
+    the pose would face along the step backed up to it, so it faces between both ways there and one CORNER_STEP on along
+    the next leg faces against it (as backing.corners). None where a corner turns about half round (no heading between
+    both ways)."""
+    src = [Pose2D(plan.poses[i].x, plan.poses[i].y, plan.poses[i - 1].yaw if i > to else plan.poses[i].yaw)
+           for i in range(e, to - 1, -1)]
     poses: List[Pose2D] = []
     where: List[int] = []  # each of src in poses
     turned = 0
@@ -394,7 +411,7 @@ def _back(plan: CoveragePlan, to: int, e: int) -> Optional[Tuple[List[Pose2D], L
             a, b = src[k - 1], src[k + 1]
             (x1, y1), (x2, y2) = (c.x - a.x, c.y - a.y), (b.x - c.x, b.y - c.y)
             n1, n2 = math.hypot(x1, y1), math.hypot(x2, y2)
-            if n1 > 2 * CORNER_STEP and n2 > 2 * CORNER_STEP and x2 * math.cos(c.yaw) + y2 * math.sin(c.yaw) >= 0:
+            if n1 > 2 * CORNER_STEP and n2 > 2 * CORNER_STEP and x1 * math.cos(c.yaw) + y1 * math.sin(c.yaw) >= 0:
                 hx, hy = -(x1 / n1 + x2 / n2), -(y1 / n1 + y2 / n2)
                 if math.hypot(hx, hy) < 2 * CORNER_COS:
                     return None
@@ -419,6 +436,11 @@ def _fits_back(plan: CoveragePlan, fp, to: int, e: int) -> bool:
     return got is not None and not body_out(got[0], got[1], [0], fp, recorded_footprint(plan))
 
 
+def _shared(segments: List[SegmentInfo], k: int, i: int) -> bool:
+    """Whether pose i is the first or last of a segment next to segment k (a section going on from it too)."""
+    return any(0 <= j < len(segments) and i in (segments[j].start, segments[j].end) for j in (k - 1, k + 1))
+
+
 def _rebuilt(plan: CoveragePlan, cut: List[Tuple[int, int]], backs: Dict[int, int]) -> CoveragePlan:
     """plan without the poses in the ranges cut, from each pose e of backs backing up to pose backs[e] (see _back: it
     fits), its segments and sections along; stats['back_out']['corners']: the corners turned backing up."""
@@ -436,14 +458,16 @@ def _rebuilt(plan: CoveragePlan, cut: List[Tuple[int, int]], backs: Dict[int, in
             else:
                 poses.append(p)
     segments: List[SegmentInfo] = []
+    placed = set()
     for k, s in enumerate(plan.segments):
         kept = [i for i in range(s.start, s.end + 1) if not gone[i]]
-        if not kept:
-            continue
+        if not kept or len(kept) == 1 and _shared(plan.segments, k, kept[0]):
+            continue  # (cut down to a pose the segment next to it has)
         segments.append(dataclasses.replace(s, start=index[kept[0]], end=index[kept[-1]]))
         e = kept[-1]
-        if e in backing and (k + 1 == len(plan.segments) or plan.segments[k + 1].start > e or
-                             plan.segments[k + 1].section != s.section):
+        if e in backing and e not in placed and (k + 1 == len(plan.segments) or plan.segments[k + 1].start > e or
+                                                 plan.segments[k + 1].section != s.section):
+            placed.add(e)
             at, (_, way, _) = backing[e]
             segments.extend(dataclasses.replace(w, start=w.start + at, end=w.end + at) for w in way)
     firsts = [s.start for k, s in enumerate(segments) if k == 0 or s.section != segments[k - 1].section]
