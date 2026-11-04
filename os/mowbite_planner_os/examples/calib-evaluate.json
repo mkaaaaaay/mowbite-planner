@@ -1,0 +1,110 @@
+{
+ "request": {
+  "method": "planner.calib.evaluate",
+  "params": {
+   "path": "/userdata/mowbite/calibration/recordings/calib-20261104T010203Z.jsonl.gz"
+  },
+  "id": "os/calibration/1"
+ },
+ "response": {
+  "id": "os/calibration/1",
+  "result": {
+   "ready": true,
+   "version": "mowbite-calib/1",
+   "based_on": {
+    "m": 12.0,
+    "turns": 6.0,
+    "runs": 4
+   },
+   "warnings": [],
+   "info": {
+    "gyro_scale": 1.0177,
+    "gyro_bias": -0.00232,
+    "gnss_delay_s": 0.238,
+    "rtk_spread_m": 0.0138,
+    "slope_deg": 2.07,
+    "speed_ratio": 0.971,
+    "turn_ratio": 0.972,
+    "ticks_source": "counter",
+    "ticks_per_m_left": 1030.3,
+    "ticks_per_m_right": 1027.8
+   },
+   "values": [
+    {
+     "name": "ticks_per_m",
+     "value": 1029.0,
+     "unit": "ticks/m",
+     "old": 1000.0,
+     "sigma": 1.03,
+     "quality": "good",
+     "ok": true,
+     "warning": null
+    },
+    {
+     "name": "wheel_distance_m",
+     "value": 0.3997,
+     "unit": "m",
+     "old": 0.4,
+     "sigma": 0.0008,
+     "quality": "good",
+     "ok": true,
+     "warning": null
+    },
+    {
+     "name": "antenna_offset_x",
+     "value": 0.08,
+     "unit": "m",
+     "old": -0.1,
+     "sigma": 0.0059,
+     "quality": "fair",
+     "ok": true,
+     "warning": "large change from -0.1: 0.180 m"
+    },
+    {
+     "name": "antenna_offset_y",
+     "value": -0.001,
+     "unit": "m",
+     "old": 0.0,
+     "sigma": 0.0072,
+     "quality": "fair",
+     "ok": true,
+     "warning": null
+    },
+    {
+     "name": "imu_roll",
+     "value": 0.0016,
+     "unit": "rad",
+     "old": 0.0,
+     "sigma": 0.00175,
+     "quality": "good",
+     "ok": true,
+     "warning": null
+    },
+    {
+     "name": "imu_pitch",
+     "value": 0.004,
+     "unit": "rad",
+     "old": 0.0,
+     "sigma": 0.00175,
+     "quality": "good",
+     "ok": true,
+     "warning": null
+    }
+   ]
+  }
+ },
+ "errors": [
+  {
+   "id": "os/calibration/2",
+   "code": -32602,
+   "message": "path must lie under /userdata/mowbite/calibration",
+   "data": ""
+  },
+  {
+   "id": "os/calibration/3",
+   "code": -32603,
+   "message": "the calibration not evaluated: the evaluation took over 120 s",
+   "data": ""
+  }
+ ]
+}

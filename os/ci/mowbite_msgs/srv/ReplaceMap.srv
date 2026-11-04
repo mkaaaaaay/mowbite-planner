@@ -1,0 +1,11 @@
+# Replaces the whole map like the RPC map.replace does, for nodes that should not read the answers of the bridge.
+# The map as OpenMower JSON, the text of params[0] of map.replace (open or closed rings).
+string map
+# SHA-256 (hex, lower case) of the map/json text this caller read last, byte for byte. Empty: no check.
+string expected_sha256
+---
+bool success
+# 0, -32602 (invalid map or request), -32000 (datum), -32001 (the map changed meanwhile), -32603 (disk)
+int32 code
+# Why the map was refused, "Successfully stored map (N areas)" if it was stored
+string message

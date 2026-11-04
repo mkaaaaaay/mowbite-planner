@@ -1,0 +1,38 @@
+# Plans a drive from one pose to another through the drivable areas (MowBite Planner, mowbite_planner): to the first
+# pose of a coverage path, between its sections, between areas, to the dock. Forwards only.
+# Coordinates are metres in a flat frame, the planner's frame_id parameter (default map), poses of base_link.
+
+# where the mower is and the way it faces
+geometry_msgs/Pose start
+geometry_msgs/Pose goal
+# true: arrive facing the goal's orientation. false: any way
+bool use_goal_heading false
+# m straight on before the goal, facing its way (e.g. to back onto the dock's contacts from there), needs
+# use_goal_heading
+float64 goal_straight_length 0.0
+# where the mower may drive (mowing and navigation areas): at least one, at least 3 points each
+geometry_msgs/Polygon[] drivable_areas
+# no-go zones (flower beds, trees)
+geometry_msgs/Polygon[] obstacles
+# m, how far the start or the goal may lie outside of where the body fits (by the edge, the dock), the way from or to
+# there runs straight and unchecked. < 0: 0.5
+float64 max_outside -1.0
+# Overrides for this request, any of the node's parameters by its name (e.g. turn_radius, turn_on_spot, robot_width).
+# Left out, the node's parameters apply.
+rcl_interfaces/Parameter[] overrides
+---
+bool success
+# why planning failed, or a summary and any warnings
+string message
+# The way: each pose faces the next one, the last one the way it arrives, waypoint_spacing apart, at least 3, no two on
+# the same position. A pose whose heading jumps from the one before (by more than 15 deg) turns on the spot there.
+# Empty where the start is at the goal already: closer than waypoint_spacing, facing its way within 15 deg (with
+# turn_on_spot whatever way it faces, turning there on the spot is up to the driver, see message).
+nav_msgs/Path path
+# m
+float64 path_length
+# the poses it turns on the spot at, 0: at the start, from the start's heading into the first pose's
+uint32[] spin_at
+# m of the way from the start, and before the goal, where the body isn't checked (it lay outside, see max_outside)
+float64 start_outside
+float64 goal_outside

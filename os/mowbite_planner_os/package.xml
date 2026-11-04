@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mowbite_planner_os</name>
+  <version>0.1.0</version>
+  <description>The MowBite Planner on MowBite OS: mowbite_planner's node with mowbite_bridge, mowbite_map and mowbite_logic, its ~/plan_transit</description>
+  <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
+  <license>GPL-3.0-only</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>mowbite_msgs</exec_depend>
+  <exec_depend>mowbite_planner</exec_depend>
+  <exec_depend>mowbite_planner_interfaces</exec_depend>
+  <exec_depend>mowbite_planner_os_interfaces</exec_depend>
+  <exec_depend>python3-shapely</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
