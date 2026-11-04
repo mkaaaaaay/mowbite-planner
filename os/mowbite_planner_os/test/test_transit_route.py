@@ -201,6 +201,31 @@ def test_by_the_edge_as_recorded():
         transit(start, goal, cfg, areas=[LAWN], max_outside=0.3, as_recorded=False)
 
 
+def test_by_the_edge_only_from_or_to_the_edge(monkeypatch):
+    # that loop's rules only where the start or the goal lies by the edge, the body not keeping the usual margins there:
+    # none in the middle of the lawn or by an obstacle only, also where the way sticks out on its way
+    import mowbite_planner_os.transit_route as route
+    real, tries = route._transit, []
+
+    def first_fails(start, goal, drivable, obstacles, cfg, *rest):
+        tries.append(cfg.edge_margin)
+        if len(tries) == 1:
+            raise PlanningError('the body sticks out on the way at (5.00, 3.00)')
+        return real(start, goal, drivable, obstacles, cfg, *rest)
+
+    monkeypatch.setattr(route, '_transit', first_fails)
+    cfg = dict(perimeter_passes=3, turn_radius=0.44, robot_front=0.60, robot_rear=0.12, blade_ahead=0.23)
+    for start, goal in (((2.0, 3.0, 0.0), (8.0, 3.0, 0.0)), ((5.0, 2.2, 0.0), (8.0, 3.0, 0.0))):
+        tries.clear()
+        with pytest.raises(PlanningError, match='^the body sticks out on the way'):
+            transit(start, goal, cfg, areas=[LAWN])
+        assert len(tries) == 1
+    tries.clear()
+    t = transit((3.0, 1.5, 0.0), (2.458, 0.11, 0.0), cfg, areas=[LAWN], max_outside=0.3)
+    assert len(tries) == 2 and tries[1] < tries[0]
+    assert any('as the outline was recorded' in w for w in t.warnings)
+
+
 def test_from_and_to_the_poses_of_a_plan():
     # the Tron's sim (MowBite OS): one small lawn; every pose of the plan a start, a goal where a way gets there facing
     # its heading (the rules checked); one by the edge no arc gets to facing along it says so

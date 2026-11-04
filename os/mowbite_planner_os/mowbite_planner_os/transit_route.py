@@ -90,7 +90,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     whatever way it faces, turning there is up to whoever drives it). Where that's no way to or from a pose of a plan's
     outermost loop driven the way the outline was recorded (recorded edges: the body where it was then, recorded_margin
     off it, no spin_margin on top), the way by that loop's rules, if there's one (a warning; not with as_recorded
-    False). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its
+    False): only where the start or the goal lies by the edge (_by_the_edge), not for a way that only sticks out on its
+    way. Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its
     heading, where the body sticks out turning into it there too, says so), or the input is out of range."""
     cfg = config or PlannerConfig()
     cfg.validate()
@@ -100,7 +101,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     except PlanningError as e:
         margin = min(cfg.recorded_margin, cfg.edge_margin)
         if not (as_recorded and cfg.body and cfg.edges == 'recorded' and margin < cfg.edge_margin and
-                str(e).startswith(BY_THE_EDGE)):
+                str(e).startswith(BY_THE_EDGE) and _by_the_edge(start, goal, drivable, obstacles, cfg)):
             raise
         try:
             got = _transit(start, goal, drivable, obstacles, cfg.with_overrides({'edge_margin': margin,
@@ -111,6 +112,33 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     got.warnings.append(f'by the edge as the outline was recorded: edge_margin {margin} m, no spin_margin (as the '
                         'outermost loop)')
     return got
+
+
+def _by_the_edge(start, goal, drivable, obstacles, cfg: PlannerConfig) -> bool:
+    """Whether the start or the goal lies by the edge where the body doesn't keep the usual margins: within its reach,
+    spin_margin and edge_margin of the drivable areas' edge, the body there sticking out of where it fits with them
+    standing (facing its way) or turning on the spot (any way round; a goal without a heading: its centre where the
+    body doesn't fit). Not a way in the middle of the lawn or by an obstacle only, nor one that only sticks out on its
+    way."""
+    if not cfg.body:
+        return False
+    try:
+        space, fp = centre_space(drivable, obstacles, cfg)
+    except PlanningError:
+        return True
+    if fp is None:
+        return False
+    edge = union(clean_polygon(d) for d in drivable).boundary
+    for p in (start, goal):
+        x, y = float(p[0]), float(p[1])
+        if edge.distance(Point(x, y)) > fp.reach + cfg.spin_margin + cfg.edge_margin:
+            continue
+        if len(p) < 3 or p[2] is None:
+            if not space.covers(Point(x, y)):
+                return True
+        elif not fp.fits_pose(x, y, float(p[2])) or not fp.fits_turn(x, y, float(p[2]), float(p[2]) + math.pi):
+            return True
+    return False
 
 
 def _transit(start, goal, drivable, obstacles, cfg: PlannerConfig, goal_straight: float,
