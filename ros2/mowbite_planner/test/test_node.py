@@ -621,6 +621,30 @@ def test_a_robots_own_node(make):
 
 
 @fake_only
+def test_arrives_in_the_plans_key(make, planned):
+    """A robot's arrives: the plan with it planned and kept apart from the one without; its key (where it has one) is
+    part of the plan's key, so one kept with another key isn't taken."""
+    node = make(Robot)
+    send_map(node, the_map())
+
+    def arrives(key):
+        def gets_to(pose):
+            return True
+        if key is not None:
+            gets_to.key = key
+        return lambda *args: gets_to
+
+    kept = []
+    for rid, how in enumerate((None, arrives(None), arrives('other'), arrives('other'), arrives(None))):
+        if how is not None:
+            node.arrives = how
+        assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r%d' % rid)[1] is None
+        kept.append(len(node.core.plans))
+    assert callable(planned.calls[-1][1]['arrives'])
+    assert kept == [1, 2, 3, 3, 3]
+
+
+@fake_only
 def test_events_and_progress(make):
     """The events on ~/events turn the lanes (angle_increment); a planning's progress goes out on ~/publish."""
     node = make()
