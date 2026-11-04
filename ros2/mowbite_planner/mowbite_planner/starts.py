@@ -15,10 +15,11 @@ from .sweep import swept_area
 
 # m of path apart a section's later poses are tried (then the ones between the last it doesn't get to and the first it
 # does), the poses tried at most for a section, the poses asked about at most for a plan (a number, not a time: the
-# same plan on any computer)
+# same plan on any computer; many of them cheap where arrives knows at once it doesn't get there, MowBite OS bounds the
+# ways it plans itself)
 ARRIVE_STEP = 0.3
 ARRIVE_TRIES = 12
-ARRIVE_ASKS = 40
+ARRIVE_ASKS = 400
 
 Arrives = Callable[[Pose2D, Optional[Pose2D]], bool]  # (pose, came_from)
 
