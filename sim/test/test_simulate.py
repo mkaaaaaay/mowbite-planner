@@ -260,3 +260,28 @@ def test_back_up_with_plan_leaves_forward_plans_alone():
     a = simulate(plan, MowerModel.realistic(0))
     b = simulate(plan, MowerModel.realistic(0).with_overrides({'back_up_with_plan': True}))
     assert a.samples == b.samples
+
+
+def test_backing_out_of_a_dead_end():
+    """back_out (starts.backed_out): a lane to the end of a corridor narrower than the body turns in, then backing up
+    along it to the square: with back_up_with_plan the mower backs out to there, its body inside all along; without it
+    FTC turns it round in the corridor, the body out over its edges (why it's only planned with FTC backing up)."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    from mowbite_planner import PlannerConfig
+    from mowbite_planner.config import LANE, CoveragePlan, SegmentInfo
+    from mowbite_planner.starts import backed_out
+    space = unary_union([box(0.0, 0.0, 4.0, 4.0), box(3.9, 1.6, 9.0, 2.4)])
+    poses = [Pose2D(1.0 + 0.1 * i, 2.0, 0.0) for i in range(76)]
+    plan = backed_out(CoveragePlan(
+        poses=poses, segments=[SegmentInfo(LANE, 0, 75, False, '')], angle=0.0, lane_spacing=0.3, perimeter_loops=[],
+        lanes=[], stats={}, warnings=[], area=space, free_space=space, robot_space=space, transit_space=space,
+        body_space=space, config=PlannerConfig(mower_width=0.3, back_out=True, **BODY), section_starts=[0]))
+    assert plan.stats['back_out']['places'] == [[8.5, 2.0, 5.0]]
+    res = simulate(plan, MowerModel.realistic(0).with_overrides({'back_up_with_plan': True}))
+    end = plan.poses[-1]
+    assert not res.aborted and not res.nav_errors
+    assert math.hypot(res.samples[-1][1] - end.x, res.samples[-1][2] - end.y) < 0.05
+    assert abs(res.samples[-1][3]) < 0.05 and evaluate(plan, res)['body']['places'] == []
+    forwards = simulate(plan, MowerModel.realistic(0))
+    assert evaluate(plan, forwards)['body']['worst'] > 0.1
