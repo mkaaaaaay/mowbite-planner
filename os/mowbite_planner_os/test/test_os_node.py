@@ -30,10 +30,9 @@ from mowbite_planner import node as node_module  # noqa: E402
 from mowbite_planner.calib import evaluate  # noqa: E402
 from mowbite_planner.config import PlannerConfig, PlanningError  # noqa: E402
 from mowbite_planner.starts import _Spent  # noqa: E402
-from mowbite_planner.mathutil import Pose2D, angle_diff, yaw_to_quaternion  # noqa: E402
+from mowbite_planner.mathutil import Pose2D, yaw_to_quaternion  # noqa: E402
 from mowbite_planner_os import node as os_module  # noqa: E402
 from mowbite_planner_os.node import OsNode  # noqa: E402
-from mowbite_planner_os.transit_route import plan_transit  # noqa: E402
 from stubplan import Spy  # noqa: E402
 
 fake_only = pytest.mark.skipif(REAL_ROS, reason='looks at the stand-ins\' topics')
@@ -385,6 +384,28 @@ def test_arrives(make, planned, monkeypatch):
     gets_to(Pose2D(2.0, 2.5, 0.0))
     with pytest.raises(_Spent):
         gets_to(Pose2D(4.0, 1.0, math.pi))
+
+
+@fake_only
+def test_transit_as_recorded(make, monkeypatch):
+    """transit_as_recorded (on by default): ~/plan_transit and arrives try a way by the outermost loop's rules where
+    no other gets there; off: neither does, the plans got to so kept apart from the others (arrives' key)."""
+    asked = []
+
+    def spy(start, goal, *args, **kw):
+        asked.append(kw.get('as_recorded'))
+        raise PlanningError(f'no way arrives at the goal ({goal[0]:.2f}, {goal[1]:.2f})')
+    monkeypatch.setattr(os_module, 'plan_transit', spy)
+    body = {k: v for k, v in TRON.items() if k.startswith('robot_')}
+    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    for on, params in ((True, {}), (True, {'transit_as_recorded': True}), (False, {'transit_as_recorded': False})):
+        node = make(**dict(body, **params))
+        assert not transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).success
+        gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
+        assert not gets_to(Pose2D(2.0, 2.5, 0.0))
+        assert getattr(gets_to, 'key', True) == (True if on else {'as_recorded': False})
+        assert len(asked) > 1 and set(asked) == {on}
+        asked.clear()
 
 
 def tron_case():

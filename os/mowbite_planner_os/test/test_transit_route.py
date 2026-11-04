@@ -189,6 +189,18 @@ def test_without_body():
     assert min(tree.distance(Point(p.x, p.y)) for p in t.poses) >= 0.11 - 1e-6
 
 
+def test_by_the_edge_as_recorded():
+    # a pose of the outermost loop by the edge (the Tron's body): no way gets there by the rules of the lanes, one by
+    # that loop's (a warning); with as_recorded False none (MowBite OS' transit_as_recorded)
+    cfg = dict(perimeter_passes=3, turn_radius=0.44, robot_front=0.60, robot_rear=0.12, blade_ahead=0.23)
+    start, goal = (3.0, 1.5, 0.0), (2.458, 0.11, 0.0)
+    t = transit(start, goal, cfg, areas=[LAWN], max_outside=0.3)
+    assert any('as the outline was recorded' in w for w in t.warnings)
+    check(t, start, goal, cfg, areas=[LAWN])
+    with pytest.raises(PlanningError, match='^no way arrives at the goal|^the goal |^the body sticks out'):
+        transit(start, goal, cfg, areas=[LAWN], max_outside=0.3, as_recorded=False)
+
+
 def test_from_and_to_the_poses_of_a_plan():
     # the Tron's sim (MowBite OS): one small lawn; every pose of the plan a start, a goal where a way gets there facing
     # its heading (the rules checked); one by the edge no arc gets to facing along it says so

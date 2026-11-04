@@ -20,6 +20,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
     through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see
     mowbite_planner.starts): from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is small.
+    transit_as_recorded (true): where no way gets to or from a pose by the edge, a way by the outermost loop's rules
+    (plan_transit's as_recorded); false: not, for ~/plan_transit and the plans' sections alike.
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
     at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
     whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read or a timeout: -32603.
@@ -92,8 +94,10 @@ class OsNode(base.MowbitePlannerNode):
         self.maps = threading.Condition()
         self.map_count = 0
         self._calib_root = None
+        self._as_recorded = None
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
+        self.as_recorded()
         self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit)
 
     def calib_root(self) -> str:
@@ -102,6 +106,13 @@ class OsNode(base.MowbitePlannerNode):
                 description='planner.calib.evaluate reads recordings under here only (MowBite OS: data_dir/'
                             'calibration), empty: not offered')).value or ''
         return self._calib_root
+
+    def as_recorded(self) -> bool:
+        if self._as_recorded is None:
+            self._as_recorded = bool(self.declare_parameter('transit_as_recorded', True, ParameterDescriptor(
+                description='where no way gets to or from a pose by the edge, a way by the outermost loop\'s rules '
+                            '(~/plan_transit and the plans\' sections alike)')).value)
+        return self._as_recorded
 
     # the transport: mowbite_bridge
 
@@ -224,10 +235,11 @@ class OsNode(base.MowbitePlannerNode):
         """Whether ~/plan_transit gets to a pose facing its heading, through the area and the drivable areas but the
         obstacles and the areas to keep out of, the body checked up to the pose (none of it outside): from ARRIVE_FROM m
         behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where the lawn is
-        too small for those. A pose none of them gets to isn't got to: no start it can't get to (the Tron's case of
-        30.10.). None without the body: nothing to check."""
+        too small for those; by transit_as_recorded as ~/plan_transit. A pose none of them gets to isn't got to: no
+        start it can't get to (the Tron's case of 30.10.). None without the body: nothing to check."""
         if not cfg.body:
             return None
+        recorded = self.as_recorded()
         areas, away = [list(boundary)] + [list(d) for d in drivable], [list(o) for o in obstacles] + \
             [list(k) for k in keep_out]
         space = []  # (worked out once a plan, when it's first asked)
@@ -252,11 +264,13 @@ class OsNode(base.MowbitePlannerNode):
                 ways[0] += 1
                 try:
                     plan_transit((x, y, math.atan2(p.y - y, p.x - x)), (p.x, p.y, p.yaw), areas, away, cfg,
-                                 max_outside=0.0)
+                                 max_outside=0.0, as_recorded=recorded)
                     return True
                 except PlanningError:
                     continue
             return False
+        if not recorded:
+            gets_to.key = {'as_recorded': False}  # (a plan kept with the other isn't taken)
         return gets_to
 
     def _on_plan_transit(self, request, response):
@@ -281,7 +295,8 @@ class OsNode(base.MowbitePlannerNode):
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         try:
             transit = plan_transit(start, goal, drivable, obstacles, self.transit_config(values),
-                                   float(request.goal_straight_length), max_outside)
+                                   float(request.goal_straight_length), max_outside,
+                                   as_recorded=self.as_recorded())
         except PlanningError as e:
             response.success = False
             response.message = base.with_warnings(f'planning the transit failed: {e}', warnings)

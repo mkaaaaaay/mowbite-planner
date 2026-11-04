@@ -76,7 +76,7 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
 
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
-                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
+                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, as_recorded: bool = True) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -89,9 +89,9 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     poses. An empty way where it's at the goal already (closer than waypoint_spacing, facing its way; with turn_on_spot
     whatever way it faces, turning there is up to whoever drives it). Where that's no way to or from a pose of a plan's
     outermost loop driven the way the outline was recorded (recorded edges: the body where it was then, recorded_margin
-    off it, no spin_margin on top), the way by that loop's rules, if there's one (a warning). Raises
-    PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its heading, where the
-    body sticks out turning into it there too, says so), or the input is out of range."""
+    off it, no spin_margin on top), the way by that loop's rules, if there's one (a warning; not with as_recorded
+    False). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its
+    heading, where the body sticks out turning into it there too, says so), or the input is out of range."""
     cfg = config or PlannerConfig()
     cfg.validate()
     cfg = _turning(cfg)  # (as in plan_coverage)
@@ -99,7 +99,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         return _transit(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
     except PlanningError as e:
         margin = min(cfg.recorded_margin, cfg.edge_margin)
-        if not (cfg.body and cfg.edges == 'recorded' and margin < cfg.edge_margin and str(e).startswith(BY_THE_EDGE)):
+        if not (as_recorded and cfg.body and cfg.edges == 'recorded' and margin < cfg.edge_margin and
+                str(e).startswith(BY_THE_EDGE)):
             raise
         try:
             got = _transit(start, goal, drivable, obstacles, cfg.with_overrides({'edge_margin': margin,
