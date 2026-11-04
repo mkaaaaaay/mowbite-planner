@@ -645,6 +645,86 @@ def test_arrives_in_the_plans_key(make, planned):
 
 
 @fake_only
+def test_the_first_section_from_the_requests_start(make, planned):
+    """A robot's arrives with a ~/plan_coverage of an area with its start (use_start_pose): the first section got to
+    from there (arrives.start), kept apart from the plan without it; from the dock (no start in the request) not."""
+    node = make(Robot)
+    send_map(node, the_map())
+    node.arrives = lambda *args: (lambda pose, came_from: True)
+    assert plan_area(node).success
+    assert not hasattr(planned.calls[-1][1]['arrives'], 'start')
+    request = PlanCoverage.Request()
+    request.start_pose.position.x, request.start_pose.position.y = 7.5, 0.5
+    request.start_pose.orientation.w = 1.0
+    got = plan_area(node, use_start_pose=True, start_pose=request.start_pose)
+    assert got.success and planned.calls[-1][1]['arrives'].start == (7.5, 0.5, 0.0)
+    assert len(node.core.plans) == 2
+
+
+class Given(Robot):
+    """A robot that gives the body and the blade itself (given) and holds the margins to floors."""
+
+    given_by = {n: 'its own' for n in ('robot_width', 'robot_front', 'robot_rear', 'robot_outline', 'mower_width')}
+    floors = {'edge_margin': 0.05, 'obstacle_margin': 0.1}
+    cannot = {'body_fit': 'always on here'}
+    body = {}
+
+    def given(self):
+        return dict(self.body)
+
+
+BODY = {'robot_width': 0.4, 'robot_front': 0.5, 'robot_rear': 0.1, 'robot_outline': None, 'mower_width': 0.25}
+
+
+@fake_only
+def test_settings_the_robot_gives(make, tmp_path):
+    """given_by: not settable, not stored, the robot's values count (the node's parameters, the stored ones, an area's
+    and a request's own not); floors: less not settable, a stored one less the floor, an area's and an obstacle's own
+    margin no less."""
+    os.makedirs(tmp_path / 'planner')
+    with open(tmp_path / 'planner' / 'mowbite_planner_settings.json', 'w') as f:
+        json.dump({'robot_width': 0.9, 'edge_margin': 0.01, 'turn_radius': 0.3}, f)
+    node = make(Given, robot_width=0.8, robot_front=0.6, robot_rear=0.2)
+    current = node.core.current
+    assert current.base.robot_width is None and current.base.edge_margin == 0.05 and current.base.turn_radius == 0.3
+    got, _ = rpc(node, 'planner.settings')
+    assert got['settings']['robot_width']['settable'] is False and got['settings']['robot_width']['from'] == 'its own'
+    assert got['settings']['edge_margin']['min'] == 0.05 and got['settings']['obstacle_margin']['min'] == 0.1
+    assert rpc(node, 'planner.settings.set', {'robot_width': 0.5}, 'r2')[1] == (
+        -32602, 'not settable here: robot_width (from its own)')
+    assert rpc(node, 'planner.settings.set', {'edge_margin': 0.02}, 'r3')[1] == (
+        -32602, 'edge_margin 0.05 m at least here, got 0.02')
+    assert rpc(node, 'planner.settings.set', {'edge_margin': 0.08}, 'r4')[1] is None
+    node.body = dict(BODY)
+    node.core.given_again()
+    got, _ = rpc(node, 'planner.settings', None, 'r5')
+    assert got['settings']['robot_width']['value'] == 0.4 and got['settings']['mower_width']['value'] == 0.25
+    assert got['settings']['robot_width']['default'] == 0.4 and got['settings']['edge_margin']['value'] == 0.08
+    with open(tmp_path / 'planner' / 'mowbite_planner_settings.json') as f:
+        assert json.load(f) == {'edge_margin': 0.08, 'turn_radius': 0.3}
+    data = the_map(planner={'robot_width': 0.2, 'robot_front': 0.2, 'robot_rear': 0.1, 'edge_margin': 0.0,
+                            'body_fit': False})
+    data['areas'][1]['properties']['margin'] = 0.02
+    send_map(node, data)
+    assert plan_area(node).success
+    args, _ = node_module.plan_coverage.calls[-1]
+    cfg = args[2]
+    assert (cfg.robot_width, cfg.robot_front, cfg.robot_rear, cfg.mower_width) == (0.4, 0.5, 0.1, 0.25)
+    assert cfg.edge_margin == 0.05 and list(args[7]) == [0.1] and cfg.body_fit is True
+    assert rpc(node, 'planner.area.set', {'area_id': 'a', 'settings': {'body_fit': False}}, 'r9')[1] == (
+        -32602, 'not settings an area can have: body_fit')
+    assert rpc(node, 'planner.area.set', {'area_id': 'a', 'settings': {'robot_front': 0.3}}, 'r6')[1] == (
+        -32602, 'not settings an area can have: robot_front')
+    assert rpc(node, 'planner.area.set', {'area_id': 'a', 'settings': {'obstacle_margin': 0.0}}, 'r7')[1][0] == -32602
+    assert rpc(node, 'planner.area.set', {'area_id': 'b', 'margin': 0.05}, 'r8')[1] == (
+        -32602, 'obstacle_margin 0.1 m at least here, got 0.05')
+    node.body = dict(BODY, mower_width=-1.0)
+    with pytest.raises(PlanningError):
+        node.core.given_again()
+    assert node.core.current.mower_width == 0.25
+
+
+@fake_only
 def test_events_and_progress(make):
     """The events on ~/events turn the lanes (angle_increment); a planning's progress goes out on ~/publish."""
     node = make()

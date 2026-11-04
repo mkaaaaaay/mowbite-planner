@@ -299,6 +299,7 @@ class Node:
         self._callbacks = []
         self.publishers = {}
         self.services = {}
+        self.service_groups = {}  # service name: its callback group (None: the node's)
         self._logger = _Logger()
         self.subscribed = {}  # topic: (type, callback, qos)
         self.called = {}  # service name: _Client
@@ -364,8 +365,9 @@ class Node:
         self.publishers[topic] = pub
         return pub
 
-    def create_service(self, srv_type, srv_name, callback, **kwargs):
+    def create_service(self, srv_type, srv_name, callback, callback_group=None, **kwargs):
         self.services[srv_name] = (srv_type, callback)
+        self.service_groups[srv_name] = callback_group
 
     def create_subscription(self, msg_type, topic, callback, qos_profile, **kwargs):
         assert isinstance(qos_profile, (int, QoSProfile))
@@ -479,6 +481,13 @@ def install():
         def spin_once(self, timeout_sec=None):
             pass
 
+    class MultiThreadedExecutor(SingleThreadedExecutor):
+        def __init__(self, num_threads=None):
+            self.num_threads = num_threads
+
+    class MutuallyExclusiveCallbackGroup:
+        pass
+
     class SignalHandlerOptions:
         NO, SIGINT, SIGTERM, ALL = range(4)
 
@@ -487,7 +496,9 @@ def install():
     rclpy.node = module('rclpy.node', Node=Node)
     rclpy.parameter = module('rclpy.parameter', Parameter=Parameter)
     rclpy.executors = module('rclpy.executors', ExternalShutdownException=ExternalShutdownException,
-                             SingleThreadedExecutor=SingleThreadedExecutor)
+                             SingleThreadedExecutor=SingleThreadedExecutor, MultiThreadedExecutor=MultiThreadedExecutor)
+    rclpy.callback_groups = module('rclpy.callback_groups',
+                                   MutuallyExclusiveCallbackGroup=MutuallyExclusiveCallbackGroup)
     rclpy.signals = module('rclpy.signals', SignalHandlerOptions=SignalHandlerOptions)
     rclpy.exceptions = module('rclpy.exceptions', ParameterUninitializedException=ParameterUninitializedException,
                               InvalidParameterValueException=InvalidParameterValueException,

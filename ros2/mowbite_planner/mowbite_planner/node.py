@@ -33,8 +33,9 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
     preview's edited ones: perimeter_passes, angle, the overrides lane_overlap_passes and perimeter_offset),
     angle_offset_deg on top of the angle (a job's own); not the request's lane spacing (mower_width, overlap: the
     planner's, a warning where it's another). The obstacles, the areas to mow around, the other lawns and the
-    navigation areas from the map, the start and the end from the request or else the dock. An outline of no area
-    (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
+    navigation areas from the map, the start and the end from the request or else the dock (the request's start: with
+    the robot's arrives the first section got to from there, see PlannerCore.kept_plan's from_start). An outline of no
+    area (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
     request give the same plan (kept); armed leftovers (planner.leftovers arm) are the plan of their area until that
     job ends, an area without them gets success with no poses. Planned in the core's worker, before what waits there.
     Without a map as ever.
@@ -49,10 +50,10 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
     (MowbitePlannerNode.cannot: planner.settings says why).
 A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, the settings it can't have, its own RPC
 methods, its transport (rpc_input, answer, rpc_end, map_input, events_input, send_out), its parameters (robot_param),
-writing the map (replace_map), when the map can't be planned (map_unusable), how it gets to a plan's sections
-(arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it can't drive
-(back_out_ignored, by default as drive); main(node_class=it). SIGINT and SIGTERM end it
-with destroy_node first (see main).
+writing the map (replace_map), when the map can't be planned (map_unusable), the settings it gives itself (given_by,
+given) and the floors it holds them to (floors), how it gets to a plan's sections (arrives), drive slope and reverse
+it can't drive (drive_ignored), backing up out of dead ends it can't drive (back_out_ignored, by default as drive);
+main(node_class=it, executor_class=its executor). SIGINT and SIGTERM end it with destroy_node first (see main).
 """
 
 import glob
@@ -386,7 +387,7 @@ class NodeCore(PlannerCore):
 
     def __init__(self, node, *args, **kwargs):
         self.node = node
-        self.cannot = dict(node.cannot)
+        self.cannot, self.given_by, self.floors = dict(node.cannot), dict(node.given_by), dict(node.floors)
         self.clean = None  # (the map plan_map got last, as it gave it)
         PlannerCore.__init__(self, *args, **kwargs)
 
@@ -474,6 +475,9 @@ class NodeCore(PlannerCore):
     def map_unusable(self):
         return self.node.map_unusable()
 
+    def given(self):
+        return self.node.given()
+
     def arrives(self, boundary, obstacles, cfg, drivable, keep_out):
         return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out)
 
@@ -499,6 +503,9 @@ class MowbitePlannerNode(Node):
     cannot = {'planner': 'no slic3r planner here',
               'leftovers_auto': 'this node doesn\'t send the robot out',
               'remote_planning': 'no house computer here'}
+    # the settings the robot gives itself (given) and the floors it holds them to, see PlannerCore
+    given_by = {}
+    floors = {}
     # the planner.* methods answered on a thread of their own (they wait for the worker or another node)
     background = ('planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
     # an RPC method no node here answers gets its error (no other node shares the requests)
@@ -663,6 +670,9 @@ class MowbitePlannerNode(Node):
 
     def map_unusable(self) -> str:
         return ''
+
+    def given(self) -> dict:
+        return {}
 
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
         return None
@@ -839,7 +849,7 @@ class MowbitePlannerNode(Node):
                     end = (float(request.end_point.x), float(request.end_point.y))
                 plan, kept = core.kept_plan(_float32(job.boundary), obstacles, cfg, start, end, job.drivable,
                                             job.keep_out, margins_for(data, obstacles + job.keep_out), job.navigation,
-                                            job.unmowed)
+                                            job.unmowed, from_start=bool(request.use_start_pose))
         except PlanningError as e:
             response.success = False
             response.message = f'{where}: {e}'
@@ -942,15 +952,16 @@ class MowbitePlannerNode(Node):
         return plan, path, message
 
 
-def main(args=None, node_class=MowbitePlannerNode):
-    """The node (node_class: a robot's own) till SIGINT or SIGTERM. They end it here, not rclpy's handlers: those shut
-    the context down first, what destroy_node still sends (rpc_end) would go nowhere and the node end with an error."""
+def main(args=None, node_class=MowbitePlannerNode, executor_class=None):
+    """The node (node_class: a robot's own, on its executor_class, by default a SingleThreadedExecutor) till SIGINT or
+    SIGTERM. They end it here, not rclpy's handlers: those shut the context down first, what destroy_node still sends
+    (rpc_end) would go nowhere and the node end with an error."""
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
     node = node_class()
-    executor = SingleThreadedExecutor()
+    executor = (executor_class or SingleThreadedExecutor)()
     executor.add_node(node)
     try:
         while rclpy.ok() and not stop.is_set():

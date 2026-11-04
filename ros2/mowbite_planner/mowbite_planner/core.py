@@ -18,10 +18,15 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
   arrives       arrives(boundary, obstacles, cfg, drivable, keep_out): for a plan of those, whether the robot gets to
                 a pose facing its heading from where it is (plan_coverage's arrives(pose, came_from), starts.py),
                 None: it drives what it's given;
-                arrives.key (JSON, else True) is part of the plans' keys
+                arrives.key (JSON, else True) is part of the plans' keys; kept_plan's from_start: arrives.start (x, y,
+                yaw) the robot gets to the first section from (starts.py)
   storage       the files it keeps: settings_file (next to it the angle steps, timing and the maps before), plans_dir,
                 history_dir (the robot's track, position_history)
-  capabilities  cannot: {setting: why} the robot can't have (shown ignored, not settable, the default counts),
+  capabilities  cannot: {setting: why} the robot can't have (shown ignored, not settable, the default counts; a planner
+                setting: an area's and a request's own neither),
+                given_by: {setting: where from} the robot gives itself, given(): their values (not settable, not
+                stored, theirs count; given_again() once they change), floors: {setting: least} it holds the settings
+                to (less not settable, a stored one less: the least counts; an area's and an obstacle's own too),
                 drive_ignored(): why drive slope and reverse are planned forwards ('' where they aren't),
                 back_out_ignored(): why back_out is off ('' where it isn't: the robot backs up where a plan does;
                 by default drive_ignored's),
@@ -454,8 +459,11 @@ class PlannerCore:
     areas the robot starts it with (the planner's and NODE_SETTINGS), stored over them from settings_file; workers:
     processes of their own that plan (planner.set_workers)."""
 
-    # {setting: why} the robot can't have (see the top), an adapter's own
+    # {setting: why} the robot can't have, {setting: where from} it gives itself, {setting: least} it holds the settings
+    # to (see the top), an adapter's own
     cannot = {}
+    given_by = {}
+    floors = {}
 
     def __init__(self, mower_width, settings, settings_file, plans_dir, history_dir, workers=0):
         # (before anything hands it work)
@@ -567,6 +575,10 @@ class PlannerCore:
     def map_unusable(self):
         return ''
 
+    def given(self):
+        """{setting: value} of given_by as the robot has them now ({}: none yet, the defaults count)."""
+        return {}
+
     def plan_map(self, data):
         return data
 
@@ -624,10 +636,11 @@ class PlannerCore:
         area_id, settings = params.get('area_id'), params.get('settings')
         if settings is not None and not isinstance(settings, dict):
             raise PlanningError('settings must be an object of planner settings')
-        settable = set(PlannerConfig.names()) - set(FIXED)
+        settable = set(PlannerConfig.names()) - set(FIXED) - set(self.given_by) - set(self.cannot)
         unknown = sorted(set(settings or {}) - settable)
         if unknown:
             raise PlanningError('not settings an area can have: %s' % ', '.join(unknown))
+        self.check_floors(settings or {})
         with self.map_lock:
             with self.lock:
                 data, text = self.map, self.map_text
@@ -663,6 +676,8 @@ class PlannerCore:
                         not 0.0 <= margin <= limits.MAX_BLADE_OFFSET:
                     raise PlanningError('margin must be 0 to %g m' % limits.MAX_BLADE_OFFSET)
                 else:
+                    if 'obstacle_margin' in self.floors:
+                        self.check_floors({'obstacle_margin': margin})
                     props['margin'] = margin
             self.backup_map(before)
             self.replace_map(data, text)
@@ -698,12 +713,18 @@ class PlannerCore:
     def setup(self, width, settings, stored):
         """The settings with the stored ones on top, PlanningError if they don't go together. The ones the robot
         can't have (cannot) at their default."""
-        # (settings of before left out, they're fixed now or gone)
+        # (settings of before left out, they're fixed now or gone; the robot's own given ones)
         stored = {n: v for n, v in stored.items() if n not in limits.INTERNAL and n not in limits.RETIRED and
-                  n not in self.cannot}
-        settings = {n: v for n, v in settings.items() if n not in self.cannot}
+                  n not in self.cannot and n not in self.given_by}
+        settings = {n: v for n, v in settings.items() if n not in self.cannot and n not in self.given_by}
         on_top = {n: v for n, v in stored.items() if n != 'mower_width'}
-        settings = dict(settings, **on_top)
+        given = self.given() if self.given_by else {}
+        width = given.get('mower_width', width)
+        settings = dict(settings, **on_top, **{n: v for n, v in given.items() if n != 'mower_width'})
+        for name, least in self.floors.items():  # (a value of before less: the least counts)
+            value = settings.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value < least:
+                settings[name] = least
         planner = settings.pop('planner', PLANNERS[0])
         if planner not in PLANNERS:
             raise PlanningError('planner must be one of %s' % ', '.join(PLANNERS))
@@ -727,6 +748,41 @@ class PlannerCore:
         return Setup(blade.mower_width, base, own_angle,
                      {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()},
                      frozenset(n for n in settings if n in MOWER_LOGIC), planner, leftovers_auto, remote_planning)
+
+    def given_again(self):
+        """The robot's given values changed (given()): the settings with them from now on, the leftovers armed gone
+        (they were the values before), planned ahead again. PlanningError where they don't go with the settings
+        (nothing changed then)."""
+        with self.set_lock:
+            current = self.setup(self.launch_width, self.launch, self.current.stored)
+            self.defaults = self.setup(self.launch_width, self.launch, {})
+            self.current = current
+            self.armed = None
+        self.loginfo('MowBite Planner: %s', ', '.join('%s %s' % (n, json.dumps(v)) for n, v in sorted(
+            self.given().items())))
+        self.plan_ahead_later()
+
+    def bound(self, cfg, margins=()):
+        """(cfg, margins) as the robot holds them: its given values and the planner settings it can't have at their
+        default (an area's or a request's own don't count), its floors (an area's, a request's and an obstacle's own
+        margin no less; obstacle_margin's for the margins)."""
+        if not self.given_by and not self.floors and not set(self.cannot) & set(PlannerConfig.names()):
+            return cfg, margins
+        given = {n: v for n, v in self.current_given().items() if getattr(cfg, n) != v}
+        low = {n: least for n, least in self.floors.items() if getattr(cfg, n) < least}
+        if given or low:  # (as the settings have them: robot_outline None too)
+            cfg = dataclasses.replace(cfg, **given, **low)
+        least = self.floors.get('obstacle_margin')
+        if least is not None and any(m is not None and m < least for m in margins):
+            margins = [m if m is None else max(m, least) for m in margins]
+        return cfg, margins
+
+    def current_given(self):
+        """given_by's values and the planner settings of cannot as the settings have them now (canon'd as a plan's
+        settings)."""
+        current = self.current
+        names = list(self.given_by) + [n for n in self.cannot if n in PlannerConfig.names() and n not in self.given_by]
+        return {n: current.mower_width if n == 'mower_width' else getattr(current.base, n) for n in names}
 
     def read_stored(self):
         if not self.file or not os.path.exists(self.file):
@@ -821,6 +877,10 @@ class PlannerCore:
             out['remote_planning']['ignored'] = why
         for name, why_not in self.cannot.items():
             out[name].update(settable=False, ignored=why_not)
+        for name, where in self.given_by.items():
+            out[name].update({'settable': False, 'from': where})
+        for name, least in self.floors.items():
+            out[name]['min'] = least
         # angle_increment: the steps turned so far and the finished mows towards the next one (and all of them)
         steps, mows = self.angle['steps'], self.angle['mows']
         return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
@@ -936,10 +996,11 @@ class PlannerCore:
             self.plan_ahead_later()
 
     def rpc_settings_set(self, params):
-        fixed = dict(FIXED, **self.cannot)
+        fixed = dict(FIXED, **self.cannot, **{n: 'from %s' % where for n, where in self.given_by.items()})
         fixed = {n: fixed[n] for n in sorted(set(params) & set(fixed))}
         if fixed:
             raise PlanningError('not settable here: %s' % ', '.join('%s (%s)' % (n, why) for n, why in fixed.items()))
+        self.check_floors(params)
         # (settings of before an app may still send: left out)
         params = {n: v for n, v in params.items() if n not in limits.INTERNAL and n not in limits.RETIRED}
         unknown = sorted(set(params) - set(PlannerConfig.names()) - set(NODE_SETTINGS))
@@ -959,6 +1020,14 @@ class PlannerCore:
         self.loginfo('MowBite Planner: settings %s', json.dumps(current.stored, sort_keys=True))
         self.plan_ahead_later()
         return self.rpc_settings()
+
+    def check_floors(self, settings):
+        """PlanningError where one of settings is less than the robot's floor for it."""
+        low = ['%s %s m at least here, got %s' % (n, self.floors[n], settings[n]) for n in sorted(settings)
+               if n in self.floors and isinstance(settings[n], (int, float)) and not isinstance(settings[n], bool) and
+               settings[n] < self.floors[n]]
+        if low:
+            raise PlanningError('; '.join(low))
 
     def rpc_plan_asked(self, params):
         """planner.plan: rpc_plan in the worker, ahead and slot as the module's docstring says."""
@@ -1388,19 +1457,23 @@ class PlannerCore:
         """plan, with why last among its warnings where there's one."""
         return dataclasses.replace(plan, warnings=list(plan.warnings) + [why]) if why else plan
 
-    def left_plan(self, boundary, obstacles, cfg, start, end, drivable, keep_out, *args, **kw):
-        """plan_coverage of what a mow left (not kept), drive and arrives as kept_plan takes them."""
+    def left_plan(self, boundary, obstacles, cfg, start, end, drivable, keep_out, margins=(), *args, **kw):
+        """plan_coverage of what a mow left (not kept), the robot's bounds, drive and arrives as kept_plan takes
+        them."""
+        cfg, margins = self.bound(cfg, margins)
         cfg, why = self.driven(cfg)
         arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out)
-        return self.told(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, *args, arrives=arrives,
-                                       **kw), why)
+        return self.told(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, *args,
+                                       arrives=arrives, **kw), why)
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-                  reach_over=(), unmowed=()):
+                  reach_over=(), unmowed=(), from_start=False):
         """(plan, whether it was kept from before), see plan_coverage; with remote_planning planned on the house
-        computer where it can (remote_plan). drive slope or reverse forwards where it's ignored (driven), said in its
-        warnings. With the adapter's arrives every section starts where the robot gets to it (its key another).
-        self.local: kept, the plan's key and where it was planned (on: mower or house)."""
+        computer where it can (remote_plan). The robot's bounds (bound). drive slope or reverse forwards where it's
+        ignored (driven), said in its warnings. With the adapter's arrives every section starts where the robot gets to
+        it (its key another), from_start: the first from start (x, y, yaw; arrives.start). self.local: kept, the plan's
+        key and where it was planned (on: mower or house)."""
+        cfg, margins = self.bound(cfg, margins)
         cfg, why = self.driven(cfg)
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
@@ -1413,8 +1486,12 @@ class PlannerCore:
         reach_over, unmowed = canon(reach_over), canon(unmowed)
         arrives = self.arrives(args[0], args[1], cfg, args[5], args[6])
         form = request_json(args, reach_over, unmowed)
-        key = self.local.key = plan_key(self.code, form if arrives is None else
-                                        dict(form, arrives=getattr(arrives, 'key', True)))
+        if arrives is not None:
+            form = dict(form, arrives=getattr(arrives, 'key', True))
+            if from_start and args[3] is not None and len(args[3]) >= 3:
+                arrives.start = args[3]
+                form['from_start'] = True
+        key = self.local.key = plan_key(self.code, form)
         with self.plans_lock:
             got = self.plans.get(key)
             if got is not None:

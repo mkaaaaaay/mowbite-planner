@@ -17,7 +17,8 @@ from mowbite_planner.export import fingerprint, plan_pieces  # noqa: E402
 from mowbite_planner.mathutil import Pose2D  # noqa: E402
 from mowbite_planner.remote import refused  # noqa: E402
 from mowbite_planner.report import rules  # noqa: E402
-from mowbite_planner.starts import ARRIVE_ASKS, BACK_OUT_MAX, backed_out, reached_starts  # noqa: E402
+from mowbite_planner.starts import (ARRIVE_ASKS, BACK_OUT_MAX, START_UNREACHABLE, _Spent, backed_out,  # noqa: E402
+                                    reached_starts)
 
 # a hedge across the lawn: two sections, the path jumps from one to the other
 LAWN = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
@@ -73,6 +74,50 @@ def test_where_the_robot_comes_from():
     third = {(q.x, q.y, q.yaw) for q in sections(p)[2]}
     froms = [came for pose, came in asked if (pose.x, pose.y, pose.yaw) in third]
     assert froms and all(came is p.poses[ends(p)[0]] for came in froms)
+
+
+def test_the_first_section_from_the_start():
+    # arrives.start (MowBite OS: where it undocks to): the first section got to from there, a section left out leaves
+    # the robot there; none got to from there: refused with START_UNREACHABLE first
+    test_where_the_robot_comes_from()
+    p = _plans['three']
+    first = {(q.x, q.y, q.yaw) for q in sections(p)[0]}
+
+    def asking(gets):
+        asked = []
+
+        def arrives(pose, came):
+            asked.append((pose, came))
+            return gets(pose, came)
+        arrives.start = (12.5, 3.0, math.pi)
+        return arrives, asked
+
+    arrives, asked = asking(lambda pose, came: True)
+    reached_starts(p, arrives)
+    assert (asked[0][1].x, asked[0][1].y, asked[0][1].yaw) == (12.5, 3.0, math.pi)
+    arrives, asked = asking(lambda pose, came: came.x != 12.5 or (pose.x, pose.y, pose.yaw) not in first)
+    got = reached_starts(p, arrives)
+    assert len(got.section_starts) == 2 and len(got.stats['starts']['dropped']) == 1
+    second = {(q.x, q.y, q.yaw) for q in sections(p)[1]}
+    assert any(came.x == 12.5 for pose, came in asked if (pose.x, pose.y, pose.yaw) in second)
+    arrives, _ = asking(lambda pose, came: came.x != 12.5)
+    with pytest.raises(PlanningError) as e:
+        reached_starts(p, arrives)
+    assert str(e.value).startswith(START_UNREACHABLE + 'no way from the start (12.50, 3.00) gets to any section')
+    # (the asks running out before one is: the same)
+    arrives, asked = asking(lambda pose, came: came.x != 12.5)
+
+    def spent(pose, came):
+        if len(asked) >= 14:
+            raise _Spent()
+        return arrives(pose, came)
+    spent.start = arrives.start
+    with pytest.raises(PlanningError) as e:
+        reached_starts(p, spent)
+    assert str(e.value).startswith(START_UNREACHABLE) and str(e.value).endswith('ran out before the last ones)')
+    # without a start as ever
+    with pytest.raises(PlanningError, match='^no way gets to any section'):
+        reached_starts(p, lambda pose, came: False)
 
 
 def test_a_section_starts_later_where_it_gets_to():

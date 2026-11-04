@@ -1,8 +1,10 @@
 """Where a robot that drives to the plan's sections itself gets to them, and away from them again (MowBite OS: the OS
 side passes arrives, its ~/plan_transit in it). A section starts at its first pose arrives says it gets to facing its
-heading from where the robot is then (came_from: where the section before it that's kept ends; None for the first, the
-robot can be anywhere then): the poses before it left out; where it gets to none of those tried, or the asks are spent,
-the section is left out (no start it can't get to, the OS takes the plan as it is).
+heading from where the robot is then (came_from: where the section before it that's kept ends; for the first
+arrives.start where it has one, the robot starts from there, else None, it can be anywhere then): the poses before it
+left out; where it gets to none of those tried, or the asks are spent, the section is left out (no start it can't get
+to, the OS takes the plan as it is). Where no section is got to from arrives.start the plan is refused with
+START_UNREACHABLE first (MowBite OS: the robot stays at the dock), also where the asks ran out before one was.
 
 Where a section ends the robot has to get away again driving forwards: it does where its body turns on the spot there
 whatever way, where the next section is got to from there, or the closest place where it turns whatever way is (any
@@ -37,6 +39,9 @@ from .sweep import body_out, plan_footprint, recorded_footprint, swept_area
 ARRIVE_STEP = 0.3
 ARRIVE_TRIES = 12
 ARRIVE_ASKS = 400
+# how a PlanningError begins where no section is got to from arrives.start (none asked about past the asks counted
+# either), as mowbite_logic tells it from the others
+START_UNREACHABLE = 'start unreachable: '
 # m of path a section backs up out of a dead end at most (back_out; further: it ends earlier)
 BACK_OUT_MAX = 30.0
 
@@ -65,7 +70,8 @@ def reached_starts(plan: CoveragePlan, arrives: Arrives, back_out: bool = False)
     left out]] where a section ends earlier (its last pose as planned), 'trapped': [[x, y]] of the sections left out
     where no pose gets away (their last pose), 'unmowed_m2': what that leaves unmowed more, 'asks'}; back_out:
     stats['back_out'] {'places': [[x, y, m backing up]] (the last pose), 'stuck': [], 'corners'}. The warnings say
-    where. Raises PlanningError where no section is left."""
+    where. Raises PlanningError where no section is left (START_UNREACHABLE first where none is got to from
+    arrives.start)."""
     walk = _Walk(plan, arrives, back_out)
     walk.run()
     return walk.result()
@@ -85,6 +91,8 @@ class _Walk:
         self.got: Dict[str, list] = {k: [] for k in ('places', 'dropped', 'untried', 'ends', 'trapped', 'backed')}
         self._fp: Any = False
         self._room: Any = False
+        start = getattr(arrives, 'start', None)
+        self.start = Pose2D(float(start[0]), float(start[1]), float(start[2])) if start is not None else None
 
     def gets_to(self, p: Pose2D, c: Optional[Pose2D]) -> bool:
         key = _key(p) + (() if c is None else _key(c))
@@ -96,7 +104,7 @@ class _Walk:
         return self.known[key]
 
     def came(self) -> Optional[Pose2D]:
-        return self.poses[self.kept[-1].at] if self.kept else None
+        return self.poses[self.kept[-1].at] if self.kept else self.start
 
     def own(self, a: int) -> int:
         """Where a cut from a section's first pose a starts: past the last pose of the section kept before it where
@@ -270,6 +278,11 @@ class _Walk:
         if not self.cut and not self.backs:
             return dataclasses.replace(plan, stats=stats)
         out = _rebuilt(dataclasses.replace(plan, stats=stats), self.cut, self.backs)
+        if not out.poses and self.start is not None and not got['trapped']:
+            raise PlanningError(f'{START_UNREACHABLE}no way from the start ({self.start.x:.2f}, {self.start.y:.2f}) '
+                                'gets to any section of the plan facing its heading: at ' +
+                                ', '.join(f'({x:.2f}, {y:.2f})' for x, y in got['dropped'] + got['untried']) +
+                                (' (the ways asked about ran out before the last ones)' if got['untried'] else ''))
         if not out.poses:
             raise PlanningError('no way gets to any section of the plan facing its heading' +
                                 (' and away from it again driving forwards' if got['trapped'] else '') + ': at ' +
