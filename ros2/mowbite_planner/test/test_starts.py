@@ -221,6 +221,11 @@ def test_back_out_backs_up_to_where_it_gets_away():
     far = corridor(((1.0, 4.0 + BACK_OUT_MAX + 1.0),), back_out=True, extra=[(3.9, 1.6, 45.0, 2.4)])
     got = reached_starts(far, out_of_square, back_out=True)
     assert not any(s.reverse for s in got.segments) and len(got.stats['starts']['ends']) == 1
+    # (a section after it that's left out: away again from where it backed up to, once)
+    two = corridor(((1.0, 8.5), (4.5, 8.0)), back_out=True)
+    got = reached_starts(two, lambda pose, came: came is None or came.x < 3.5, back_out=True)
+    assert len(got.stats['back_out']['places']) == 1 and got.stats['starts']['trapped'] == [[8.0, 2.0]]
+    assert got.poses[-1].x < 3.9 and len(got.section_starts) == 1
 
 
 def test_backed_out_where_the_turn_on_the_spot_doesnt_fit():

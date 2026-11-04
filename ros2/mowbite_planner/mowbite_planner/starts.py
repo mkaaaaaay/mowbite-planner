@@ -98,7 +98,7 @@ class _Walk:
             if self.section(n):
                 n += 1
         while self.kept and not self.kept[-1].out:  # (where the plan ends: home from there)
-            if self.away(self.kept[-1].last):
+            if self.gets_away(self.kept[-1]):
                 self.kept[-1].out = True
             else:
                 self.dead_end()
@@ -120,7 +120,7 @@ class _Walk:
             self.keep(n, got)
             return True
         if self.kept and not self.kept[-1].out:
-            if not self.away(self.kept[-1].last):
+            if not self.gets_away(self.kept[-1]):
                 self.dead_end()
                 return False
             self.kept[-1].out = True
@@ -146,14 +146,22 @@ class _Walk:
             self._fp = plan_footprint(self.plan)
         return self._fp
 
+    def gets_away(self, sec: _Kept) -> bool:
+        """Whether the robot gets away from where it is after sec (where it ends, or where it backed up to)."""
+        return self.away(sec.at, sec.at != sec.last)
+
     def away(self, i: int, backwards: bool = False, asks: Optional[int] = None) -> bool:
         """Whether the robot gets away from pose i driving forwards: its body turning there whatever way (having backed
-        up to it: backwards), or home (asks: no more asked of arrives than that many in all, else no)."""
+        up to it: backwards), or home (asks: no more asked of arrives than that many in all, else no; what it said
+        already counts)."""
         fp, p = self.footprint(), self.poses[i]
         if fp is not None and fp.fits_turn(p.x, p.y, p.yaw, p.yaw + math.pi, backwards):
             return True
-        if self.home is None or asks is not None and self.asks >= asks:
+        if self.home is None:
             return False
+        known = self.known.get(_key(self.home) + _key(p))
+        if known is not None or asks is not None and self.asks >= asks:
+            return bool(known)
         try:
             return self.gets_to(self.home, p)
         except _Spent:
