@@ -955,7 +955,10 @@ class PlannerCore:
 
     def rpc_plan(self, params, keep=None, mowed=None):
         """keep: a list the plan itself goes to too. mowed: where the blade went already, only what that left is planned
-        (not kept: it's that one mow's)."""
+        (not kept: it's that one mow's). PlanningError where the map can't be planned now (map_unusable)."""
+        reason = self.map_unusable()
+        if reason:
+            raise PlanningError(reason)
         current = self.current
         with self.lock:
             data = self.map
@@ -1302,6 +1305,10 @@ class PlannerCore:
         with self.ahead_run:
             if self.current.planner == 'slic3r':
                 return
+            reason = self.map_unusable()
+            if reason:  # (planned ahead once it can be)
+                self.loginfo('MowBite Planner: not planned ahead: %s', reason)
+                return
             with self.lock:
                 data = self.map
             areas = []
@@ -1504,6 +1511,27 @@ class PlannerCore:
         except Exception as e:  # noqa: BLE001 - a broken or old file is planned again
             self.logwarn('MowBite Planner: kept plan %s not readable: %s', key, e)
             return None
+
+    def armed_plan(self, job):
+        """planner.leftovers armed for the area of job (mapfile.AreaJob, None: an outline of no area): (True, its
+        leftovers' plan, None where it left nothing), that job of them from now on (until LEFTOVERS_JOB s at most, or
+        it's finished: the same again while that job runs, it asks again when it goes on after a break); (False,
+        None) where they aren't."""
+        armed = self.armed
+        if armed is not None and time.time() > armed['until']:
+            armed = self.armed = None
+        if armed is None or job is None or job.area_id not in armed['plans']:
+            return False, None
+        if not armed['served']:
+            armed['served'], armed['until'] = True, time.time() + LEFTOVERS_JOB
+        return True, armed['plans'][job.area_id]
+
+    def serve(self, area_id, plan):
+        """plan went to the robot for area_id (None: an outline of no area): the next finished job's (time_after)."""
+        try:
+            self.served.append((time.time(), area_id, self.estimate(plan)))
+        except Exception as e:  # noqa: BLE001 - the estimate must not keep the plan from the robot
+            self.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e, exc_info=True)
 
     def write_plan(self, key, got):
         """(plan, where it was planned) kept in plans_dir, the last DISK_PLANS and the job's (pin)."""

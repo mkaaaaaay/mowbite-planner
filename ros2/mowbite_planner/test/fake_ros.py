@@ -2,8 +2,9 @@
 
 The messages check their fields as strictly as Humble's generated classes do (an int in a float64 field
 is an error), and the planner's own interfaces are built from the .msg/.srv files of
-mowbite_planner_interfaces, so the test also catches a node that doesn't match them.
-install() only puts these into sys.modules; with a sourced ROS 2 workspace the real ones are used.
+mowbite_planner_interfaces, so the test also catches a node that doesn't match them. The node's subscriptions,
+clients and timers are kept for a test to call. install() only puts these into sys.modules; with a sourced ROS 2
+workspace the real ones are used.
 """
 
 import enum
@@ -240,14 +241,68 @@ class _Clock:
         return _Now()
 
 
+class _Future:
+    def __init__(self):
+        self._done, self._result, self._callbacks = False, None, []
+
+    def set_result(self, result):
+        self._done, self._result = True, result
+        for cb in self._callbacks:
+            cb(self)
+
+    def done(self):
+        return self._done
+
+    def result(self):
+        return self._result
+
+    def add_done_callback(self, callback):
+        if self._done:
+            callback(self)
+        else:
+            self._callbacks.append(callback)
+
+
+class _Client:
+    """A service client whose server is handler(request) -> response (None: no server)."""
+
+    def __init__(self, srv_type, name):
+        self.srv_type, self.name = srv_type, name
+        self.handler = None
+        self.requests = []
+
+    def wait_for_service(self, timeout_sec=None):
+        return self.handler is not None
+
+    def call_async(self, request):
+        assert isinstance(request, self.srv_type.Request)
+        self.requests.append(request)
+        future = _Future()
+        if self.handler is not None:
+            future.set_result(self.handler(request))
+        return future
+
+
+class _Timer:
+    def __init__(self, period, callback):
+        self.period, self.callback = period, callback
+
+    def cancel(self):
+        pass
+
+
 class Node:
     def __init__(self, node_name, **kwargs):
         self.name = node_name
         self._params = {}
+        self._overrides = {p.name: p for p in kwargs.get('parameter_overrides') or []}
         self._callbacks = []
         self.publishers = {}
         self.services = {}
         self._logger = _Logger()
+        self.subscribed = {}  # topic: (type, callback, qos)
+        self.called = {}  # service name: _Client
+        self.timed = []
 
     def add_on_set_parameters_callback(self, callback):
         self._callbacks.insert(0, callback)
@@ -266,6 +321,8 @@ class Node:
         return None
 
     def declare_parameter(self, name, value=None, descriptor=None):
+        if name in self._overrides:  # (like a launch file's)
+            value = self._overrides[name].value
         if isinstance(value, ParameterType):
             param = Parameter(name, value, None)
         else:
@@ -310,6 +367,20 @@ class Node:
     def create_service(self, srv_type, srv_name, callback, **kwargs):
         self.services[srv_name] = (srv_type, callback)
 
+    def create_subscription(self, msg_type, topic, callback, qos_profile, **kwargs):
+        assert isinstance(qos_profile, (int, QoSProfile))
+        self.subscribed[topic] = (msg_type, callback, qos_profile)
+        return object()
+
+    def create_client(self, srv_type, srv_name, **kwargs):
+        client = self.called[srv_name] = _Client(srv_type, srv_name)
+        return client
+
+    def create_timer(self, period, callback, **kwargs):
+        timer = _Timer(period, callback)
+        self.timed.append(timer)
+        return timer
+
     def get_logger(self):
         return self._logger
 
@@ -345,6 +416,7 @@ def install():
         return m
 
     time_cls = _message('builtin_interfaces/Time', {'sec': ('int32', None), 'nanosec': ('uint32', None)})
+    string = _message('std_msgs/String', {'data': ('string', None)})
     header = _message('std_msgs/Header', {'stamp': ('builtin_interfaces/Time', None), 'frame_id': ('string', None)})
     point = _message('geometry_msgs/Point', {k: ('float64', None) for k in 'xyz'})
     point32 = _message('geometry_msgs/Point32', {k: ('float32', None) for k in 'xyz'})
@@ -381,7 +453,7 @@ def install():
     module('builtin_interfaces')
     module('builtin_interfaces.msg', Time=time_cls)
     module('std_msgs')
-    module('std_msgs.msg', Header=header)
+    module('std_msgs.msg', Header=header, String=string)
     module('geometry_msgs')
     module('geometry_msgs.msg', Point=point, Point32=point32, Quaternion=quat, Pose=pose, PoseStamped=pose_stamped,
            Polygon=polygon)
@@ -400,11 +472,23 @@ def install():
     class ExternalShutdownException(Exception):
         pass
 
-    rclpy = module('rclpy', init=lambda args=None: None, spin=lambda node: None, try_shutdown=lambda: None,
-                   ok=lambda: True)
+    class SingleThreadedExecutor:
+        def add_node(self, node):
+            pass
+
+        def spin_once(self, timeout_sec=None):
+            pass
+
+    class SignalHandlerOptions:
+        NO, SIGINT, SIGTERM, ALL = range(4)
+
+    rclpy = module('rclpy', init=lambda args=None, signal_handler_options=None: None, spin=lambda node: None,
+                   try_shutdown=lambda: None, ok=lambda: True)
     rclpy.node = module('rclpy.node', Node=Node)
     rclpy.parameter = module('rclpy.parameter', Parameter=Parameter)
-    rclpy.executors = module('rclpy.executors', ExternalShutdownException=ExternalShutdownException)
+    rclpy.executors = module('rclpy.executors', ExternalShutdownException=ExternalShutdownException,
+                             SingleThreadedExecutor=SingleThreadedExecutor)
+    rclpy.signals = module('rclpy.signals', SignalHandlerOptions=SignalHandlerOptions)
     rclpy.exceptions = module('rclpy.exceptions', ParameterUninitializedException=ParameterUninitializedException,
                               InvalidParameterValueException=InvalidParameterValueException,
                               InvalidParameterTypeException=InvalidParameterTypeException)

@@ -15,30 +15,83 @@ Topic
 Planning is plain Python in the service callback. On the default single threaded executor requests are
 handled one after another. Most of the time goes into the messages, about 20 us a pose: a garden of
 300 square metres (18000 poses) takes about half a second on a PC, a CM4 needs four to six times as long.
+
+With the parameters rpc or use_map the node is also mowbite_planner.core's PlannerCore (NodeCore here, the ROS 1 node's
+logic: the planner.* settings and RPC methods, the plans kept and planned ahead, what follows a mow):
+  - rpc: the planner.* methods (planner.settings, .settings.set, .angle.reset, .log, .area.set, .plan, .leftovers,
+    .drive; what each answers: see the ROS 1 node's top) as JSON {method, params, id} on ~/rpc/request, the answer
+    {id, result} or {id, error: {code, message}} on ~/rpc/response (JSON-RPC's codes). planner.area.set, .plan,
+    .leftovers and .drive on a thread of their own each, the others one after another on one.
+  - the map: ~/map (std_msgs/String, transient local), OpenMower's JSON. Every value a plan goes by has one place: for
+    all areas the planner.* settings (the node's parameters their defaults), the lane spacing, the loops and the angle
+    too (no mower_logic here); for an area its properties in the map, OpenMower's where OpenMower has one (angle,
+    outline_count, outline_overlap_count, outline_offset) and MowBite's angle_min, angle_max, the others in its
+    planner property. planner.area.set writes each to its one place (an area's "the planner works it out" into its
+    planner property, OpenMower's away); both there all the same: OpenMower's counts (NodeCore.plan_map).
+  - use_map: ~/plan_coverage of an area of the map (its outline as boundary, to 1 mm) is planned like planner.plan
+    plans it: the planner.* settings, the area's own over them, of an area's what the request sets over those (a
+    preview's edited ones: perimeter_passes, angle, the overrides lane_overlap_passes and perimeter_offset),
+    angle_offset_deg on top of the angle (a job's own); not the request's lane spacing (mower_width, overlap: the
+    planner's, a warning where it's another). The obstacles, the areas to mow around, the other lawns and the
+    navigation areas from the map, the start and the end from the request or else the dock. An outline of no area
+    (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
+    request give the same plan (kept); armed leftovers (planner.leftovers arm) are the plan of their area until that
+    job ends, an area without them gets success with no poses. Planned in the core's worker, before what waits there.
+    Without a map as ever.
+  - the events of the robot's logic on ~/events (STATE, JOB_COMPLETE, JOB_RESET as OpenMower's events/json):
+    angle_increment, perimeter_direction random, the finished mow's planner.drive and timing.
+  - the planning's progress (mowbite/planner/progress, see the ROS 1 node's top) as JSON {topic, payload, retain} on
+    ~/publish.
+  - data_dir: data_dir/planner keeps the settings, plans, angle steps, timing and the maps before (plans and maps
+    before older than keep_days or past keep_mb go), data_dir/position_history is the track planner.drive and
+    planner.leftovers read. Empty: nothing kept.
+  - not here: the slic3r planner, leftovers_auto (the node doesn't send the robot out), the house computer
+    (MowbitePlannerNode.cannot: planner.settings says why).
+A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, the settings it can't have, its own RPC
+methods, its transport (rpc_input, answer, rpc_end, map_input, events_input, send_out), its parameters (robot_param),
+writing the map (replace_map), when the map can't be planned (map_unusable), how it gets to a plan's sections
+(arrives), drive slope and reverse it can't drive (drive_ignored); main(node_class=it). SIGINT and SIGTERM end it
+with destroy_node first (see main).
 """
 
+import glob
+import hashlib
+import json
+import logging
 import math
+import os
+import queue
 import re
+import signal
+import sys
+import threading
+import time
 from typing import List, Optional, Sequence, Tuple
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
 from rcl_interfaces.msg import FloatingPointRange, IntegerRange, ParameterDescriptor, SetParametersResult
-from rclpy.executors import ExternalShutdownException
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Header
+from rclpy.signals import SignalHandlerOptions
+from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 
 from mowbite_planner_interfaces.srv import PlanCoverage
 
-from .export import fingerprint
+from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER_LOGIC, OPENMOWER_PROPS, REQUEST,
+                   PlannerCore)
+from .core import call as core_call
+from .export import ANSWER_TOO_BIG, fingerprint, too_big
+from .mapfile import AreaJob, _number, area_job, margins_for, match_area
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
                      NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
                      TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
+from .mqtt_service import _float32
 from .planner import plan_coverage
 
 XY = Tuple[float, float]
@@ -169,6 +222,18 @@ PARAMETERS = {
     'transit_edge_cost': (2.0, 'every metre of a transit closer to the edge than transit_edge_distance counts this '
                           'much more', lambda v: v >= 0.0, 'must be >= 0'),
     'publish_path': (True, 'publish every plan on ~/coverage_path', None, ''),
+    'rpc': (False, "the planner.* RPC methods of mowbite_planner.core (see the node's top)", None, ''),
+    'use_map': (False, '~/plan_coverage of an area of the map planned like planner.plan plans it, with the '
+                'planner.* settings (see the node\'s top)', None, ''),
+    'data_dir': ('', 'with rpc or use_map: data_dir/planner keeps the planner.* settings, plans, angle steps, timing '
+                 'and the maps before, data_dir/position_history is the track of the mows. Empty: nothing kept, no '
+                 'track', None, ''),
+    'keep_days': (60, 'plans kept and maps before older than this many days go [d]', lambda v: v >= 1,
+                  'must be >= 1'),
+    'keep_mb': (50.0, 'data_dir/planner takes this much at most, the oldest plans kept and maps before go first [MB]',
+                lambda v: v > 0.0, 'must be > 0'),
+    'workers': (0, 'with rpc or use_map: processes of their own that plan (the areas planned ahead at once too), 0: '
+                'all in this one', lambda v: v >= 0, 'must be >= 0'),
 }
 RANGES = {
     'mower_width': (0.01, 5.0),
@@ -189,6 +254,16 @@ RANGES = {
 }
 # m, float32 has steps of 1 mm or less up to here
 FLOAT32_RANGE = 8192.0
+# s between two looks at data_dir/planner's size (keep_days, keep_mb), s between two looks whether SIGINT or SIGTERM
+# came (see main)
+PRUNE_EVERY = 3600.0
+STOP_POLL = 0.5
+# what the node's parameters don't give the planner.* settings (the blade is PlannerCore's own, the rest no settings)
+NOT_LAUNCH = ('mower_width', 'angle_steps', 'finished_mows')
+# the overrides of a ~/plan_coverage request that count for an area of the map or an outline (see the top); m, the
+# request's lane spacing off the planner's by more: a warning (it's left out)
+AREA_OVERRIDES = ('lane_overlap_passes', 'perimeter_offset', 'angle_offset_deg')
+SPACING_OFF = 0.001
 
 
 def invalid(name: str, value) -> Optional[str]:
@@ -253,6 +328,17 @@ def with_warnings(message: str, warnings: Sequence[str]) -> str:
     return message + '. Warnings: ' + '; '.join(warnings) if warnings else message
 
 
+def summary(plan: CoveragePlan) -> str:
+    """What a plan is like, in a line."""
+    st = plan.stats
+    turns = ', '.join(f"{int(st['turns_' + k])} {k.replace('_', '-')}"
+                      for k in ('u_turn', 'bulb', 'detour', 'pivot', 'fallback') if st['turns_' + k])
+    return (f"{len(plan.poses)} poses, {st['path_length']:.1f} m ({st['lane_length']:.1f} m lanes, "
+            f"{st['perimeter_length']:.1f} m perimeter, {st['turn_length']:.1f} m turns, "
+            f"{st['transit_length']:.1f} m transit), {int(st['lanes'])} lanes at "
+            f"{math.degrees(plan.angle):.1f} deg, turns: {turns or 'none'}, {1000 * st['planning_time']:.0f} ms")
+
+
 def float32_warnings(rings: Sequence[Sequence[XY]]) -> List[str]:
     """A warning if points of geometry_msgs/Polygon (float32) lie so far out that they lose millimetres."""
     far = max((abs(c) for ring in rings for p in ring for c in p), default=0.0)
@@ -263,12 +349,163 @@ def float32_warnings(rings: Sequence[Sequence[XY]]) -> List[str]:
             f'{1000 * step:.0f} mm resolution there; use a local map frame']
 
 
+def launch_settings(cfg: PlannerConfig) -> dict:
+    """The planner.* settings the node's parameters (as cfg) stand for: the ones that aren't PlannerCore's defaults
+    (the planner's with lane_order skip)."""
+    default = PlannerConfig(lane_order='skip')
+
+    def plain(v):
+        return [plain(x) for x in v] if isinstance(v, (list, tuple)) else v
+
+    return {n: plain(getattr(cfg, n)) for n in PlannerConfig.names()
+            if n not in NOT_LAUNCH and getattr(cfg, n) != getattr(default, n)}
+
+
+def prune(folder: str, days: float, mb: float, now: Optional[float] = None) -> List[str]:
+    """data_dir/planner within bounds: the plans kept and the maps before older than days go, then the oldest of them
+    while folder takes more than mb MB (the settings, angle steps and timing stay, they're small). The ones gone."""
+    now = time.time() if now is None else now
+    total = sum(os.path.getsize(os.path.join(root, f)) for root, _, files in os.walk(folder) for f in files)
+    old = glob.glob(os.path.join(folder, 'plans', '*.pkl')) + \
+        glob.glob(os.path.join(folder, 'mowbite_map_backups', 'map_*.json'))
+    gone = []
+    for path in sorted(old, key=os.path.getmtime):
+        if now - os.path.getmtime(path) > days * 86400.0 or total > mb * 1e6:
+            size = os.path.getsize(path)
+            os.remove(path)
+            total -= size
+            gone.append(path)
+    return gone
+
+
+class NodeCore(PlannerCore):
+    """PlannerCore in the ROS 2 node (see the top), what only the node can do from node. Without mower_logic: the lane
+    spacing, the loops and the angle are the planner.* settings' and the area's (its properties in the map), each in
+    one place (area_setting, plan_map)."""
+
+    def __init__(self, node, *args, **kwargs):
+        self.node = node
+        self.cannot = dict(node.cannot)
+        self.clean = None  # (the map plan_map got last, as it gave it)
+        PlannerCore.__init__(self, *args, **kwargs)
+
+    def setup(self, width, settings, stored):
+        # (none of the lane spacing, the loops, the angle come from mower_logic: they're the planner's own here, an
+        # area's own over them)
+        return PlannerCore.setup(self, width, settings, stored)._replace(own=frozenset(MOWER_LOGIC), own_angle=True)
+
+    def area_setting(self, props, own, name, value):
+        """An area's setting into its one place: OpenMower's property where it has one (and "the planner works it out"
+        in place of it into the planner property), else the planner property."""
+        key = OPENMOWER_PROPS.get(name)
+        auto = name == 'angle_strategy' and value is not None or \
+            name == 'perimeter_passes' and value == AUTO_VALUES['perimeter_passes'] and not isinstance(value, bool)
+        if key is None or auto:
+            PlannerCore.area_setting(self, props, own, name, value)
+            if auto:  # (in place of OpenMower's)
+                props.pop(OPENMOWER_PROPS['angle' if name == 'angle_strategy' else name], None)
+                if name == 'angle_strategy':
+                    own.pop('angle', None)
+            return
+        if value is not None:
+            if name in ('angle_min', 'angle_max'):  # (the range as a whole is checked with the area)
+                if _number(value) is None:
+                    raise PlanningError(f'{name} must be a number (rad)')
+            else:
+                self.current.base.with_overrides({'mower_width': self.current.mower_width, name: value}).validate()
+            props[key] = value
+        else:
+            props.pop(key, None)
+        own.pop(name, None)
+        if name == 'angle':  # (a fixed angle in place of the planner's)
+            own.pop('angle_strategy', None)
+
+    def plan_map(self, data):
+        """The map as the plans take it: of an area's two places for a value (OpenMower's property set again after
+        "the planner works it out" went into its planner property) OpenMower's."""
+        clean = self.clean
+        if data is None or clean is not None and clean[0] is data:
+            return None if data is None else clean[1]
+        out = json.loads(json.dumps(data))
+        for area in out.get('areas') or []:
+            props = area.get('properties') if isinstance(area, dict) else None
+            own = props.get('planner') if isinstance(props, dict) else None
+            if not isinstance(own, dict):
+                continue
+            for name, key in OPENMOWER_PROPS.items():
+                v = _number(props.get(key))
+                if v is not None and (v >= 0 or key not in ('outline_count', 'outline_overlap_count')):
+                    own.pop(name, None)
+                    if name == 'angle':
+                        own.pop('angle_strategy', None)
+            if not own:
+                props.pop('planner')
+        self.clean = (data, out)
+        return out
+
+    def log(self, level, msg, *args, **kwargs):
+        """To the node's log and planner.log's."""
+        record = logging.LogRecord('mowbite_planner', level, __file__, 0, msg, args,
+                                   sys.exc_info() if kwargs.get('exc_info') else None)
+        LOG.handle(record)
+        text = LOG.format(record)
+        logger = self.node.get_logger()
+        (logger.error if level >= logging.ERROR else logger.warning if level >= logging.WARNING else logger.info)(text)
+
+    def loginfo(self, *args, **kwargs):
+        self.log(logging.INFO, *args, **kwargs)
+
+    def logwarn(self, *args, **kwargs):
+        self.log(logging.WARNING, *args, **kwargs)
+
+    def logerr(self, *args, **kwargs):
+        self.log(logging.ERROR, *args, **kwargs)
+
+    def publish(self, topic, payload, retain):
+        self.node.send_out(topic, payload, retain)
+
+    def param(self, name, default=None):
+        return self.node.robot_param(name, default)
+
+    def replace_map(self, data, based_on):
+        self.node.replace_map(data, based_on)
+
+    def map_unusable(self):
+        return self.node.map_unusable()
+
+    def arrives(self, boundary, obstacles, cfg, drivable, keep_out):
+        return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out)
+
+    def drive_ignored(self):
+        return self.node.drive_ignored()
+
+    def mower_ready(self):
+        return self.node.mower_ready()
+
+    def start_mowing(self):
+        self.node.start_mowing()
+
+
 class MowbitePlannerNode(Node):
-    def __init__(self, **kwargs):
-        super().__init__('mowbite_planner', **kwargs)
+    """The node, see the top. A robot's own node is a class of it: its parameters' defaults (defaults), the settings
+    it can't have (cannot, see PlannerCore), the RPC methods it adds (more_methods) and what the methods marked
+    'robot' below do on it (its transport, map, events, parameters...)."""
+
+    defaults = {}
+    cannot = {'planner': 'no slic3r planner here',
+              'leftovers_auto': 'this node doesn\'t send the robot out',
+              'remote_planning': 'no house computer here'}
+    # the planner.* methods answered on a thread of their own (they wait for the worker or another node)
+    background = ('planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
+    # an RPC method no node here answers gets its error (no other node shares the requests)
+    answers_unknown = True
+
+    def __init__(self, node_name='mowbite_planner', **kwargs):
+        super().__init__(node_name, **kwargs)
         # registered first, so it also checks the values a launch file or YAML sets at declaration
         self.add_on_set_parameters_callback(self._check_parameters)
         for name, (default, description, _, _) in PARAMETERS.items():
+            default = self.defaults.get(name, default)
             descriptor = ParameterDescriptor(description=description)
             if name in RANGES:
                 lo, hi = RANGES[name]
@@ -285,12 +522,155 @@ class MowbitePlannerNode(Node):
         self.declare_parameter('obstacles', Parameter.Type.STRING_ARRAY, ParameterDescriptor(
             description='for ~/plan_from_parameters: one string per obstacle, "x0,y0; x1,y1; ..." in metres'))
 
-        latched = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
-                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self._path_pub = self.create_publisher(Path, '~/coverage_path', latched)
+        self.latched = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
+                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._path_pub = self.create_publisher(Path, '~/coverage_path', self.latched)
         self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage)
         self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters)
-        self.get_logger().info('MowBite Planner ready: services ~/plan_coverage and ~/plan_from_parameters')
+        self.core = None
+        self.rpc_on = False
+        if self._param('rpc') or self._param('use_map'):
+            self._core_setup()
+        self.get_logger().info('MowBite Planner ready: services ~/plan_coverage and ~/plan_from_parameters' +
+                               (', the planner.* RPC methods' if self.rpc_on else ''))
+
+    # PlannerCore (rpc, use_map)
+
+    def _core_setup(self):
+        data_dir = os.path.expanduser(self._param('data_dir'))
+        self.files = os.path.join(data_dir, 'planner') if data_dir else ''
+        if self.files:
+            try:
+                os.makedirs(self.files, exist_ok=True)
+            except OSError as e:
+                self.get_logger().warning(f'nothing kept, {self.files} not there: {e}')
+                self.files = ''
+        values = self.values()
+        self.core = NodeCore(self, float(values['mower_width']), launch_settings(self.config(values)),
+                             os.path.join(self.files, 'mowbite_planner_settings.json') if self.files else '',
+                             os.path.join(self.files, 'plans') if self.files else '',
+                             os.path.join(data_dir, HISTORY_DIR) if data_dir else '', int(values['workers']))
+        self.core.methods.update(self.more_methods())
+        self.map_input()
+        self.events_input()
+        if self.files:
+            self.create_timer(PRUNE_EVERY, self._prune)
+            self._prune()
+        if self._param('rpc'):
+            self.rpc_on = True
+            self._requests = queue.Queue()
+            threading.Thread(target=self._rpc_worker, name='rpc', daemon=True).start()
+            self.rpc_input()
+
+    def destroy_node(self):
+        if self.rpc_on:
+            self.rpc_end()
+        return super().destroy_node()
+
+    def _prune(self):
+        try:
+            gone = prune(self.files, self._param('keep_days'), self._param('keep_mb'))
+        except OSError as e:  # (a file the planner itself removed meanwhile: the next time)
+            self.get_logger().warning(f'{self.files} not tidied up: {e}')
+            return
+        if gone:
+            self.get_logger().info(f'{len(gone)} plans kept and maps before gone (keep_days, keep_mb)')
+
+    def on_request(self, method: str, params: str, rid: str):
+        """An RPC request (params: JSON text, empty: none), answered with answer()."""
+        if method not in self.core.methods:
+            if self.answers_unknown:
+                self.answer(rid, None, (METHOD_NOT_FOUND, f'Method "{method}" not found'))
+            return
+        if method in self.background:
+            threading.Thread(target=self._answer, args=(method, params, rid), name=f'rpc {method}',
+                             daemon=True).start()
+        else:
+            self._requests.put((method, params, rid))
+
+    def _rpc_worker(self):
+        while True:
+            self._answer(*self._requests.get())
+
+    def _answer(self, method: str, params: str, rid: str):
+        try:
+            got = json.loads(params) if params else None
+        except ValueError:
+            got = []  # (an error: by name)
+        REQUEST.id = rid
+        result, error = core_call(self.core.methods, method, got, self.core.loginfo, self.core.logerr)
+        if error is None and too_big(result):  # (over MQTT: the broker would drop it without a word)
+            error = (ANSWER_TOO_BIG, too_big(result))
+            self.core.logwarn('MowBite Planner: %s: %s', method, error[1])
+        if rid:
+            self.answer(rid, result, error)
+
+    # what the node does on a robot (a robot's own node: its own)
+
+    def more_methods(self) -> dict:
+        """The robot's own RPC methods: name -> callback(params)."""
+        return {}
+
+    def rpc_input(self):
+        """RPC requests: JSON {method, params, id} on ~/rpc/request."""
+        self._response_pub = self.create_publisher(String, '~/rpc/response', 100)
+        self.create_subscription(String, '~/rpc/request', self._on_rpc_text, 100)
+
+    def _on_rpc_text(self, msg):
+        try:
+            req = json.loads(msg.data)
+            method, rid = req['method'], str(req.get('id') or '')
+            params = json.dumps(req['params']) if req.get('params') is not None else ''
+        except (ValueError, KeyError, TypeError):
+            self.get_logger().warning(f'~/rpc/request not readable: {msg.data[:200]!r}')
+            return
+        self.on_request(str(method), params, rid)
+
+    def answer(self, rid: str, result: Optional[str], error: Optional[Tuple[int, str]]):
+        """The answer to the request rid: result (JSON text) or error (code, message): JSON {id, result} or {id, error:
+        {code, message}} on ~/rpc/response."""
+        out = '{"id": %s, "result": %s}' % (json.dumps(rid), result) if error is None else json.dumps(
+            {'id': rid, 'error': {'code': error[0], 'message': error[1]}})
+        self._response_pub.publish(String(data=out))
+
+    def rpc_end(self):
+        """The node ends."""
+
+    def map_input(self):
+        """The map: ~/map (OpenMower's JSON, transient local)."""
+        self.create_subscription(String, '~/map', lambda msg: self.core.set_map(msg.data), self.latched)
+
+    def events_input(self):
+        """The events of the robot's logic: ~/events (JSON like OpenMower's events/json)."""
+        self.create_subscription(String, '~/events', lambda msg: self.core.on_event(msg.data), 100)
+
+    def send_out(self, topic: str, payload: str, retain: bool):
+        """PlannerCore's publish: JSON {topic, payload, retain} on ~/publish (the planning's progress)."""
+        if not hasattr(self, '_publish_pub'):
+            self._publish_pub = self.create_publisher(String, '~/publish', 10)
+        self._publish_pub.publish(String(data=json.dumps({'topic': topic, 'payload': payload, 'retain': retain})))
+
+    def robot_param(self, name: str, default=None):
+        """PlannerCore's param: none here (no FTC_PARAMS: the time a plan takes from the planner's own speeds)."""
+        return default
+
+    def replace_map(self, data: dict, based_on: Optional[str]):
+        raise PlanningError('the map can\'t be written here')
+
+    def map_unusable(self) -> str:
+        return ''
+
+    def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
+        return None
+
+    def drive_ignored(self) -> str:
+        return ''
+
+    def mower_ready(self) -> bool:
+        return False
+
+    def start_mowing(self):
+        pass
 
     # parameters
 
@@ -358,6 +738,10 @@ class MowbitePlannerNode(Node):
             response.message = f'bad override: {e}'
             self.get_logger().warning(response.message)
             return response
+        if self.core is not None and values['use_map']:
+            answered = self._plan_area(request, response, values)
+            if answered is not None:
+                return answered
         overrides = {}
         if request.mower_width > 0.0:
             overrides['mower_width'] = float(request.mower_width)
@@ -381,6 +765,10 @@ class MowbitePlannerNode(Node):
         response.message = message
         if plan is None:
             return response
+        return self._coverage_response(response, plan, path)
+
+    @staticmethod
+    def _coverage_response(response, plan: CoveragePlan, path: Path):
         response.path = path
         response.angle = float(plan.angle)
         response.angles = [float(a) for a in plan.angles]
@@ -393,6 +781,116 @@ class MowbitePlannerNode(Node):
         response.segment_type = [int(SEGMENT_TYPES[kind]) for kind in out_kinds(plan.segments)]
         response.segment_reverse = [bool(s.reverse) for s in plan.segments]
         return response
+
+    def _plan_area(self, request, response, values: dict):
+        """~/plan_coverage with a map: of an area of it (its outline as boundary) or of an outline of none (a preview),
+        planned like planner.plan plans it (see the top), in the core's worker before what waits there. None without
+        a map."""
+        core = self.core
+        data = core.plan_map(core.current_map())
+        if data is None:
+            return None
+        return core.worker.run(MOWER, self._area_plan, request, response, values, data, job='mower')
+
+    def _area_plan(self, request, response, values: dict, data: dict):
+        core = self.core
+        index = match_area(data, xy(request.boundary))
+        job, where = None, 'outline' if index is None else f'area {index}'
+        try:
+            if index is None:  # (like planner.plan plans an outline: its obstacles and drivable areas, no dock)
+                job = AreaJob(area_id='', name='', boundary=xy(request.boundary),
+                              obstacles=[xy(p) for p in request.obstacles], mow_around=[],
+                              drivable=[xy(p) for p in request.drivable_areas], nav=[])
+            else:
+                job = area_job(data, index)
+                where = f'area {job.area_id}'
+            reason = core.map_unusable()
+            if reason:
+                raise PlanningError(reason)
+            armed, plan = core.armed_plan(job) if index is not None else (False, None)
+            kept = False
+            if armed and plan is None:  # (a plan without paths: the job goes on with the next area)
+                response.success = True
+                response.message = f'{where}: the leftovers are armed (planner.leftovers), none of them is here: ' \
+                                   f'nothing to mow'
+                response.path = to_path_msg([], values['frame_id'], self.get_clock().now().to_msg())
+                response.fingerprint = hashlib.sha256().hexdigest()  # (export.fingerprint's of no poses)
+                self.get_logger().info(response.message)
+                return response
+            if not armed:
+                cfg = self.area_config(request, job, values)
+                # (as planner.plan plans it: the outline and the obstacles as float32, the areas to mow around not)
+                obstacles = [o if any(o is m for m in job.mow_around) else _float32(o) for o in job.obstacles]
+                if cfg.nested_areas:
+                    obstacles += job.nested
+                start, end = job.dock, job.dock[:2] if job.dock else None
+                if request.use_start_pose:
+                    q = request.start_pose.orientation
+                    start = (float(request.start_pose.position.x), float(request.start_pose.position.y),
+                             quaternion_to_yaw(q.x, q.y, q.z, q.w))
+                if request.use_end_point:
+                    end = (float(request.end_point.x), float(request.end_point.y))
+                plan, kept = core.kept_plan(_float32(job.boundary), obstacles, cfg, start, end, job.drivable,
+                                            job.keep_out, margins_for(data, obstacles + job.keep_out), job.navigation,
+                                            job.unmowed)
+        except PlanningError as e:
+            response.success = False
+            response.message = f'{where}: {e}'
+            self.get_logger().warning(response.message)
+            return response
+        except Exception as e:  # noqa: BLE001 - a broken area must not take the node down
+            response.success = False
+            response.message = f'{where}: planning failed: {type(e).__name__}: {e}'
+            self.get_logger().error(response.message)
+            return response
+        if not armed:
+            core.serve(job.area_id or None, plan)
+        path = to_path_msg(plan.poses, values['frame_id'], self.get_clock().now().to_msg())
+        if armed:
+            what = f'the leftovers ({plan.stats["leftovers"]["passes"]} passes)'
+        else:
+            what = 'kept from before' if kept else 'planned'
+        response.success = True
+        response.message = with_warnings(f'{where}, {what}: {summary(plan)}',
+                                         [*self.left_out(request, plan), *plan.warnings])
+        self.get_logger().info(response.message)
+        if values['publish_path']:
+            self._path_pub.publish(path)
+        return self._coverage_response(response, plan, path)
+
+    def area_config(self, request, job, values: dict) -> PlannerConfig:
+        """The settings of a ~/plan_coverage request with the map (see the top): the planner.* settings, the area's own
+        over them (its properties), of an area's what the request sets over those (a preview's edited ones),
+        angle_offset_deg on top of the angle (a job's own). Not the request's lane spacing, it's the planner's."""
+        current = self.core.current
+        cfg = current.base.with_overrides({'mower_width': current.mower_width}).with_overrides(job.overrides)
+        asked = {}
+        if request.perimeter_passes >= 0:
+            asked['perimeter_passes'] = int(request.perimeter_passes)
+        given = {msg.name for msg in request.overrides}
+        if 'lane_overlap_passes' in given:
+            asked['lane_overlap_passes'] = values['lane_overlap_passes']
+        if 'perimeter_offset' in given:
+            asked['perimeter_offset'] = None if values['perimeter_offset'] < 0.0 else values['perimeter_offset']
+        if request.use_angle:
+            asked['angle'] = float(request.angle)
+        if 'angle_offset_deg' in given:
+            asked['angle_offset'] = cfg.angle_offset + math.radians(values['angle_offset_deg'])
+        angle = self.core.angle
+        return cfg.with_overrides(dict(asked, angle_steps=angle['steps'], finished_mows=angle['finished']))
+
+    def left_out(self, request, plan: CoveragePlan) -> List[str]:
+        """What of a ~/plan_coverage request with the map doesn't count (see the top), as warnings."""
+        out = []
+        others = sorted({msg.name for msg in request.overrides} - set(AREA_OVERRIDES))
+        if others:
+            out.append(f'overrides left out, the planner.* settings count: {", ".join(others)}')
+        if request.mower_width > 0.0 and request.overlap >= 0.0 and plan.config.lane_spacing_mode == 'fixed':
+            asked = request.mower_width * (1.0 - request.overlap)
+            if abs(asked - plan.lane_spacing) > SPACING_OFF:
+                out.append(f'the request\'s lane spacing {asked:.3f} m left out, the planner.* settings\' is '
+                           f'{plan.lane_spacing:.3f} m')
+        return out
 
     def _on_plan_from_parameters(self, request, response):
         try:
@@ -428,15 +926,7 @@ class MowbitePlannerNode(Node):
         path = None
         if want_path or values['publish_path']:
             path = to_path_msg(plan.poses, values['frame_id'], self.get_clock().now().to_msg())
-        st = plan.stats
-        turns = ', '.join(f"{int(st['turns_' + k])} {k.replace('_', '-')}"
-                          for k in ('u_turn', 'bulb', 'detour', 'pivot', 'fallback') if st['turns_' + k])
-        message = (
-            f"{len(plan.poses)} poses, {st['path_length']:.1f} m ({st['lane_length']:.1f} m lanes, "
-            f"{st['perimeter_length']:.1f} m perimeter, {st['turn_length']:.1f} m turns, "
-            f"{st['transit_length']:.1f} m transit), {int(st['lanes'])} lanes at "
-            f"{math.degrees(plan.angle):.1f} deg, turns: {turns or 'none'}, {1000 * st['planning_time']:.0f} ms")
-        message = with_warnings(message, [*warnings, *plan.warnings])
+        message = with_warnings(summary(plan), [*warnings, *plan.warnings])
         self.get_logger().info(message)
         for w in plan.warnings:
             self.get_logger().warning(w)
@@ -445,12 +935,20 @@ class MowbitePlannerNode(Node):
         return plan, path, message
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = MowbitePlannerNode()
+def main(args=None, node_class=MowbitePlannerNode):
+    """The node (node_class: a robot's own) till SIGINT or SIGTERM. They end it here, not rclpy's handlers: those shut
+    the context down first, what destroy_node still sends (rpc_end) would go nowhere and the node end with an error."""
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    node = node_class()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
+        while rclpy.ok() and not stop.is_set():
+            executor.spin_once(timeout_sec=STOP_POLL)
+    except ExternalShutdownException:
         pass
     finally:
         node.destroy_node()

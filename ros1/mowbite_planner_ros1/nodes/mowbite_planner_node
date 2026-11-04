@@ -203,8 +203,8 @@ from xbot_msgs.msg import AbsolutePose
 from mowbite_planner import CoveragePlan, PlanningError, Pose2D, SegmentInfo, quaternion_to_yaw, yaw_to_quaternion
 from mowbite_planner import calibrecord, core
 from mowbite_planner import config as limits
-from mowbite_planner.core import (ASKED, EVENTS_TOPIC, FTC_PARAMS, LEFTOVERS_JOB, LOG, METHOD_NOT_FOUND, MOWER,
-                                  READY_POLL, REQUEST, PlannerCore, run_calib)
+from mowbite_planner.core import (ASKED, EVENTS_TOPIC, FTC_PARAMS, LOG, METHOD_NOT_FOUND, MOWER, READY_POLL, REQUEST,
+                                  PlannerCore, run_calib)
 from mowbite_planner.export import ANSWER_TOO_BIG, MAX_ANSWER, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.geometry import clean_polygon, polygonal, union
 from mowbite_planner.mapfile import area_job, margins_for, match_area
@@ -1393,15 +1393,9 @@ class MowbitePlannerRos1(PlannerCore):
                 obstacles += job.mow_around
                 drivable, keep_out, dock, reach_over = job.drivable, job.keep_out, job.dock, job.navigation
                 unmowed = job.unmowed
-            armed = self.armed
-            if armed is not None and time.time() > armed['until']:
-                armed = self.armed = None
-            if armed is not None and job is not None and job.area_id in armed['plans']:
-                # planner.leftovers armed: what the mow before left in this area, nothing where it left nothing. The
-                # same again while that job runs (mower_logic asks again when it goes on after a break)
-                left = armed['plans'][job.area_id]
-                if not armed['served']:
-                    armed['served'], armed['until'] = True, time.time() + LEFTOVERS_JOB
+            armed, left = self.armed_plan(job)
+            if armed:
+                # planner.leftovers armed: what the mow before left in this area, nothing where it left nothing
                 stamp = rospy.Time.now()
                 for is_outline, first, last in plan_pieces(left, self.max_poses) if left is not None else ():
                     res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
@@ -1426,10 +1420,7 @@ class MowbitePlannerRos1(PlannerCore):
         except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
             rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e, exc_info=True)
             return res
-        try:
-            self.served.append((time.time(), job.area_id if job else None, self.estimate(plan)))
-        except Exception as e:  # noqa: BLE001 - the estimate must not keep the plan from mower_logic
-            rospy.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e, exc_info=True)
+        self.serve(job.area_id if job else None, plan)
         stamp = rospy.Time.now()
         for is_outline, first, last in plan_pieces(plan, self.max_poses):
             res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
