@@ -1,0 +1,75 @@
+name: os
+
+# The MowBite Planner on MowBite OS (os/): its packages built with ROS 2 Jazzy as MowBite OS has it, its tests there and
+# without ROS. On main (a release vX.Y.Z of mowbite-planner merged, os/ on top): nothing but os/ and this file other than
+# in that release, the version that release's; all green, the commit tagged vX.Y.Z-os (what MowBite OS pins).
+
+on:
+  push:
+    branches: [main, tron]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # main: only os/ and this file apart from the release merged, mowbite_planner.__version__ that release's
+  guard:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: release
+        run: |
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' HEAD)
+          echo "release $tag"
+          changed=$(git diff --name-only "$tag" HEAD -- . ':(exclude)os' ':(exclude).github/workflows/os.yml')
+          if [ -n "$changed" ]; then echo "changed outside os/ since $tag:"; echo "$changed"; exit 1; fi
+          version=$(sed -n "s/^__version__ = '\(.*\)'\$/\1/p" ros2/mowbite_planner/mowbite_planner/__init__.py)
+          if [ "v$version" != "$tag" ]; then echo "mowbite_planner.__version__ $version, the release $tag"; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  # the os tests without ROS (rclpy, mowbite_msgs and the interfaces stood in for)
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -q shapely numpy pytest
+      - run: /tmp/venv/bin/python -m pytest os/mowbite_planner_os/test -q -p no:cacheprovider
+
+  # the four packages built with ROS 2 Jazzy (Ubuntu 24.04, Python 3.12, shapely and numpy from apt), mowbite_msgs as
+  # os/ci has it; the os tests and mowbite_planner's node tests with the real rclpy and interfaces
+  jazzy:
+    runs-on: ubuntu-latest
+    container: ros@sha256:8eed0a4669bbf43ee331878a4c39bd8ebddea8e3312a58b4fae8edb14526b617
+    steps:
+      - uses: actions/checkout@v7
+      - run: >-
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-colcon-common-extensions
+          python3-shapely python3-numpy python3-pytest
+      - shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --base-paths ros2/mowbite_planner_interfaces ros2/mowbite_planner os/mowbite_planner_os_interfaces \
+            os/mowbite_planner_os os/ci/mowbite_msgs
+          source install/setup.bash
+          python3 -m pytest os/mowbite_planner_os/test -q -p no:cacheprovider
+          python3 -m pytest ros2/mowbite_planner/test/test_node.py -q -p no:cacheprovider
+
+  tag:
+    needs: [guard, tests, jazzy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - env:
+          TAG: ${{ needs.guard.outputs.release }}-os
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then echo "$TAG there already"; exit 0; fi
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
