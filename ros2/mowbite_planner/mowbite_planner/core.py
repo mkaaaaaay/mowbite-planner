@@ -22,7 +22,8 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
   storage       the files it keeps: settings_file (next to it the angle steps, timing and the maps before), plans_dir,
                 history_dir (the robot's track, position_history)
   capabilities  cannot: {setting: why} the robot can't have (shown ignored, not settable, the default counts),
-                drive_ignored(): why drive slope and reverse are planned forwards ('' where they aren't),
+                drive_ignored(): why drive slope and reverse are planned forwards and back_out is off ('' where
+                they aren't: the robot backs up where a plan does),
                 classic_plan (planner slic3r), remote_plan (remote_planning), remote_state, mower_ready, held and
                 start_mowing (leftovers_auto)
   logs          loginfo, logwarn, logerr, logwarn_throttle: to the robot's log, the lines go to LOG (planner.log)
@@ -583,7 +584,7 @@ class PlannerCore:
         return 'no house computer', None
 
     def drive_ignored(self):
-        """Why drive slope and reverse are planned forwards here ('' where they aren't)."""
+        """Why drive slope and reverse are planned forwards and back_out is off here ('' where they aren't)."""
         return ''
 
     def mower_ready(self):
@@ -769,19 +770,22 @@ class PlannerCore:
                 entry['choices'] = CHOICES[name]
             if name in IGNORED:  # (changes nothing since planner 2: the app hides it)
                 entry['ignored'] = IGNORED[name]
-            if name == 'drive':
+            if name in ('drive', 'back_out'):
                 why = self.drive_ignored() or backing.unavailable(current.base)
                 if why:
                     entry['ignored'] = why
                 else:
                     entry['forces'] = {'body_fit': True, 'spin_margin': limits.DRIVE_SPIN_MARGIN}
-                    entry['forces_why'] = 'slope and reverse: ' + backing.WHY
-            if name in ('body_fit', 'spin_margin') and current.base.drive != 'forward' and \
+                    entry['forces_why'] = ('slope and reverse: ' if name == 'drive' else 'back_out: ') + backing.WHY
+            backs = current.base.drive != 'forward' or current.base.back_out
+            if name in ('body_fit', 'spin_margin') and backs and \
                     not (self.drive_ignored() or backing.unavailable(current.base)):
-                forced = backing.settings(current.base)
+                slope = current.base.drive != 'forward'
+                forced = backing.settings(current.base) if slope else backing.backed(current.base)[0]
                 entry['effective'] = getattr(forced, name)
                 if entry['effective'] != entry['value']:
-                    entry['effective_why'] = 'drive %s: %s' % (current.base.drive, backing.WHY)
+                    entry['effective_why'] = '%s: %s' % ('drive ' + current.base.drive if slope else 'back_out',
+                                                         backing.WHY)
             if name in ('lane_spacing_min', 'lane_spacing_max'):  # (what lane_spacing_mode 'auto' goes by)
                 k = name == 'lane_spacing_max'
                 cfg = current.base.with_overrides({'mower_width': current.mower_width})
@@ -1353,13 +1357,15 @@ class PlannerCore:
                               unmowed)[0]
 
     def driven(self, cfg):
-        """(cfg, '') or, where drive slope or reverse is ignored here (drive_ignored), (cfg with drive forward, why for
-        the plan's warnings)."""
-        why = self.drive_ignored() if cfg.drive != 'forward' else ''
+        """(cfg, '') or, where drive slope or reverse or back_out is ignored here (drive_ignored), (cfg with drive
+        forward and back_out off, why for the plan's warnings)."""
+        why = self.drive_ignored() if cfg.drive != 'forward' or cfg.back_out else ''
         if not why:
             return cfg, ''
-        self.logwarn_throttle(60, 'MowBite Planner: drive %s ignored: %s' % (cfg.drive, why))
-        return cfg.with_overrides({'drive': 'forward'}), 'drive %s ignored: %s' % (cfg.drive, why)
+        told = '; '.join(['drive %s ignored: %s' % (cfg.drive, why)] * (cfg.drive != 'forward') +
+                         ['back_out ignored: %s' % why] * cfg.back_out)
+        self.logwarn_throttle(60, 'MowBite Planner: ' + told)
+        return cfg.with_overrides({'drive': 'forward', 'back_out': False}), told
 
     @staticmethod
     def told(plan, why):

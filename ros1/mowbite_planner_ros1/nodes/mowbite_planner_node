@@ -56,7 +56,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         an area's own, which beats it): ignored with why where it's never planned (see
                         drive_ignored), else forces {body_fit, spin_margin} with forces_why: what slope and reverse
                         plan with whatever is set; with the setting for all areas slope or reverse body_fit and
-                        spin_margin say so too (effective, effective_why)
+                        spin_margin say so too (effective, effective_why). back_out (true: where a section ends in a
+                        dead end it backs up along its way to where FTC turns on the spot, see mowbite_planner.starts):
+                        so too
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,
                         the next plan uses them (an interrupted area whose plan changes starts again). Answers
                         like planner.settings
@@ -245,7 +247,8 @@ REMOTE_QUIET = 600.0
 REMOTE_CATCH_UP = 120.0
 REMOTE_SETTLE = 3.0
 REMOTE_SMALL = 65536
-# why drive slope and reverse are planned forwards: OpenMower's FTC backs up only with this (open_mower_ros PR #371)
+# why drive slope and reverse are planned forwards and back_out is off: OpenMower's FTC backs up only with this
+# (open_mower_ros PR #371)
 NO_BACKING = "OpenMower's FTC drives forwards only (no back_up_with_plan)"
 NO_BACKING_SLIC3R = 'planner slic3r plans forwards only'
 # planner.simulate: the mowers it drives (MowerModel's), at most this many runs of one (seeds), the mower's own values
@@ -1044,9 +1047,9 @@ class MowbitePlannerRos1(PlannerCore):
         return self.remote.state() if self.remote is not None else ('no house computer', None)
 
     def drive_ignored(self):
-        """Why drive slope and reverse are planned forwards here ('' where they aren't): planner slic3r, or OpenMower's
-        FTC not backing up where a plan does (/move_base_flex/FTCPlanner/back_up_with_plan not true: after going back
-        to an OpenMower without it the mower must not get plans backing up)."""
+        """Why drive slope and reverse are planned forwards and back_out is off here ('' where they aren't): planner
+        slic3r, or OpenMower's FTC not backing up where a plan does (/move_base_flex/FTCPlanner/back_up_with_plan not
+        true: after going back to an OpenMower without it the mower must not get plans backing up)."""
         if self.current.planner == 'slic3r':
             return NO_BACKING_SLIC3R
         if rospy.get_param(FTC_PARAMS + '/back_up_with_plan', False) is not True:

@@ -212,6 +212,9 @@ class PlannerConfig:
     # turn_on_spot or where it's the only one
     turn_types: Tuple[str, ...] = TURN_TYPES
     drive: str = 'forward'  # see DRIVES
+    # drive forward: where a section ends in a dead end the mower can't get out of driving forwards, it backs up along
+    # its own way to where it can (starts.py), with the body checked like slope and reverse; off: as before
+    back_out: bool = False
     lane_order: str = 'snake'  # 'snake': neighbour after neighbour, 'skip': lanes far enough apart for U-turns
     # mowing areas of the map lying in the one planned (an area of its own with another angle or pattern): left out
     # and mowed round like an obstacle, they get their own plan. For the map's areas (mapfile.area_job), not here
@@ -577,7 +580,7 @@ class PlannerConfig:
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
         for name in ('turn_radius_auto', 'split_zones', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
-                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up', 'lane_overlap_limit'):
+                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up', 'lane_overlap_limit', 'back_out'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 

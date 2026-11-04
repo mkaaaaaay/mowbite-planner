@@ -33,7 +33,7 @@ from .levels import Rings, narrow_left, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
 from .space import _check_coordinates, build_space, margins_of, recorded_space
-from .starts import Arrives, reached_starts
+from .starts import Arrives, backed_out, reached_starts
 from .spacing import left_alone, left_whole, strip_between_lanes, turn_places
 from .sweep import plan_footprint, swept_area
 from .swaths import lane_sets
@@ -129,9 +129,15 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     free_space, robot_space and transit_space are the map's as drawn. arrives(pose, came_from) (a robot that drives to
     the plan's sections itself, MowBite OS: whether it gets to the pose facing its heading from came_from, the end of
     the section before; None for the first): every section starts where it does, see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
-    see backing.py; without the body set forwards, said in the warnings."""
+    see backing.py; without the body set forwards, said in the warnings. back_out (drive forward): out of a dead end
+    where a section ends backing up, see starts.py (without arrives backed_out)."""
     cfg = config or PlannerConfig()
     cfg.validate()
+    if cfg.back_out and cfg.drive == 'forward':
+        cfg, told = backing.backed(cfg)
+        plan = _coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, mowed, reach_over, unmowed,
+                         arrives, progress)
+        return dataclasses.replace(plan, warnings=plan.warnings + told) if told else plan
     if cfg.drive != 'forward':
         why = backing.unavailable(cfg)
         if why:
@@ -159,7 +165,8 @@ def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, kee
         plan = _final(area, _completed(area, area.plan(cfg)))
     else:
         plan = _auto(area, cfg)
-    plan = plan if arrives is None else reached_starts(plan, arrives)
+    back = cfg.back_out and cfg.drive == 'forward'
+    plan = reached_starts(plan, arrives, back) if arrives is not None else backed_out(plan) if back else plan
     area.progress.at('done', area.progress.of)
     return plan
 

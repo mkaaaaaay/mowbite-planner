@@ -50,6 +50,17 @@ def forced(cfg: PlannerConfig) -> List[str]:
 WHY = 'backing up the mower feels nothing behind it (no bumper there)'
 
 
+def backed(cfg: PlannerConfig) -> Tuple[PlannerConfig, List[str]]:
+    """back_out with drive forward (starts.py): (what the plan is planned with, its warnings): the body checked like
+    slope and reverse, said where cfg has that off; without the body set back_out off, why."""
+    why = unavailable(cfg)
+    if why:
+        return cfg.with_overrides({'back_out': False}), ['back_out ignored: ' + why]
+    notes = forced(cfg)
+    used = cfg.with_overrides({'body_fit': True, 'spin_margin': max(cfg.spin_margin, DRIVE_SPIN_MARGIN)})
+    return used, ['back_out: %s, %s' % (' and '.join(notes), WHY)] if notes else []
+
+
 def settings(cfg: PlannerConfig) -> PlannerConfig:
     """What a plan with cfg.drive (slope, reverse) is planned with: the body checked, spin_margin at least
     DRIVE_SPIN_MARGIN; slope lanes only; reverse the body turned round (its front and rear swapped, the blade's place

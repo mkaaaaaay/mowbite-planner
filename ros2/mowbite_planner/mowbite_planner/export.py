@@ -45,7 +45,8 @@ def plan_pieces(plan: CoveragePlan, max_poses: int = MAX_PATH_POSES) -> List[Tup
     than max_poses poses: a longer run is cut into equal pieces, the next starting on the pose the last
     one ended on. Every piece has at least 3 poses, which OpenMower's FTC controller needs; a shorter
     section is left out (it's a hop of a few cm). So max_poses below 3 counts as 3, and with 3 a run of an
-    odd number of steps gets one piece of 4 poses."""
+    odd number of steps gets one piece of 4 poses. Backing up out of a dead end (back_out) goes with what it
+    backs out of."""
     following = False
     outline = []
     section = None
@@ -56,6 +57,9 @@ def plan_pieces(plan: CoveragePlan, max_poses: int = MAX_PATH_POSES) -> List[Tup
             following = seg.kind == PERIMETER
         outline.append(following)
     outline.reverse()
+    for k, seg in enumerate(plan.segments):
+        if k and seg.maneuver == 'back_out' and plan.segments[k - 1].section == seg.section:
+            outline[k] = outline[k - 1]
     runs: List[list] = []
     for seg, is_outline in zip(plan.segments, outline):
         if runs and runs[-1][0] == is_outline and runs[-1][3] == seg.section:

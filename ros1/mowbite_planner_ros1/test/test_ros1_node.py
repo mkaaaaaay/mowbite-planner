@@ -1877,6 +1877,36 @@ def test_drive(planner, stub_planner):
     assert result['settings']['drive']['ignored'] == node_module.NO_BACKING_SLIC3R
 
 
+def test_back_out(planner, stub_planner):
+    """back_out (backing up out of a dead end) like drive: off by default; planned so only with OpenMower's FTC backing
+    up and the body set, else off, said in the plan's warnings and as ignored in planner.settings; where it's planned
+    so planner.settings says what it forces, for all areas at body_fit and spin_margin too."""
+    send_map(the_map())
+    result, _ = rpc('planner.settings')
+    out = result['settings']['back_out']
+    assert out['value'] is False and out['default'] is False and out['type'] == 'boolean' and out['settable']
+    assert out['ignored'] == node_module.NO_BACKING
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and not any(w.startswith('back_out') for w in plan['warnings'])
+    rpc('planner.settings.set', {'back_out': True})
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and stub_planner.config().back_out is False
+    assert plan['warnings'][-1] == 'back_out ignored: ' + node_module.NO_BACKING
+    rospy.params['/move_base_flex/FTCPlanner/back_up_with_plan'] = True
+    result, _ = rpc('planner.settings')
+    assert 'no body set' in result['settings']['back_out']['ignored']
+    result, _ = rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14,
+                                             'body_fit': False})
+    out, fit = result['settings']['back_out'], result['settings']['body_fit']
+    assert 'ignored' not in out and out['forces'] == {'body_fit': True, 'spin_margin': 0.05}
+    assert out['forces_why'].startswith('back_out: ') and fit['effective'] is True
+    assert 'back_out' in fit['effective_why']
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and stub_planner.config().back_out is True
+    assert not any(w.startswith('back_out ignored') for w in plan['warnings'])
+    assert rpc('planner.settings.set', {'back_out': 'yes'})[1][1] == 'back_out must be true or false, got \'yes\''
+
+
 # the worker and the progress (one planning at a time, the quick RPCs at once meanwhile)
 
 def test_worker_most_urgent_first():

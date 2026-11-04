@@ -464,8 +464,10 @@ def rules(plan, ref: Ref) -> Dict[str, Any]:
                 else:
                     back += all(abs(math.remainder(h - y, 2 * math.pi)) > math.pi / 2 for y in (a.yaw, b.yaw))
     forward = plan.config is None or plan.config.drive == 'forward'
+    out_of = plan.config is not None and plan.config.back_out  # (backing up out of a dead end, starts.py)
     got = {'centre_out': out, 'backwards': back,
-           'reverse_segs': sum(1 for s in plan.segments if s.reverse) if forward else 0, 'dup_steps': dup}
+           'reverse_segs': sum(1 for s in plan.segments if s.reverse and not (out_of and s.maneuver == 'back_out'))
+           if forward else 0, 'dup_steps': dup}
     if ref.rm is not None and plan.body_space is not None:
         got['rm_diff_m2'] = round(plan.body_space.symmetric_difference(ref.rm).area, 4)
     if plan.config is not None:

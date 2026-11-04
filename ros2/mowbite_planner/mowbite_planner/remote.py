@@ -195,10 +195,13 @@ def spacings_tried(cfg: PlannerConfig) -> List[Optional[float]]:
 
 def _asked(cfg: PlannerConfig) -> Tuple[PlannerConfig, Optional[PlannerConfig], List[Optional[float]]]:
     """(what plan_coverage plans with before the lane spacing: drive slope and reverse with backing's settings,
-    forwards where they can't be planned; the config its plan has where that's another; spacings_tried)."""
+    forwards where they can't be planned, back_out with the body checked; the config its plan has where that's
+    another; spacings_tried)."""
     cfg.validate()
     if cfg.drive != 'forward' and backing.unavailable(cfg):
         cfg = cfg.with_overrides({'drive': 'forward'})
+    if cfg.back_out and cfg.drive == 'forward':
+        cfg = backing.backed(cfg)[0]
     used, own = backing.configs(cfg) if cfg.drive != 'forward' else (cfg, None)
     if used.lane_spacing_mode != 'auto':
         return used, own, [None]
