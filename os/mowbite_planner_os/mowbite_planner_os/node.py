@@ -19,7 +19,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     slope and reverse planned forwards (MowBite OS drives forwards only for now). planner.settings says why.
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
     through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see
-    mowbite_planner.starts): from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is small.
+    mowbite_planner.starts): the first from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is
+    small, the others from where the section before ends, as mowbite_logic drives there.
     transit_as_recorded (true): where no way gets to or from a pose by the edge, a way by the outermost loop's rules
     (plan_transit's as_recorded); false: not, for ~/plan_transit and the plans' sections alike.
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
@@ -46,6 +47,7 @@ from mowbite_msgs.srv import ReplaceMap
 from mowbite_planner import core
 from mowbite_planner import node as base
 from mowbite_planner.config import PlannerConfig, PlanningError
+from mowbite_planner.geometry import polygons
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.starts import _Spent
 from mowbite_planner_os_interfaces.srv import PlanTransit
@@ -65,13 +67,15 @@ MAP_SETTLE = 5.0
 DATUM_STATES = ('UNKNOWN', 'EMPTY', 'MATCH', 'MISMATCH', 'UNBOUND')
 # planner.calib.evaluate: s an evaluation may take (MowBite OS waits 120 s)
 CALIB_TIMEOUT = 120.0
-# arrives: m from a section's start the ways to it start (behind it, beside it, ahead of it; where none is that far in
-# the lawn, halved till ARRIVE_NEAREST), at least half that far from it and ARRIVE_APART m from each other; ways
+# arrives: m from a plan's first section's start the ways to it start (behind it, beside it, ahead of it; where none is
+# that far in the lawn, halved till ARRIVE_NEAREST), at least half that far from it and ARRIVE_APART m from each other;
+# m the ways from where the section before ends may start and end outside (mowbite_logic's transit_max_outside); ways
 # planned at most for a plan (a number, not a time: the same plan on any computer), the sections after that left out
 # (untried)
 ARRIVE_FROM = 2.0
 ARRIVE_NEAREST = 0.5
 ARRIVE_APART = 0.3
+ARRIVE_OUTSIDE = 0.3
 ARRIVE_WAYS = 40
 # the speeds of mowbite_follower (bridge/params) the time a plan takes is worked out with (core.FTC_PARAMS')
 FOLLOWER = '/mowbite_follower'
@@ -233,19 +237,45 @@ class OsNode(base.MowbitePlannerNode):
 
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
         """Whether ~/plan_transit gets to a pose facing its heading, through the area and the drivable areas but the
-        obstacles and the areas to keep out of, the body checked up to the pose (none of it outside): from ARRIVE_FROM m
-        behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where the lawn is
-        too small for those; by transit_as_recorded as ~/plan_transit. A pose none of them gets to isn't got to: no
-        start it can't get to (the Tron's case of 30.10.). None without the body: nothing to check."""
+        obstacles and the areas to keep out of, by transit_as_recorded as ~/plan_transit. From came_from (where the
+        section before ends) the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE), none where the room the
+        centre has on a way parts the two (nothing planned then); the first section's (came_from None) the body checked
+        up to the pose (none of it outside): from ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the
+        closest place to there), from nearer where the lawn is too small for those. A pose none of them gets to isn't
+        got to: no start it can't get to (the Tron's case of 30.10.). None without the body: nothing to check."""
         if not cfg.body:
             return None
         recorded = self.as_recorded()
         areas, away = [list(boundary)] + [list(d) for d in drivable], [list(o) for o in obstacles] + \
             [list(k) for k in keep_out]
         space = []  # (worked out once a plan, when it's first asked)
+        parts = []  # (the parts of the widest room a way may take: as the outermost loop's where that's on)
         ways = [0]
 
-        def gets_to(p: Pose2D) -> bool:
+        def way(start, p: Pose2D, max_outside: float) -> bool:
+            if ways[0] >= ARRIVE_WAYS:
+                raise _Spent()
+            ways[0] += 1
+            try:
+                plan_transit(start, (p.x, p.y, p.yaw), areas, away, cfg, max_outside=max_outside, as_recorded=recorded)
+                return True
+            except PlanningError:
+                return False
+
+        def part(q: Pose2D) -> set:
+            if not parts:
+                wide = cfg.with_overrides({'edge_margin': min(cfg.recorded_margin, cfg.edge_margin),
+                                           'spin_margin': 0.0}) if recorded and cfg.edges == 'recorded' else cfg
+                parts.extend(polygons(centre_space(areas, away, wide)[0]))
+            point = Point(q.x, q.y)
+            return {i for i, a in enumerate(parts) if a.distance(point) <= ARRIVE_OUTSIDE + 1e-9}
+
+        def gets_to(p: Pose2D, came_from: Optional[Pose2D] = None) -> bool:
+            if came_from is not None:
+                at, to = part(came_from), part(p)
+                if at and to and not at & to:
+                    return False
+                return way((came_from.x, came_from.y, came_from.yaw), p, ARRIVE_OUTSIDE)
             if not space:
                 space.append(centre_space(areas, away, cfg)[0])
             froms: List[tuple] = []
@@ -258,17 +288,7 @@ class OsNode(base.MowbitePlannerNode):
                             all(math.hypot(q.x - a, q.y - b) >= ARRIVE_APART for a, b in froms):
                         froms.append((q.x, q.y))
                 far *= 0.5
-            for x, y in froms:
-                if ways[0] >= ARRIVE_WAYS:
-                    raise _Spent()
-                ways[0] += 1
-                try:
-                    plan_transit((x, y, math.atan2(p.y - y, p.x - x)), (p.x, p.y, p.yaw), areas, away, cfg,
-                                 max_outside=0.0, as_recorded=recorded)
-                    return True
-                except PlanningError:
-                    continue
-            return False
+            return any(way((x, y, math.atan2(p.y - y, p.x - x)), p, 0.0) for x, y in froms)
         if not recorded:
             gets_to.key = {'as_recorded': False}  # (a plan kept with the other isn't taken)
         return gets_to

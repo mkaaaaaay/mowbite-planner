@@ -408,6 +408,53 @@ def test_transit_as_recorded(make, monkeypatch):
         asked.clear()
 
 
+# a lawn a hedge parts: no way from one side to the other
+SPLIT = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
+HEDGE = [(4.0, -1.0), (6.0, -1.0), (6.0, 7.0), (4.0, 7.0)]
+
+
+@fake_only
+def test_arrives_from_where_the_section_before_ends(make, monkeypatch):
+    """A section's start after the first: got to from where the section before ends, the way mowbite_logic asks for
+    (max_outside 0.3); not where the room the centre has parts the two, nothing planned then."""
+    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    asked = []
+    real = os_module.plan_transit
+
+    def spy(start, goal, *args, **kw):
+        asked.append((start, goal, kw.get('max_outside')))
+        return real(start, goal, *args, **kw)
+    monkeypatch.setattr(os_module, 'plan_transit', spy)
+    gets_to = node.core.arrives(SPLIT, [HEDGE], cfg, [], [])
+    end = Pose2D(1.0, 1.0, 0.0)
+    assert gets_to(Pose2D(2.5, 4.0, 0.5 * math.pi), end)
+    assert asked == [((1.0, 1.0, 0.0), (2.5, 4.0, 0.5 * math.pi), 0.3)]
+    asked.clear()
+    assert not gets_to(Pose2D(8.0, 3.0, 0.0), end) and not asked
+    assert gets_to(Pose2D(8.0, 3.0, 0.0)) and asked and all(a[2] == 0.0 for a in asked)
+
+
+@fake_only
+@pytest.mark.real_planner
+def test_no_section_across_where_the_body_doesnt_get(make):
+    """A plan of a lawn a hedge parts: every section's start got to from where the one before ends (mowbite_logic's
+    way), the other side's sections left out, said so."""
+    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    plan = node_module.plan_coverage(SPLIT, [HEDGE], cfg, arrives=node.core.arrives(SPLIT, [HEDGE], cfg, [], []))
+    starts = plan.stats['starts']
+    assert starts['dropped'] or starts['untried']
+    ends = [i - 1 for i in plan.section_starts[1:]]
+    for i, e in zip(plan.section_starts[1:], ends):
+        a, b = plan.poses[e], plan.poses[i]
+        got = transit(node, (a.x, a.y, a.yaw), (b.x, b.y, b.yaw), drivable=(SPLIT,), obstacles=(HEDGE,),
+                      max_outside=0.3)
+        assert got.success, (i, got.message)
+    assert len({p.x < 5.0 for p in plan.poses}) == 1
+    assert any('left out' in w for w in plan.warnings)
+
+
 def tron_case():
     with open(TRON_CASE) as f:
         return json.load(f)
