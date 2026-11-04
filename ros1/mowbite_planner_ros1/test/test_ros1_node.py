@@ -176,7 +176,7 @@ def install():
 rospy, node_module, Request, Polygon, Point32 = install()
 
 
-from mowbite_planner import calibread, mqtt_service  # noqa: E402
+from mowbite_planner import calibread, core, mqtt_service  # noqa: E402
 import calibsim  # noqa: E402
 from stubplan import Spy  # noqa: E402
 
@@ -187,7 +187,7 @@ def stub_planner(request, monkeypatch):
     real_planner with plan_coverage itself."""
     spy = Spy()
     if 'real_planner' not in request.keywords:
-        monkeypatch.setattr(node_module, 'plan_coverage', spy)
+        monkeypatch.setattr(core, 'plan_coverage', spy)
         monkeypatch.setattr(mqtt_service, 'plan_coverage', spy)
     return spy
 
@@ -259,13 +259,13 @@ def planner():
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'position_history'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups'), ignore_errors=True)
     shutil.rmtree(os.path.join(os.environ['ROS_HOME'], 'mowbite_calib'), ignore_errors=True)
-    node_module.PLAN_AHEAD_DELAY = 1e6
+    core.PLAN_AHEAD_DELAY = 1e6
     # no mowbite/hold read (no broker here: it would hold leftovers_auto's mower in), test_hold does that itself
     node_module.HOLD = False
     # nor the house computer's broker (remote_planning): the tests of it hand the node one of their own
     node_module.REMOTE = False
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
-    node_module.TRACK_WAIT = 0.0
+    core.TRACK_WAIT = 0.0
     # (the progress of the tests' nodes before off: a change of what waits is sent a while after, into this test)
     for node in NODES:
         node.progress.publish = lambda payload: None
@@ -326,8 +326,8 @@ def test_same_request_same_plan(planner, monkeypatch):
     b = [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
     assert a == b
     # kept: the same request again (mowing.plan, planner.plan of the area, the mow) isn't planned again, another is
-    calls, real = [], node_module.plan_coverage
-    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
+    calls, real = [], core.plan_coverage
+    monkeypatch.setattr(core, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
     planner.handle(request())
     assert not calls
     send_map(the_map())
@@ -337,9 +337,9 @@ def test_same_request_same_plan(planner, monkeypatch):
     rpc('planner.settings.set', {'turn_radius': 0.4})
     planner.handle(request(angle=0.3))
     assert calls == [1, 1, 1]
-    for angle in range(node_module.CACHED_PLANS + 2):
+    for angle in range(core.CACHED_PLANS + 2):
         planner.handle(request(angle=0.1 * angle))
-    assert len(planner.plans) == node_module.CACHED_PLANS
+    assert len(planner.plans) == core.CACHED_PLANS
 
 
 def test_area_settings_and_dock_from_the_map(planner):
@@ -471,8 +471,8 @@ def test_margins_of_the_map_obstacles(planner, monkeypatch):
     pond = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
     send_map(the_map(areas=[area('pond', pond, type='obstacle', margin=0.4)]))
     rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14})
-    got, real = [], node_module.plan_coverage
-    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: got.append(args) or real(*args, **kw))
+    got, real = [], core.plan_coverage
+    monkeypatch.setattr(core, 'plan_coverage', lambda *args, **kw: got.append(args) or real(*args, **kw))
 
     def sent(holes):
         r = request()
@@ -630,7 +630,7 @@ def test_preview_plans_like_the_node(planner, props, params, settings, areas, by
     data = {'areas': [lawn, bed, moved(area('nav', [(20, 0), (24, 0), (24, 3), (20, 3)], type='nav')),
                       *map(moved, areas)],
             'docking_stations': [{'id': 'd', 'position': {'x': 22.0 + by, 'y': 1.5 + by}, 'heading': math.pi}]}
-    service = PlannerService(node_module.PlannerConfig(lane_order='skip', mower_width=0.18)
+    service = PlannerService(core.PlannerConfig(lane_order='skip', mower_width=0.18)
                              .with_overrides(settings), 'angle' in settings or 'angle_strategy' in settings)
     service.on_map(json.dumps(data))
     service.on_params(json.dumps({'/mower_logic/' + k: v for k, v in params.items()}))
@@ -787,7 +787,7 @@ def test_area_set(planner, monkeypatch):
     assert len(backups) == 1
     with open(os.path.join(os.environ['ROS_HOME'], 'mowbite_map_backups', backups[0])) as f:
         assert json.load(f)['areas'][0]['properties']['planner'] == {'turn_radius': 0.3}
-    monkeypatch.setattr(node_module, 'MAP_BACKUPS', 2)
+    monkeypatch.setattr(core, 'MAP_BACKUPS', 2)
     got = area_set({'area_id': 'a', 'settings': {'fill_pattern': None, 'angle': None}})
     assert got['properties'] == {'name': 'Garden', 'type': 'mow'}
     got = area_set({'area_id': 'bed', 'margin': 0.2})
@@ -814,7 +814,7 @@ def test_rpc_settings(planner):
     result, error = rpc('planner.settings')
     assert error is None and result['file'] == stored_file() and result['own_angle'] is False
     s = result['settings']
-    assert set(s) == set(node_module.PlannerConfig.names()) | {'planner', 'leftovers_auto', 'remote_planning'}
+    assert set(s) == set(core.PlannerConfig.names()) | {'planner', 'leftovers_auto', 'remote_planning'}
     assert s['leftovers_auto'] == {'value': False, 'default': False, 'stored': False, 'type': 'boolean',
                                    'settable': True}
     # (no house computer here: see test_remote_planning)
@@ -1211,11 +1211,11 @@ def test_rpc_log(planner):
     assert [line['t'] for line in lines] == sorted(line['t'] for line in lines)
     assert rpc('planner.log', {'limit': 1})[0]['lines'] == lines[-1:]
     assert rpc('planner.log', {'since': lines[-1]['t']})[0]['lines'] == []
-    for i in range(node_module.LOG_LINES + 5):
+    for i in range(core.LOG_LINES + 5):
         rospy.loginfo('MowBite Planner: line %d', i)
     lines = rpc('planner.log', {'since': None, 'limit': None})[0]['lines']
-    assert len(lines) == node_module.LOG_LINES
-    assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (node_module.LOG_LINES + 4)
+    assert len(lines) == core.LOG_LINES
+    assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (core.LOG_LINES + 4)
 
 
 def test_plans_of_another_code_dropped(planner):
@@ -1245,8 +1245,8 @@ def test_warnings_logged_once_a_plan(planner):
 def test_plan_ahead(planner, monkeypatch):
     """After a new map (or settings) every active mowing area is planned ahead: planner.plan finds it, so does the next
     start of the node (kept on disk, for this planner code only), whichever way the same inputs come."""
-    calls, real = [], node_module.plan_coverage
-    monkeypatch.setattr(node_module, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
+    calls, real = [], core.plan_coverage
+    monkeypatch.setattr(core, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
     data = the_map(areas=[area('off', [(30, 0), (40, 0), (40, 8), (30, 8)], type='mow', active=False)])
     send_map(data)
     planner.plan_ahead()
@@ -1288,13 +1288,13 @@ def test_workers(planner):
         got = {a: together.rpc_plan({'area_id': a}) for a in ('a', 'b')}
         assert {a: g['fingerprint'] for a, g in got.items()} == alone and all(g['kept'] for g in got.values())
     finally:
-        node_module.set_workers(0)
+        core.set_workers(0)
 
 
 def test_plan_ahead_one_at_a_time(planner, monkeypatch):
     """A plan asked for while it's being planned (planning ahead, then the app or mower_logic) is waited for, not
     planned twice. Planning ahead after another change ends early: the latest plans the areas as they are then."""
-    calls, real, started = [], node_module.plan_coverage, threading.Event()
+    calls, real, started = [], core.plan_coverage, threading.Event()
 
     def slow(*args, **kw):
         calls.append(1)
@@ -1302,7 +1302,7 @@ def test_plan_ahead_one_at_a_time(planner, monkeypatch):
         time.sleep(0.3)
         return real(*args, **kw)
 
-    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    monkeypatch.setattr(core, 'plan_coverage', slow)
     send_map(the_map())
     ahead = threading.Thread(target=planner.plan_ahead)
     ahead.start()
@@ -1328,10 +1328,10 @@ def test_code_version_of_the_code_itself(monkeypatch, tmp_path):
     code.mkdir()
     (stand_in / '__init__.py').write_text('# points to src\n')
     (code / 'planner.py').write_text('A = 1\n')
-    monkeypatch.setattr(node_module.mowbite_planner, '__path__', [str(stand_in), str(code)])
-    before = node_module.code_version()
+    monkeypatch.setattr(core.mowbite_planner, '__path__', [str(stand_in), str(code)])
+    before = core.code_version()
     (code / 'planner.py').write_text('A = 2\n')
-    assert node_module.code_version() != before
+    assert core.code_version() != before
 
 
 def event(kind):
@@ -1550,7 +1550,7 @@ def test_duration(planner):
     unended = os.path.join(os.environ['ROS_HOME'], 'position_history', '1_open.jsonl')
     with open(unended, 'w') as f:
         f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'started_at': 1.0, 'points': []}))
-    assert node_module.mowing_time(unended) is None
+    assert core.mowing_time(unended) is None
 
 
 def test_leftovers(planner):
@@ -1593,7 +1593,7 @@ def test_leftovers(planner):
     whole = len(poses(planner.handle(request())))  # (not armed: the plan as ever)
     assert whole > 5 * sum(path['poses'] for path in a['paths'])
     result, _ = rpc('planner.leftovers', {'job_id': 'mown', 'arm': True})
-    assert 0.0 < result['armed'] <= node_module.LEFTOVERS_ARMED
+    assert 0.0 < result['armed'] <= core.LEFTOVERS_ARMED
     first = poses(planner.handle(request()))
     assert 3 <= len(first) < 0.2 * whole and len(poses(planner.handle(request()))) == len(first)
     steps = rpc('planner.settings')[0]['angle_steps']
@@ -1656,6 +1656,7 @@ def test_leftovers_auto(planner, monkeypatch):
     those passes; that job done starts nothing again. Little left, the mower not ready in time or the setting off: it
     stays in."""
     monkeypatch.setattr(node_module, 'READY_POLL', 0.01)
+    monkeypatch.setattr(core, 'READY_POLL', 0.01)
     rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded',
                                  'blade_ahead': 0.17})
     send_map(the_map())
@@ -1716,7 +1717,7 @@ def test_leftovers_auto(planner, monkeypatch):
         rospy.params['/mower_logic/rain_mode'] = rain_mode
         assert planner.mower_ready() is ready, (messages, rain_mode)
     # not ready while the leftovers are armed: not sent out
-    monkeypatch.setattr(node_module, 'LEFTOVERS_ARMED', 0.2)
+    monkeypatch.setattr(core, 'LEFTOVERS_ARMED', 0.2)
     rospy.messages[state] = node_module.HighLevelStatus(state_name='IDLE')
     assert finished('mown') == [] and any('the mower not sent out' in line for _, line in rospy.log)
     # planner slic3r: no leftovers
@@ -1728,8 +1729,8 @@ def test_leftovers_auto(planner, monkeypatch):
 def test_track_read_when_the_job_ended(planner, monkeypatch):
     """mower_logic's JOB_COMPLETE comes before xbot_monitoring has written all of the job's track (every 30 s, the rest
     when the job ends): what follows a mow waits for mower_logic's next STATE event of another job or none."""
-    monkeypatch.setattr(node_module, 'TRACK_WAIT', 60.0)
-    monkeypatch.setattr(node_module, 'TRACK_SETTLE', 0.0)
+    monkeypatch.setattr(core, 'TRACK_WAIT', 60.0)
+    monkeypatch.setattr(core, 'TRACK_SETTLE', 0.0)
     rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded'})
     send_map(the_map())
 
@@ -1750,7 +1751,7 @@ def test_track_read_when_the_job_ended(planner, monkeypatch):
     planner.drive_thread.join(60.0)
     assert not planner.drive_thread.is_alive() and len(planner.drive['areas']['a']['places']) == 1
     # a job that doesn't end in time: its track as it is
-    monkeypatch.setattr(node_module, 'TRACK_WAIT', 0.2)
+    monkeypatch.setattr(core, 'TRACK_WAIT', 0.2)
     send('JOB_COMPLETE', job_id='job1')
     planner.drive_thread.join(60.0)
     assert not planner.drive_thread.is_alive()
@@ -1773,7 +1774,7 @@ def test_planner_drive(planner):
     assert error is None and result['file'] == '1791377699_job1.jsonl'
     a = result['areas']['a']
     assert a['checked'] > 50 and len(a['places']) == 1 and a['places'][0][:2] == [20.05, 6.0] and a['worst'] > 0.2
-    assert node_module.DRIVE_OFF == 0.01
+    assert core.DRIVE_OFF == 0.01
     # after a finished mow by itself
     rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(
         topic='events/json', payload=json.dumps({'type': 'JOB_COMPLETE', 'job_id': 'job1'})))
@@ -1811,15 +1812,15 @@ def test_planner_drive_slope(planner, stub_planner, monkeypatch):
         plan = stub_planner(*args, **kw)
         return plan if stub_planner.config().drive != 'slope' else \
             dataclasses.replace(plan, angle=0.0, stats=dict(plan.stats, drive='slope'))
-    monkeypatch.setattr(node_module, 'plan_coverage', slope)
+    monkeypatch.setattr(core, 'plan_coverage', slope)
     rospy.params['/move_base_flex/FTCPlanner/back_up_with_plan'] = True
     rpc('planner.settings.set', {'drive': 'slope'})
     places = rpc('planner.drive', {'job_id': 'down'})[0]['areas']['a']['places']
     assert len(places) == 1 and places[0][:2] == [19.9, 5.0] and places[0][2] > 0.1
     assert rpc('planner.drive', {'job_id': 'up'})[0]['areas']['a']['places'] == []
     # (planner.leftovers so too: the blade where the mower faces, report.track_mowed's up)
-    ups, mowed = [], node_module.track_mowed
-    monkeypatch.setattr(node_module, 'track_mowed', lambda *args: ups.append(args[4:]) or mowed(*args))
+    ups, mowed = [], core.track_mowed
+    monkeypatch.setattr(core, 'track_mowed', lambda *args: ups.append(args[4:]) or mowed(*args))
     assert rpc('planner.leftovers', {'job_id': 'down'})[1] is None and ups == [(0.0,)]
 
 
@@ -1881,14 +1882,14 @@ def test_drive(planner, stub_planner):
 def test_worker_most_urgent_first():
     """The worker's jobs one at a time, the most urgent first (of those the one asked for first); a job a job asks for
     runs at once, an exception goes to whoever waits."""
-    worker = node_module.Worker()
+    worker = core.Worker()
     go, order = threading.Event(), []
-    first = threading.Thread(target=worker.run, args=(node_module.AHEAD, go.wait, 30))
+    first = threading.Thread(target=worker.run, args=(core.AHEAD, go.wait, 30))
     first.start()
     time.sleep(0.2)
     waiting = []
-    for urgency, name in ((node_module.AHEAD, 'ahead'), (node_module.ASKED, 'asked'), (node_module.MOWER, 'mower'),
-                          (node_module.ASKED, 'asked 2'), (node_module.AFTER_MOW, 'after the mow')):
+    for urgency, name in ((core.AHEAD, 'ahead'), (node_module.ASKED, 'asked'), (node_module.MOWER, 'mower'),
+                          (node_module.ASKED, 'asked 2'), (core.AFTER_MOW, 'after the mow')):
         waiting.append(threading.Thread(target=worker.run, args=(urgency, order.append, name)))
         waiting[-1].start()
         time.sleep(0.05)
@@ -1896,7 +1897,7 @@ def test_worker_most_urgent_first():
     for t in [first] + waiting:
         t.join(30)
     assert order == ['mower', 'asked', 'asked 2', 'after the mow', 'ahead']
-    assert worker.run(node_module.ASKED, lambda: worker.run(node_module.AHEAD, lambda: 7)) == 7
+    assert worker.run(node_module.ASKED, lambda: worker.run(core.AHEAD, lambda: 7)) == 7
     with pytest.raises(ZeroDivisionError):
         worker.run(node_module.ASKED, lambda: 1 / 0)
 
@@ -1906,7 +1907,7 @@ def test_worker_joins_moves_up_and_supersedes():
     asked for more urgently it's moved up; who waits with a slot for a job not begun is superseded by the next request
     with it (the job dropped where nobody waits for it any more); waiting(): in the order they'll run, with the RPC ids
     waiting for each."""
-    worker = node_module.Worker()
+    worker = core.Worker()
     go, calls, got, threads = threading.Event(), [], {}, []
 
     def job(name):
@@ -1917,15 +1918,15 @@ def test_worker_joins_moves_up_and_supersedes():
         def asked():
             try:
                 got[key] = worker.submit(urgency, fn, *args, **what)
-            except node_module.Superseded as e:
+            except core.Superseded as e:
                 got[key] = e
         threads.append(threading.Thread(target=asked))
         threads[-1].start()
         time.sleep(0.1)
 
     ask('block', node_module.ASKED, go.wait, 30, same='block')
-    ask('ahead a', node_module.AHEAD, job, 'a', area_id='a', same='a')
-    ask('ahead b', node_module.AHEAD, job, 'b', area_id='b', same='b', rid='r1')
+    ask('ahead a', core.AHEAD, job, 'a', area_id='a', same='a')
+    ask('ahead b', core.AHEAD, job, 'b', area_id='b', same='b', rid='r1')
     ask('asked a', node_module.ASKED, job, 'a', area_id='a', same='a', rid='r2')
     ask('view 1', node_module.ASKED, job, 'c', area_id='c', same='c', rid='r3', slot='view')
     ask('view 2', node_module.ASKED, job, 'd', area_id='d', same='d', rid='r4', slot='view')
@@ -1933,7 +1934,7 @@ def test_worker_joins_moves_up_and_supersedes():
     assert worker.waiting() == (3, [{'area_id': 'a', 'job': 'plan', 'rank': 'asked', 'ids': ['r2']},
                                     {'area_id': 'd', 'job': 'plan', 'rank': 'asked', 'ids': ['r4']},
                                     {'area_id': 'b', 'job': 'plan', 'rank': 'ahead', 'ids': ['r1']}])
-    assert isinstance(got['view 1'], node_module.Superseded)
+    assert isinstance(got['view 1'], core.Superseded)
     go.set()
     for t in threads:
         t.join(30)
@@ -1954,7 +1955,7 @@ def test_queue_over_rpc(planner, stub_planner, monkeypatch):
         assert go.wait(60)
         return stub_planner(*args, **kw)
 
-    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    monkeypatch.setattr(core, 'plan_coverage', slow)
     rospy.published.clear()
 
     def send(rid, params):
@@ -1978,7 +1979,7 @@ def test_queue_over_rpc(planner, stub_planner, monkeypatch):
             t.join(60)
     got = {m.id: (topic, m) for topic, m in answers()}
     assert set(got) == {'p1', 'p2', 'p3', 'p4', 'p5'} and len(stub_planner.calls) == 3
-    assert got['p3'][0] == '/xbot/rpc/error' and got['p3'][1].code == node_module.SUPERSEDED
+    assert got['p3'][0] == '/xbot/rpc/error' and got['p3'][1].code == core.SUPERSEDED
     assert json.loads(got['p5'][1].result)['kept'] and not json.loads(got['p1'][1].result)['kept']
     time.sleep(1.5)  # (the last planning's of an outline: the queue told after it)
     assert progress_messages()[-1]['waiting_n'] == 0
@@ -1996,7 +1997,7 @@ def test_quick_rpcs_answer_while_it_plans(planner, stub_planner, monkeypatch):
         assert go.wait(60)
         return stub_planner(*args, **kw)
 
-    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    monkeypatch.setattr(core, 'plan_coverage', slow)
     rospy.published.clear()
     rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method='planner.plan',
                                                                   params=json.dumps({'area_id': 'a'}), id='plan'))
@@ -2029,7 +2030,7 @@ def test_one_planning_at_a_time(planner, stub_planner, monkeypatch):
             with lock:
                 now[0] -= 1
 
-    monkeypatch.setattr(node_module, 'plan_coverage', counted)
+    monkeypatch.setattr(core, 'plan_coverage', counted)
     got = {}
     asks = {'plan_path': lambda: rospy.services['/slic3r_coverage_planner/plan_path'](request()),
             'plan': lambda: planner.methods['planner.plan']({'area_id': 'a', 'settings': {'turn_radius': 0.5}}),
@@ -2044,7 +2045,7 @@ def test_one_planning_at_a_time(planner, stub_planner, monkeypatch):
 
 def progress_messages():
     return [json.loads(m.payload) for topic, m in rospy.published if topic == '/xbot_monitoring/mqtt_publish'
-            and m.topic == node_module.PROGRESS_TOPIC and m.retain]
+            and m.topic == core.PROGRESS_TOPIC and m.retain]
 
 
 def test_progress(planner, stub_planner, monkeypatch):
@@ -2057,7 +2058,7 @@ def test_progress(planner, stub_planner, monkeypatch):
         time.sleep(2.6)
         return stub_planner(*args, **kw)
 
-    monkeypatch.setattr(node_module, 'plan_coverage', slow)
+    monkeypatch.setattr(core, 'plan_coverage', slow)
     rospy.published.clear()
     result, error = rpc('planner.plan', {'area_id': 'a'})
     seen = progress_messages()
@@ -2085,7 +2086,7 @@ def test_progress_of_a_failed_planning(planner, monkeypatch):
     def failing(*args, **kw):
         raise node_module.PlanningError('no lanes fit')
 
-    monkeypatch.setattr(node_module, 'plan_coverage', failing)
+    monkeypatch.setattr(core, 'plan_coverage', failing)
     rospy.published.clear()
     assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'no lanes fit'
     last = progress_messages()[-1]
@@ -2100,9 +2101,9 @@ def test_a_no_kept(planner, monkeypatch):
 
     def failing(*args, **kw):
         calls.append(1)
-        raise node_module.NothingLeft('nothing left')
+        raise core.NothingLeft('nothing left')
 
-    monkeypatch.setattr(node_module, 'plan_coverage', failing)
+    monkeypatch.setattr(core, 'plan_coverage', failing)
     for _ in range(3):
         assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'nothing left'
     for _ in range(2):
@@ -2113,7 +2114,7 @@ def test_a_no_kept(planner, monkeypatch):
         calls.append(1)
         raise RuntimeError('out of memory')
 
-    monkeypatch.setattr(node_module, 'plan_coverage', crashing)
+    monkeypatch.setattr(core, 'plan_coverage', crashing)
     for _ in range(2):
         assert not poses(planner.handle(request(angle=0.5)))
     assert len(calls) == 4
@@ -2187,6 +2188,7 @@ def test_leftovers_auto_held(planner, monkeypatch):
     """leftovers_auto sends the mower out only once the MowBite Updater's hold ended, not at all while it lasts
     longer than the leftovers stay armed."""
     monkeypatch.setattr(node_module, 'READY_POLL', 0.01)
+    monkeypatch.setattr(core, 'READY_POLL', 0.01)
     rospy.messages['/mower_logic/current_state'] = node_module.HighLevelStatus(state_name='IDLE', is_charging=True)
     client = HoldClient()
     planner.hold = node_module.HoldReader(client)
@@ -2576,8 +2578,8 @@ def test_remote_planning_falls_back(planner, monkeypatch):
             elif how == 'no':
                 say(ok=False, error='the area is too small', refused=True)
             elif how == 'wrong':  # (a plan of another area, beside this one: refused by the checks here)
-                plan = node_module.plan_coverage([(x + 30.0, y) for x, y in SMALL], [],
-                                                 node_module.PlannerConfig(mower_width=0.18))
+                plan = core.plan_coverage([(x + 30.0, y) for x, y in SMALL], [],
+                                                 core.PlannerConfig(mower_width=0.18))
                 from mowbite_planner.remote import pack, plan_json
                 data = pack(dict(plan_json(plan, plan.config), spacing=None))
                 say(ok=True, parts=1, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
@@ -2642,8 +2644,8 @@ def test_remote_answers_of_others_dropped(planner):
 def test_the_jobs_plans_kept(planner, monkeypatch):
     """The plans mower_logic got are kept (in memory, in plans_dir, over a restart) till the job ends (JOB_COMPLETE,
     JOB_RESET), however many are planned meanwhile; then they go like any other."""
-    monkeypatch.setattr(node_module, 'CACHED_PLANS', 2)
-    monkeypatch.setattr(node_module, 'DISK_PLANS', 2)
+    monkeypatch.setattr(core, 'CACHED_PLANS', 2)
+    monkeypatch.setattr(core, 'DISK_PLANS', 2)
     send_map(the_map())
     planner.handle(request())
     key, = planner.pinned
