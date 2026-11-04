@@ -13,8 +13,17 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     its code (-32001: the map changed meanwhile, nothing written).
   - mowbite_logic's events (STATE, JOB_COMPLETE, JOB_RESET) from bridge/publish (events/json): angle_increment,
     perimeter_direction random, finished_mows, the finished mow's planner.drive and timing. The planning's progress
-    (mowbite/planner/progress) out on bridge/publish.
+    (mowbite/planner/progress) out on bridge/publish, as api/planner.schema.json says (the planner's part of MowBite OS'
+    interface, installed to share/mowbite_planner_os/api, mowbite_api reads it).
   - mowbite_follower's speed_fast, speed_slow and max_angular from bridge/params: how long mowing takes.
+  - the body and the blade from robot.geometry: /mowbite_geometry on bridge/params (robot_width, robot_front,
+    robot_rear, robot_outline, [] none: the rectangle, mower_width, blade_ahead, blade_offset; version counts up with
+    every change).
+    Not settable here (planner.settings says from where), the node's parameters, the stored ones, an area's and a
+    request's own don't count; a new version: plans with the values before not taken (they're in the plans' keys), the
+    areas planned ahead again. None yet, or ones the settings don't go with: nothing planned (planner.plan,
+    ~/plan_coverage, ~/plan_transit say why), never without the body. The margins (edge_margin, obstacle_margin,
+    spin_margin) no less than FLOORS (the Tron's, G6), an area's and an obstacle's own and a transit's too.
   - not here: the slic3r planner, leftovers_auto (MowBite OS' schedule starts the mower), the house computer.
     planner.settings says why.
   - back_up_with_plan (false): the robot backs up where a plan's poses face against the way (MowBite OS from M8):
@@ -27,8 +36,15 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     robot gets away again driving forwards (to the next one, or to the closest place the body turns whatever way,
     facing any way there), earlier where it ends in a dead end, left out where nothing of it does (back_out: backing up
     out of it).
-    transit_as_recorded (true): where no way gets to or from a pose by the edge, a way by the outermost loop's rules
-    (plan_transit's as_recorded); false: not, for ~/plan_transit and the plans' sections alike.
+    With a ~/plan_coverage request's start (use_start_pose: where mowbite_logic undocks to) the first section from
+    there the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE); none got to from there: refused with
+    START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
+    transit_as_recorded (false): true: where no way gets to or from a pose by the edge, a way by the outermost loop's
+    rules (plan_transit's as_recorded), for ~/plan_transit and the plans' sections alike; not taken for now
+    (AS_RECORDED_NOT: its margins hold all along the way, the Tron's G6 till they're only the piece by the edge pose).
+    ~/plan_transit in a callback group of its own on a MultiThreadedExecutor: answered while a ~/plan_coverage waits for
+    its plan (the other callbacks one after another as before). It plans in the executor's thread, on geometries of
+    its own (space._body_space: the kept ones as WKB, each thread its own; mowbite_planner's GEOS rule).
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
     at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
     whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read or a timeout: -32603.
@@ -43,6 +59,8 @@ import threading
 from typing import List, Optional
 
 from rcl_interfaces.msg import ParameterDescriptor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from shapely.geometry import Point
 from shapely.ops import nearest_points
@@ -85,6 +103,17 @@ ARRIVE_OUTSIDE = 0.3
 ARRIVE_WAYS = 40
 # the speeds of mowbite_follower (bridge/params) the time a plan takes is worked out with (core.FTC_PARAMS')
 FOLLOWER = '/mowbite_follower'
+# robot.geometry's entry of bridge/params, the settings it gives (the body and the blade), where they come from
+GEOMETRY = '/mowbite_geometry'
+GEOMETRY_KEYS = ('robot_width', 'robot_front', 'robot_rear', 'robot_outline', 'mower_width', 'blade_ahead',
+                 'blade_offset')
+FROM_GEOMETRY = 'robot.geometry (/mowbite_geometry)'
+# m the margins are no less than (G6)
+FLOORS = {'edge_margin': 0.05, 'obstacle_margin': 0.10, 'spin_margin': 0.05}
+# the executor's threads: the node's callbacks and ~/plan_transit's
+THREADS = 2
+# why transit_as_recorded true isn't taken ('': it is; the Tron, G6)
+AS_RECORDED_NOT = 'its margins hold all along the way, not only by the edge pose (point 7)'
 
 
 class OsNode(base.MowbitePlannerNode):
@@ -93,7 +122,12 @@ class OsNode(base.MowbitePlannerNode):
     defaults = {'rpc': True, 'use_map': True}
     cannot = {'planner': 'MowBite OS: no slic3r planner',
               'leftovers_auto': 'MowBite OS: its schedule starts the mower',
-              'remote_planning': 'MowBite OS: no house computer'}
+              'remote_planning': 'MowBite OS: no house computer',
+              'body_fit': 'MowBite OS: always on, the body never sticks out (G6)',
+              'robot_front_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)',
+              'robot_rear_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)'}
+    given_by = {n: FROM_GEOMETRY for n in GEOMETRY_KEYS}
+    floors = FLOORS
     background = base.MowbitePlannerNode.background + ('planner.calib.evaluate',)
     answers_unknown = False
 
@@ -106,11 +140,19 @@ class OsNode(base.MowbitePlannerNode):
         self._calib_root = None
         self._as_recorded = None
         self._backs_up = None
+        # robot.geometry's latest (version, {setting: value}), why nothing is planned with it ('' where it is)
+        self.geometry = None
+        self.geometry_why = ''
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
         self.as_recorded()
         self.backs_up()
-        self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit)
+        self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit,
+                            callback_group=MutuallyExclusiveCallbackGroup())
+        mine = [n for n in GEOMETRY_KEYS if n != 'mower_width' and self._param(n) is not None and (
+            len(self._param(n)) if n == 'robot_outline' else self._param(n) not in (-1.0, 0.0))]
+        if mine:
+            self.get_logger().info(f'parameters not counting here (from {FROM_GEOMETRY}): {", ".join(mine)}')
 
     def calib_root(self) -> str:
         if self._calib_root is None:
@@ -121,9 +163,13 @@ class OsNode(base.MowbitePlannerNode):
 
     def as_recorded(self) -> bool:
         if self._as_recorded is None:
-            self._as_recorded = bool(self.declare_parameter('transit_as_recorded', True, ParameterDescriptor(
+            asked = bool(self.declare_parameter('transit_as_recorded', False, ParameterDescriptor(
                 description='where no way gets to or from a pose by the edge, a way by the outermost loop\'s rules '
-                            '(~/plan_transit and the plans\' sections alike)')).value)
+                            '(~/plan_transit and the plans\' sections alike; its margins all along the way). Not '
+                            f'taken for now: {AS_RECORDED_NOT}')).value)
+            if asked:
+                self.get_logger().warning(f'transit_as_recorded true not taken: {AS_RECORDED_NOT}')
+            self._as_recorded = asked and not AS_RECORDED_NOT
         return self._as_recorded
 
     def backs_up(self) -> bool:
@@ -132,6 +178,30 @@ class OsNode(base.MowbitePlannerNode):
                 description='the robot backs up where a plan\'s poses face against the way (MowBite OS from M8): '
                             'back_out planned; false: not (drive slope and reverse stay forwards either way)')).value)
         return self._backs_up
+
+    # the body: robot.geometry's (given)
+
+    def values(self, overrides=()) -> dict:
+        """As MowbitePlannerNode's, an override of robot.geometry's not taken (ValueError)."""
+        mine = sorted({msg.name for msg in overrides} & set(GEOMETRY_KEYS))
+        if mine:
+            raise ValueError(f'{", ".join(mine)} from {FROM_GEOMETRY} here')
+        return super().values(overrides)
+
+    def config(self, values: dict, **overrides) -> PlannerConfig:
+        """As MowbitePlannerNode's, robot.geometry's values and the floors over it (where the core is)."""
+        cfg = super().config(values, **overrides)
+        return cfg if self.core is None else self.core.bound(cfg)[0]
+
+    def plan(self, boundary, obstacles, values, overrides, *args, **kwargs):
+        """As MowbitePlannerNode's (~/plan_coverage without a map, ~/plan_from_parameters), in the core's worker (no
+        planning in another thread, mowbite_planner's GEOS rule); never without the body."""
+        why = self.no_body()
+        if why:
+            self.get_logger().warning(f'planning failed: {why}')
+            return None, None, why
+        return self.core.worker.run(core.MOWER, lambda: base.MowbitePlannerNode.plan(
+            self, boundary, obstacles, values, overrides, *args, **kwargs), job='mower')
 
     # the transport: mowbite_bridge
 
@@ -180,9 +250,47 @@ class OsNode(base.MowbitePlannerNode):
     def _on_params(self, msg):
         try:
             got = json.loads(msg.data)
-            self.others[str(got['node'])] = dict(got['params'])
+            node, params = str(got['node']), dict(got['params'])
         except (ValueError, KeyError, TypeError):
             self.get_logger().warning(f'bridge/params not readable: {msg.data[:200]!r}')
+            return
+        self.others[node] = params
+        if node == GEOMETRY:
+            self._on_geometry(params)
+
+    def _on_geometry(self, params: dict):
+        """robot.geometry's values: the settings with them from now on (a version or values other than before)."""
+        try:
+            got = geometry_values(params)
+        except ValueError as e:
+            self.geometry, self.geometry_why = None, f'the mower\'s dimensions not readable ({FROM_GEOMETRY}): {e}'
+            self.get_logger().error(self.geometry_why)
+            return
+        if got == self.geometry and not self.geometry_why:
+            return
+        self.geometry, self.geometry_why = got, ''  # (till they're taken: not taken yet, see no_body)
+        try:
+            self.core.given_again()
+        except PlanningError as e:
+            self.geometry_why = f'the mower\'s dimensions (version {got[0]}) don\'t go with the planner\'s ' \
+                f'settings: {e}'
+            self.get_logger().error(self.geometry_why)
+            return
+        self.geometry_why = ''
+
+    def given(self) -> dict:
+        return dict(self.geometry[1]) if self.geometry is not None else {}
+
+    def no_body(self) -> str:
+        """Why nothing is planned now for the body ('' where it is): none yet or none readable, or the settings aren't
+        robot.geometry's latest (being taken, or the settings don't go with them: till they do)."""
+        got = self.geometry
+        if got is None:
+            return self.geometry_why or f'no dimensions of the mower yet ({FROM_GEOMETRY} on bridge/params)'
+        if self.core is not None and {n: v for n, v in self.core.current_given().items() if n in GEOMETRY_KEYS} != \
+                got[1]:
+            return self.geometry_why or f'the mower\'s dimensions (version {got[0]}) not taken yet'
+        return ''
 
     def robot_param(self, name: str, default=None):
         """OpenMower's FTC speeds as mowbite_follower's (speed_fast, speed_slow, max_angular in rad/s as speed_angular
@@ -214,6 +322,9 @@ class OsNode(base.MowbitePlannerNode):
             self.core.plan_ahead_later()
 
     def map_unusable(self) -> str:
+        why = self.no_body()
+        if why:
+            return why
         status = self.map_status
         if status is None:
             return 'no map status from mowbite_map yet (map/status)'
@@ -309,8 +420,8 @@ class OsNode(base.MowbitePlannerNode):
                         froms.append((q.x, q.y))
                 far *= 0.5
             return any(way((x, y, math.atan2(p.y - y, p.x - x)), p, 0.0) for x, y in froms)
-        if not recorded:
-            gets_to.key = {'as_recorded': False}  # (a plan kept with the other isn't taken)
+        # (a plan kept with the other code or the other way isn't taken)
+        gets_to.key = dict({'os': os_code()}, **({} if recorded else {'as_recorded': False}))
         return gets_to
 
     def _on_plan_transit(self, request, response):
@@ -319,6 +430,12 @@ class OsNode(base.MowbitePlannerNode):
         except ValueError as e:
             response.success = False
             response.message = f'bad override: {e}'
+            self.get_logger().warning(response.message)
+            return response
+        why = self.no_body()
+        if why:
+            response.success = False
+            response.message = f'planning the transit failed: {why}'
             self.get_logger().warning(response.message)
             return response
         q = request.start.orientation
@@ -368,8 +485,8 @@ class OsNode(base.MowbitePlannerNode):
             return asked
         plain = self.config(self.values())
         current = self.core.current
-        return current.base.with_overrides(dict({'mower_width': current.mower_width}, **{
-            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)}))
+        return self.core.bound(current.base.with_overrides(dict({'mower_width': current.mower_width}, **{
+            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)})))[0]
 
     # planner.calib.evaluate
 
@@ -389,6 +506,48 @@ class OsNode(base.MowbitePlannerNode):
         return result
 
 
+def geometry_values(params: dict) -> tuple:
+    """(version, {setting: value}) of robot.geometry's params (bridge/params): GEOMETRY_KEYS as the planner's
+    settings (robot_outline [] none: None, else ((x, y), ...)). ValueError where one is missing or isn't one."""
+    version = params.get('version')
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError(f'version must be an integer, got {version!r}')
+    out = {}
+    for name in GEOMETRY_KEYS:
+        v = params.get(name)
+        if name == 'robot_outline':
+            if not isinstance(v, list) or not all(isinstance(p, list) and len(p) == 2 and all(_finite(c) for c in p)
+                                                  for p in v):
+                raise ValueError(f'robot_outline must be a list of [x, y], got {v!r}')
+            out[name] = tuple((float(x), float(y)) for x, y in v) or None
+        elif not _finite(v):
+            raise ValueError(f'{name} must be a number, got {v!r}')
+        else:
+            out[name] = float(v)
+    return version, out
+
+
+def os_code() -> str:
+    """A digest of this package's code (arrives and ~/plan_transit are here, not in mowbite_planner's code_version)."""
+    global _OS_CODE
+    if _OS_CODE is None:
+        digest = hashlib.sha1()
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in sorted(os.listdir(here)):
+            if name.endswith('.py'):
+                with open(os.path.join(here, name), 'rb') as f:
+                    digest.update(name.encode() + b'\0' + f.read())
+        _OS_CODE = digest.hexdigest()
+    return _OS_CODE
+
+
+_OS_CODE = None
+
+
+def _finite(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _internal(message: str) -> PlanningError:
     """A PlanningError answered as JSON-RPC's internal error (not the caller's mistake)."""
     e = PlanningError(message)
@@ -397,7 +556,7 @@ def _internal(message: str) -> PlanningError:
 
 
 def main(args=None):
-    base.main(args, node_class=OsNode)
+    base.main(args, node_class=OsNode, executor_class=lambda: MultiThreadedExecutor(num_threads=THREADS))
 
 
 if __name__ == '__main__':

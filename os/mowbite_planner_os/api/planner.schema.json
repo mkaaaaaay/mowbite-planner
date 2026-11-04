@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mowbite-os:planner:1",
+  "title": "MowBite Planner on MowBite OS",
+  "description": "The planner's part of MowBite OS' app interface, read by mowbite_api from the pinned planner (share/mowbite_planner_os/api). version counts up only when something is added. events: the planner's events on events/json, each the fields it has besides the envelope (id, t and type, set by mowbite_api), with its x-reasons; none yet. topics: the payload of each topic the planner publishes on bridge/publish. x-reasons: the reasons of the planner's events by event, none yet.",
+  "version": 1,
+  "events": {},
+  "topics": {
+    "mowbite/planner/progress": {
+      "type": "object",
+      "description": "Retained: how far the planning of an area got, at most every second while it runs and once more as it ends; also a change of what waits while nothing is planned. done of of (1000) grows with the planning's steps and with the time that area's last planning took.",
+      "properties": {
+        "area_id": {"type": ["string", "null"], "description": "The area planned (null: none planned yet, only what waits)"},
+        "key": {"type": ["string", "null"], "description": "The plan's key"},
+        "running": {"type": "boolean", "description": "It's planning now"},
+        "stage": {"type": ["string", "null"], "description": "The planning's stage (done as it ended well)"},
+        "done": {"type": "integer", "minimum": 0, "description": "How far it got, of of"},
+        "of": {"type": "integer", "minimum": 1, "description": "done's whole"},
+        "started": {"type": ["number", "null"], "x-unit": "s", "description": "When it started, unix time"},
+        "elapsed_s": {"type": ["number", "null"], "minimum": 0, "x-unit": "s", "description": "How long it ran"},
+        "estimate_s": {"type": ["number", "null"], "minimum": 0, "x-unit": "s", "description": "How long that area's last planning took"},
+        "error": {"type": ["string", "null"], "description": "Why it failed (null: it didn't)"},
+        "waiting_n": {"type": "integer", "minimum": 0, "description": "How many jobs wait"},
+        "waiting": {
+          "type": "array",
+          "description": "The first 20 of them in the order they'll run",
+          "items": {
+            "type": "object",
+            "properties": {
+              "area_id": {"type": ["string", "null"], "description": "The area it plans, if one"},
+              "job": {"type": "string", "description": "What it does: plan, mower, drive, leftovers, ..."},
+              "rank": {"enum": ["mower", "asked", "after_mow", "ahead"], "description": "Its urgency, mower's first"},
+              "ids": {"type": "array", "items": {"type": "string"}, "description": "The RPC requests waiting for it"}
+            },
+            "required": ["area_id", "job", "rank", "ids"],
+            "additionalProperties": false
+          }
+        },
+        "planned_on": {"enum": ["mower", "house"], "description": "Where it's planned (always mower on MowBite OS)"},
+        "remote_why": {"type": ["string", "null"], "description": "Why not on the house computer after all (null on MowBite OS)"}
+      },
+      "required": ["area_id", "key", "running", "stage", "done", "of", "started", "elapsed_s", "estimate_s", "error",
+                   "waiting_n", "waiting", "planned_on", "remote_why"],
+      "additionalProperties": false
+    }
+  },
+  "x-reasons": {}
+}

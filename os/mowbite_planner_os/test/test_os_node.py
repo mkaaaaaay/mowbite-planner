@@ -23,6 +23,7 @@ from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue  # noqa
 from rclpy.parameter import Parameter  # noqa: E402
 from std_msgs.msg import String  # noqa: E402
 
+import apicheck  # noqa: E402
 import calibsim  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
@@ -41,10 +42,14 @@ GARDEN = [(0.0, 0.0), (8.0, 0.0), (8.0, 5.0), (0.0, 5.0)]
 BED = [(5.0, 2.0), (6.0, 2.0), (6.0, 3.0), (5.0, 3.0)]
 CORE_METHODS = ['planner.angle.reset', 'planner.area.set', 'planner.drive', 'planner.leftovers', 'planner.log',
                 'planner.plan', 'planner.settings', 'planner.settings.set']
-# the Tron's body (mowbite-os, tron.yaml)
+# the Tron's parameters (mowbite-os, tron.yaml) and its body (robot.geometry, config/geometry/tron.yaml)
 TRON = {'mower_width': 0.22, 'overlap': 0.15, 'perimeter_passes': 3, 'turn_radius': 0.44, 'lane_order': 'skip',
-        'turn_on_spot': False, 'turn_types': ['u_turn', 'bulb', 'detour'], 'robot_width': 0.47, 'robot_front': 0.60,
-        'robot_rear': 0.12, 'blade_ahead': 0.23, 'keep_days': 60, 'keep_mb': 50.0}
+        'turn_on_spot': False, 'turn_types': ['u_turn', 'bulb', 'detour'], 'keep_days': 60, 'keep_mb': 50.0}
+TRON_BODY = {'robot_width': 0.47, 'robot_front': 0.60, 'robot_rear': 0.12, 'robot_outline': [], 'mower_width': 0.22,
+             'blade_ahead': 0.23, 'blade_offset': 0.0}
+# robot.geometry's entry of bridge/params as mowbite_logic publishes it (Geometry::Params)
+TRON_GEOMETRY = dict(TRON_BODY, antenna_x=0.0, antenna_y=0.0, track=0.395, wheel_radius=0.1125, dock_contact_x=-0.10,
+                     ticks_per_m=1000.0, imu_roll=0.0, imu_pitch=0.0, version=0, stored=[])
 # the Tron's case of 30.10. (mowbite-os 8a66cdb): the first section of a plan started where no way got to it
 TRON_CASE = os.path.join(HERE, 'transit-case-8a66cdb.json')
 
@@ -82,25 +87,43 @@ def planned(request, monkeypatch):
     return spy
 
 
+def tron_cfg(**more) -> PlannerConfig:
+    """The Tron's settings as a plan has them."""
+    body = dict(TRON_BODY, robot_outline=None)
+    return PlannerConfig(**{k: v for k, v in dict(TRON, **body, **more).items() if k in PlannerConfig.names()})
+
+
+def geometry(node, **values):
+    """robot.geometry's entry of bridge/params (as mowbite_logic publishes it, latched), the Tron's with values."""
+    node._on_params(String(data=json.dumps({'node': '/mowbite_geometry', 'params': dict(TRON_GEOMETRY, **values)})))
+
+
 @pytest.fixture
 def make(tmp_path, monkeypatch):
-    """OsNodes with data_dir in tmp_path."""
+    """OsNodes with data_dir in tmp_path, the Tron's body from robot.geometry (body None: none yet; else values over
+    the Tron's). Every message they sent on bridge/publish kept to the planner's part of the interface (AM6)."""
     monkeypatch.setattr(core_module, 'PLAN_AHEAD_DELAY', 1e6)  # (planned ahead only where a test says so)
     monkeypatch.setattr(core_module, 'TRACK_WAIT', 0.0)
     if REAL_ROS:
         rclpy.init()
     made = []
 
-    def make(**params):
+    def make(body=(), **params):
         params = dict({'data_dir': str(tmp_path / 'data')}, **params)
         n = OsNode(parameter_overrides=[Parameter(k, value=v) for k, v in params.items()])
         made.append(n)
+        if body is not None:
+            geometry(n, **dict(body))
         return n
     yield make
     for n in made:
         n.destroy_node()
     if REAL_ROS:
         rclpy.try_shutdown()
+    else:
+        for n in made:
+            for m in n.publishers['bridge/publish'].published:
+                assert not apicheck.sent(m.topic, m.payload), (m.topic, m.payload)
 
 
 def give(node, topic, msg):
@@ -335,7 +358,7 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
 @fake_only
 def test_plan_transit_service(make):
     """~/plan_transit: a drive with the planner.* settings (the body, the turns) and a request's overrides on top."""
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    node = make()
     res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
     assert res.success and res.message.startswith('transit ') and res.path_length > 5.0
     last = res.path.poses[-1].pose.position
@@ -357,12 +380,11 @@ def test_arrives(make, planned, monkeypatch):
     """With the body set the plans' sections start where ~/plan_transit gets to them (arrives): from behind, beside or
     ahead of them, nearer in a small lawn; a pose none of those gets to isn't got to. Without the body: none."""
     assert make().core.arrives(GARDEN, [], PlannerConfig(), [], []) is None
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    node = make()
     send_map(node, the_map())
     plan_area(node)
     assert callable(planned.calls[-1][1]['arrives'])
-    cfg = node.core.current.base.with_overrides({'mower_width': 0.22, **{k: v for k, v in TRON.items()
-                                                                         if k in PlannerConfig.names()}})
+    cfg = node.core.current.base.with_overrides({k: getattr(tron_cfg(), k) for k in TRON if k in PlannerConfig.names()})
     gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
     assert gets_to(Pose2D(2.0, 2.5, 0.0)) and gets_to(Pose2D(4.0, 1.0, math.pi))
     # (facing the edge right by it, the nose over it: no way gets there)
@@ -388,22 +410,27 @@ def test_arrives(make, planned, monkeypatch):
 
 @fake_only
 def test_transit_as_recorded(make, monkeypatch):
-    """transit_as_recorded (on by default): ~/plan_transit and arrives try a way by the outermost loop's rules where
-    no other gets there; off: neither does, the plans got to so kept apart from the others (arrives' key)."""
+    """transit_as_recorded (off by default, true not taken for now: AS_RECORDED_NOT): on, ~/plan_transit and arrives
+    try a way by the outermost loop's rules where no other gets there; off: neither does, the plans got to so kept
+    apart from the others (arrives' key)."""
     asked = []
 
     def spy(start, goal, *args, **kw):
         asked.append(kw.get('as_recorded'))
         raise PlanningError(f'no way arrives at the goal ({goal[0]:.2f}, {goal[1]:.2f})')
     monkeypatch.setattr(os_module, 'plan_transit', spy)
-    body = {k: v for k, v in TRON.items() if k.startswith('robot_')}
-    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
-    for on, params in ((True, {}), (True, {'transit_as_recorded': True}), (False, {'transit_as_recorded': False})):
-        node = make(**dict(body, **params))
+    cfg = tron_cfg()
+    for on, params, why in ((False, {}, os_module.AS_RECORDED_NOT),
+                            (False, {'transit_as_recorded': True}, os_module.AS_RECORDED_NOT),
+                            (True, {'transit_as_recorded': True}, ''), (False, {'transit_as_recorded': False}, '')):
+        monkeypatch.setattr(os_module, 'AS_RECORDED_NOT', why)
+        node = make(**params)
+        if params.get('transit_as_recorded') and why:
+            assert any('transit_as_recorded true not taken' in m for _, m in node.get_logger().lines)
         assert not transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).success
         gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
         assert not gets_to(Pose2D(2.0, 2.5, 0.0))
-        assert getattr(gets_to, 'key', True) == (True if on else {'as_recorded': False})
+        assert gets_to.key == dict({'os': os_module.os_code()}, **({} if on else {'as_recorded': False}))
         assert len(asked) > 1 and set(asked) == {on}
         asked.clear()
 
@@ -417,8 +444,8 @@ HEDGE = [(4.0, -1.0), (6.0, -1.0), (6.0, 7.0), (4.0, 7.0)]
 def test_arrives_from_where_the_section_before_ends(make, monkeypatch):
     """A section's start after the first: got to from where the section before ends, the way mowbite_logic asks for
     (max_outside 0.3); not where the room the centre has parts the two, nothing planned then."""
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
-    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    node = make()
+    cfg = tron_cfg()
     asked = []
     real = os_module.plan_transit
 
@@ -440,8 +467,8 @@ def test_arrives_from_where_the_section_before_ends(make, monkeypatch):
 def test_no_section_across_where_the_body_doesnt_get(make):
     """A plan of a lawn a hedge parts: every section's start got to from where the one before ends (mowbite_logic's
     way), the other side's sections left out, said so."""
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
-    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    node = make()
+    cfg = tron_cfg()
     plan = node_module.plan_coverage(SPLIT, [HEDGE], cfg, arrives=node.core.arrives(SPLIT, [HEDGE], cfg, [], []))
     starts = plan.stats['starts']
     assert starts['dropped'] or starts['untried']
@@ -467,8 +494,7 @@ def test_back_up_with_plan(make, planned):
         assert got['settings'][name]['ignored'] == m8, name
     plan_area(node)
     assert planned.config().back_out is False and planned.config().drive == 'forward'
-    body = {k: v for k, v in TRON.items() if k.startswith('robot_')}
-    node = make(back_up_with_plan=True, **body)
+    node = make(back_up_with_plan=True)
     send_map(node, the_map(planner={'back_out': True, 'drive': 'reverse'}))
     got, _ = rpc(node, 'planner.settings')
     out = got['settings']['back_out']
@@ -482,8 +508,8 @@ def test_home_facing_any_way(make, monkeypatch):
     """Home from where a section ends (starts.py asks with no heading): a way there arriving facing any way."""
     asked = []
     monkeypatch.setattr(os_module, 'plan_transit', lambda start, goal, *args, **kw: asked.append((start, goal)))
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
-    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    node = make()
+    cfg = tron_cfg()
     gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
     assert gets_to(Pose2D(2.0, 2.5, None), Pose2D(1.0, 1.0, 0.0))
     assert asked == [((1.0, 1.0, 0.0), (2.0, 2.5))]
@@ -498,8 +524,8 @@ ARM = [(0.0, 0.0), (5.0, 0.0), (5.0, 1.55), (8.5, 1.55), (8.5, 2.45), (5.0, 2.45
 def test_every_section_ends_where_it_gets_away(make):
     """A plan of a lawn with a narrow arm, the dock at its end: every section ends where mowbite_logic's way gets on
     from, to the next section or home (the plan's first pose, facing any way)."""
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
-    cfg = PlannerConfig(**{k: v for k, v in TRON.items() if k in PlannerConfig.names()})
+    node = make()
+    cfg = tron_cfg()
     plan = node_module.plan_coverage(ARM, [], cfg, (1.0, 1.0, 0.0), (8.0, 2.0),
                                      arrives=node.core.arrives(ARM, [], cfg, [], []))
     assert plan.stats['starts']['asks'] >= len(plan.section_starts)
@@ -517,13 +543,14 @@ def tron_case():
 
 @fake_only
 @pytest.mark.real_planner
-@pytest.mark.parametrize('body', [{}, {'robot_front': 0.54, 'robot_rear': 0.178, 'blade_ahead': 0.0}])
+@pytest.mark.parametrize('body', [{}, {'robot_front': 0.54, 'robot_rear': 0.178, 'blade_ahead': 0.0, 'version': 1}])
 def test_tron_case_starts_where_a_way_gets_to(make, body):
-    """The Tron's case of 30.10. (its map, its body then and now): every section of the plan starts where a way gets
-    to it as mowbite_logic asks ~/plan_transit for it (max_outside 0.3, the area as the drivable one): the first from
-    where the mower was, each other one from where the section before it ends."""
+    """The Tron's case of 30.10. (its map, 2.6 x 1.6 m, its body then and now): every section of the plan after the
+    first starts where a way gets to it as mowbite_logic asks ~/plan_transit for it (max_outside 0.3, the area as the
+    drivable one), from where the section before it ends. With the request's start where the mower was then (the
+    middle) none is got to from there (the margins kept all the way): refused, START_UNREACHABLE first."""
     case = tron_case()
-    node = make(**dict(TRON, **body))
+    node = make(body, **TRON)
     data = case['map_json']
     outline = [(p['x'], p['y']) for p in data['areas'][0]['outline']]
     send_map(node, data)
@@ -533,27 +560,233 @@ def test_tron_case_starts_where_a_way_gets_to(make, body):
     assert res.success, res.message
     poses = [(ps.pose.position.x, ps.pose.position.y, 2.0 * math.atan2(ps.pose.orientation.z, ps.pose.orientation.w))
              for ps in res.path.poses]
-    froms = [tuple(case['pose_at_start_mowing'])] + [poses[i - 1] for i in res.section_start[1:]]
-    for start, i in zip(froms, res.section_start):
-        got = transit(node, start, poses[i], drivable=(outline,), obstacles=(), max_outside=0.3)
+    for i in res.section_start[1:]:
+        got = transit(node, poses[i - 1], poses[i], drivable=(outline,), obstacles=(), max_outside=0.3)
         assert got.success, (i, got.message)
-        last = got.path.poses[-1].pose if got.path.poses else None
-        assert last is None or (last.position.x, last.position.y) == pytest.approx(poses[i][:2])
+    request.use_start_pose, request.start_pose = True, pose(*case['pose_at_start_mowing'])
+    res = node._on_plan_coverage(request, PlanCoverage.Response())
+    assert not res.success and res.message.startswith(f'area {data["areas"][0]["id"]}: start unreachable: no way ')
+
+
+@fake_only
+@pytest.mark.real_planner
+def test_the_first_section_from_the_start(make):
+    """With the request's start (use_start_pose, where mowbite_logic undocks to) the first section starts where
+    mowbite_logic's way from there gets to it (max_outside 0.3), the others from where the section before ends."""
+    node = make(**TRON)
+    send_map(node, the_map())
+    start = (7.0, 0.6, math.pi)
+    request = PlanCoverage.Request()
+    request.boundary, request.obstacles = polygon(GARDEN), [polygon(BED)]
+    request.use_start_pose, request.start_pose = True, pose(*start)
+    res = node._on_plan_coverage(request, PlanCoverage.Response())
+    assert res.success, res.message
+    poses = [(ps.pose.position.x, ps.pose.position.y, 2.0 * math.atan2(ps.pose.orientation.z, ps.pose.orientation.w))
+             for ps in res.path.poses]
+    for frm, i in zip([start] + [poses[i - 1] for i in res.section_start[1:]], res.section_start):
+        got = transit(node, frm, poses[i], max_outside=0.3)
+        assert got.success, (i, got.message)
+
+
+@fake_only
+def test_body_from_robot_geometry(make, planned, tmp_path):
+    """The body and the blade from robot.geometry (/mowbite_geometry on bridge/params): not settable, the node's
+    parameters, the stored ones, an area's and a request's own don't count; none yet or none readable: nothing planned,
+    said why; a new version: planned with it, the plans with the values before not taken."""
+    os.makedirs(tmp_path / 'data' / 'planner')
+    with open(tmp_path / 'data' / 'planner' / 'mowbite_planner_settings.json', 'w') as f:
+        json.dump({'robot_width': 0.9, 'blade_ahead': 0.4, 'turn_radius': 0.3}, f)
+    node = make(None, robot_width=0.6, robot_front=0.7, robot_rear=0.2, blade_ahead=0.1)
+    assert 'parameters not counting here (from robot.geometry (/mowbite_geometry)): robot_width, robot_front, ' \
+        'robot_rear, blade_ahead' in [m for _, m in node.get_logger().lines]
+    send_map(node, the_map())
+    none = 'no dimensions of the mower yet (robot.geometry (/mowbite_geometry) on bridge/params)'
+    assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] == (-32602, none)
+    assert plan_area(node).message == 'area a: ' + none
+    assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).message == 'planning the transit failed: ' + none
+    plain = PlanCoverage.Request(boundary=polygon(GARDEN))
+    assert node.plan(GARDEN, [], node.values(), {})[2] == none
+    assert not planned.calls and node.core.current.base.robot_width is None and plain
+    got, _ = rpc(node, 'planner.settings', None, 'r2')
+    for name in os_module.GEOMETRY_KEYS:
+        assert got['settings'][name]['settable'] is False, name
+        assert got['settings'][name]['from'] == 'robot.geometry (/mowbite_geometry)', name
+    assert rpc(node, 'planner.settings.set', {'robot_width': 0.5, 'turn_radius': 0.4}, 'r3')[1] == (
+        -32602, 'not settable here: robot_width (from robot.geometry (/mowbite_geometry))')
+    geometry(node)
+    current = node.core.current
+    assert (current.base.robot_width, current.base.robot_front, current.base.robot_rear, current.base.robot_outline,
+            current.mower_width, current.base.blade_ahead, current.base.turn_radius) == (
+        0.47, 0.6, 0.12, None, 0.22, 0.23, 0.3)
+    got, _ = rpc(node, 'planner.settings', None, 'r4')
+    assert got['settings']['robot_width']['value'] == 0.47 and got['settings']['robot_outline']['value'] is None
+    with open(tmp_path / 'data' / 'planner' / 'mowbite_planner_settings.json') as f:
+        assert json.load(f) == {'robot_width': 0.9, 'blade_ahead': 0.4, 'turn_radius': 0.3}  # (as it was)
+    send_map(node, the_map(planner={'robot_width': 0.3, 'robot_front': 0.3, 'robot_rear': 0.1, 'mower_width': 0.4}))
+    first = plan_area(node)
+    assert first.success and (planned.config().robot_width, planned.config().mower_width) == (0.47, 0.22)
+    assert got['settings']['body_fit']['settable'] is False and got['settings']['robot_front_width']['ignored']
+    send_map(node, the_map(planner={'body_fit': False, 'robot_front_width': 0.1}))
+    assert plan_area(node).success and planned.config().body_fit is True
+    assert planned.config().robot_front_width is None
+    assert rpc(node, 'planner.area.set', {'area_id': 'a', 'settings': {'blade_ahead': 0.1}}, 'r5')[1] == (
+        -32602, 'not settings an area can have: blade_ahead')
+    bad = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), overrides=[override('robot_width', 0.3)])
+    assert bad.message == 'bad override: robot_width from robot.geometry (/mowbite_geometry) here'
+    assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2)).success
+    assert node.transit_config(node.values()).robot_width == 0.47
+    # (latched again: nothing new; a new version: planned with it, the plan before not taken)
+    geometry(node)
+    assert plan_area(node).message.startswith('area a, kept from before: ')
+    geometry(node, version=1, robot_outline=[[0.6, 0.2], [-0.12, 0.235], [-0.12, -0.235], [0.6, -0.2]])
+    assert node.core.current.base.robot_outline == ((0.6, 0.2), (-0.12, 0.235), (-0.12, -0.235), (0.6, -0.2))
+    again = plan_area(node)
+    assert again.message.startswith('area a, planned: ') and planned.config().robot_outline is not None
+    assert len(node.core.plans) == 2
+    # (one the settings don't go with, or not readable: nothing planned, said why)
+    geometry(node, version=2, blade_ahead=1.2)
+    assert node.core.current.base.robot_outline is not None
+    res = plan_area(node)
+    assert not res.success and "the mower's dimensions (version 2) don't go with the planner's settings" in res.message
+    node._on_params(String(data=json.dumps({'node': '/mowbite_geometry', 'params': {'version': 3}})))
+    assert "the mower's dimensions not readable" in plan_area(node).message
+    assert "the mower's dimensions not readable" in transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).message
+    geometry(node, version=4)
+    assert plan_area(node).success
+    # (the settings go with the new ones once they're changed; the moment they're taken nothing is planned)
+    assert rpc(node, 'planner.settings.set', {'lane_spacing_max': 0.2}, 'r6')[1] is None
+    geometry(node, version=5, mower_width=0.18)
+    assert "don't go with the planner's settings: lane_spacing_max" in plan_area(node).message
+    assert rpc(node, 'planner.settings.set', {'lane_spacing_max': None}, 'r7')[1] is None
+    assert plan_area(node).success and planned.config().mower_width == 0.18
+    node.geometry, node.geometry_why = (6, dict(node.geometry[1], robot_width=0.5)), ''  # (as _on_geometry, before)
+    assert plan_area(node).message == "area a: the mower's dimensions (version 6) not taken yet"
+    # (without a map: in the worker, with the body)
+    node.core.map = None
+    threads = []
+    real = node_module.plan_coverage
+
+    def where(*args, **kw):
+        threads.append(threading.current_thread().name)
+        return real(*args, **kw)
+    node_module.plan_coverage = where
+    try:
+        geometry(node, version=6, robot_width=0.5)
+        assert plan_area(node).success and threads == ['planner worker'] and planned.config().robot_width == 0.5
+    finally:
+        node_module.plan_coverage = real
+
+
+@fake_only
+def test_margins_no_less_than_the_floors(make, planned, tmp_path):
+    """edge_margin, obstacle_margin and spin_margin no less than FLOORS (the Tron's, G6): less not settable, a stored
+    one less the floor, an area's, an obstacle's and a transit's own no less."""
+    os.makedirs(tmp_path / 'data' / 'planner')
+    with open(tmp_path / 'data' / 'planner' / 'mowbite_planner_settings.json', 'w') as f:
+        json.dump({'spin_margin': 0.0, 'edge_margin': 0.08}, f)
+    node = make(edge_margin=0.01)
+    base = node.core.current.base
+    assert (base.edge_margin, base.obstacle_margin, base.spin_margin) == (0.08, 0.1, 0.05)
+    got, _ = rpc(node, 'planner.settings')
+    assert {n: got['settings'][n]['min'] for n in os_module.FLOORS} == os_module.FLOORS
+    assert got['settings']['edge_margin']['max'] == 1.0
+    assert rpc(node, 'planner.settings.set', {'spin_margin': 0.0}, 'r2')[1] == (
+        -32602, 'spin_margin 0.05 m at least here, got 0.0')
+    assert rpc(node, 'planner.settings.set', {'obstacle_margin': 0.2}, 'r3')[1] is None
+    data = the_map(planner={'edge_margin': 0.0, 'spin_margin': 0.01})
+    data['areas'][1]['properties']['margin'] = 0.02
+    send_map(node, data)
+    plan_area(node)
+    cfg = planned.config()
+    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.05, 0.2, 0.05)
+    assert list(planned.calls[-1][0][7]) == [0.1]
+    over = [override('edge_margin', 0.0), override('obstacle_margin', 0.03), override('spin_margin', 0.0)]
+    cfg = node.transit_config(node.values(over))
+    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.08, 0.2, 0.05)  # (the settings count)
+    assert node.transit_config(node.values([override('edge_margin', 0.3)])).edge_margin == 0.3
+
+
+@fake_only
+def test_plan_transit_in_a_group_of_its_own(make):
+    """~/plan_transit in a callback group of its own (answered while ~/plan_coverage waits for its plan, see
+    test_plan_transit_while_a_plan_is_held), the other callbacks in the node's own; the executor runs both."""
+    node = make()
+    group = node.service_groups['~/plan_transit']
+    assert isinstance(group, os_module.MutuallyExclusiveCallbackGroup)
+    assert all(g is None for name, g in node.service_groups.items() if name != '~/plan_transit')
+    assert os_module.THREADS >= 2
+
+
+@pytest.mark.skipif(not REAL_ROS, reason='a real executor')
+def test_plan_transit_while_a_plan_is_held(make, monkeypatch):
+    """On MowBite OS' executor (main's) ~/plan_transit answers at once while a ~/plan_coverage waits for its plan (held
+    here till the transit is answered): mowbite_logic's next approach never waits for a planner.plan of another."""
+    from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+    node = make()
+    node._on_map(String(data=json.dumps(the_map())))
+    node._on_map_status(MapStatus(datum_state=MapStatus.DATUM_MATCH, mowing_allowed=True, reason=''))
+    held, go = threading.Event(), threading.Event()
+    real = core_module.plan_coverage
+
+    def holding(*args, **kw):
+        held.set()
+        go.wait(30.0)
+        return real(*args, **kw)
+    monkeypatch.setattr(core_module, 'plan_coverage', holding)
+    caller = rclpy.create_node('caller')
+    coverage = caller.create_client(PlanCoverage, '/mowbite_planner/plan_coverage')
+    transits = caller.create_client(PlanTransit, '/mowbite_planner/plan_transit')
+    executor = MultiThreadedExecutor(num_threads=os_module.THREADS)
+    executor.add_node(node)
+    spin = threading.Thread(target=executor.spin, daemon=True)
+    spin.start()
+    try:
+        assert coverage.wait_for_service(timeout_sec=10.0) and transits.wait_for_service(timeout_sec=10.0)
+        request = PlanCoverage.Request(boundary=polygon(GARDEN), obstacles=[polygon(BED)])
+        planning = coverage.call_async(request)
+        side = SingleThreadedExecutor()
+        side.add_node(caller)
+        assert held.wait(30.0)
+        t0 = time.monotonic()
+        answer = transits.call_async(PlanTransit.Request(
+            start=pose(1.0, 1.0, 0.0), goal=pose(6.5, 4.0, math.pi / 2), use_goal_heading=True,
+            drivable_areas=[polygon(GARDEN)], obstacles=[polygon(BED)]))
+        side.spin_until_future_complete(answer, timeout_sec=10.0)
+        took = time.monotonic() - t0
+        assert answer.done() and answer.result().success, answer.result()
+        assert took < 1.0 and not planning.done()
+        go.set()
+        side.spin_until_future_complete(planning, timeout_sec=60.0)
+        assert planning.result().success, planning.result().message
+    finally:
+        go.set()
+        executor.shutdown()
+        caller.destroy_node()
 
 
 def test_main_is_the_os_node(monkeypatch):
     """The executable mowbite_planner_os_node runs OsNode (mowbite_planner's main), the node mowbite_planner."""
     got = []
-    monkeypatch.setattr(os_module.base, 'main', lambda args=None, node_class=None: got.append(node_class))
-    os_module.main()
-    assert got == [OsNode]
+    monkeypatch.setattr(os_module.base, 'main', lambda args=None, node_class=None, executor_class=None: got.append(
+        (node_class, executor_class())))
+    if REAL_ROS:
+        rclpy.init()  # (an executor of the real rclpy needs it)
+    try:
+        os_module.main()
+        assert got[0][0] is OsNode and isinstance(got[0][1], os_module.MultiThreadedExecutor)
+        if not REAL_ROS:
+            assert got[0][1].num_threads == os_module.THREADS
+    finally:
+        if REAL_ROS:
+            got[0][1].shutdown()
+            rclpy.try_shutdown()
     with open(os.path.join(HERE, '..', 'setup.py')) as f:
         assert "'mowbite_planner_os_node = mowbite_planner_os.node:main'," in f.read()
 
 
 def test_with_the_real_ros(make):
     """Made and asked like on MowBite OS (with a sourced workspace: the real rclpy, mowbite_msgs and interfaces)."""
-    node = make(**{k: v for k, v in TRON.items() if k.startswith('robot_')})
+    node = make()
     assert node.get_name() == 'mowbite_planner' if REAL_ROS else node.name == 'mowbite_planner'
     assert sorted(node.core.methods) == CORE_METHODS
     res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
