@@ -7,8 +7,8 @@ answers: see the ROS 1 node's top (ros1/mowbite_planner_ros1/nodes/mowbite_plann
 An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or later:
   transport     it hands the RPC requests to call(self.methods, method, params, ...) (methods: name -> callback, its
                 own added) and sends the answer or the error back; asked_id() is set from REQUEST.id for the worker's
-                waiting jobs. Codes: INVALID_PARAMS (a PlanningError: the caller's mistake), INTERNAL, SUPERSEDED,
-                METHOD_NOT_FOUND
+                waiting jobs. Codes: INVALID_PARAMS (a PlanningError: the caller's mistake; its code where it has one),
+                INTERNAL, SUPERSEDED, METHOD_NOT_FOUND
   publish       publish(topic, payload, retain): the progress (PROGRESS_TOPIC) out to whoever shows it
   map           set_map(text) with every map (OpenMower's JSON), replace_map(data) writes one back
                 (planner.area.set), map_unusable(): why the map can't be planned now ('' when it can), plan_map(data):
@@ -433,9 +433,9 @@ def call(methods, method, params, loginfo=log.info, logerr=log.error):
         if not isinstance(params, dict):
             raise PlanningError('params must be an object (by name)')
         return json.dumps(methods[method](params), allow_nan=False), None
-    except PlanningError as e:
+    except PlanningError as e:  # (with a code of its own, another node's: that one)
         loginfo('MowBite Planner: %s: %s', method, e)
-        return None, (INVALID_PARAMS, str(e))
+        return None, (getattr(e, 'code', None) or INVALID_PARAMS, str(e))
     except Superseded as e:
         loginfo('MowBite Planner: %s: %s', method, e)
         return None, (SUPERSEDED, str(e))
@@ -1612,19 +1612,19 @@ def mowing_time(path):
     return sum(runs) if runs else None
 
 
-def run_calib(path, interim=False):
-    """mowbite_planner.calib on the recording at path in a process of its own (niced, CALIB_EVALUATE s at most): its
-    result, else {'error': why}."""
+def run_calib(path, interim=False, timeout=CALIB_EVALUATE):
+    """mowbite_planner.calib on the recording at path in a process of its own (niced, timeout s at most): its result,
+    else {'error': why}."""
     command = [sys.executable, '-m', 'mowbite_planner.calib'] + (['--interim'] if interim else []) + [path]
     if shutil.which('nice'):
         command = ['nice', '-n', str(CALIB_NICE)] + command
     roots = [os.path.dirname(p) for p in mowbite_planner.__path__ if os.path.exists(os.path.join(p, 'calib.py'))]
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(roots + [os.environ.get('PYTHONPATH', '')]).rstrip(os.pathsep))
     try:
-        done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=CALIB_EVALUATE,
+        done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
                               env=env)
     except subprocess.TimeoutExpired:
-        return {'error': 'the evaluation took over %.0f s' % CALIB_EVALUATE}
+        return {'error': 'the evaluation took over %.0f s' % timeout}
     except OSError as e:
         return {'error': 'no evaluation: %s' % e}
     try:

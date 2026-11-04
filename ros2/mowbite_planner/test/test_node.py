@@ -35,6 +35,7 @@ from std_srvs.srv import Trigger  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
 from mowbite_planner import node as node_module  # noqa: E402
+from mowbite_planner.config import PlanningError  # noqa: E402
 from mowbite_planner.mathutil import angle_diff, quaternion_to_yaw  # noqa: E402
 from mowbite_planner.node import MowbitePlannerNode, float32_warnings, pairs, parse_polygon  # noqa: E402
 from stubplan import Spy  # noqa: E402
@@ -540,8 +541,13 @@ class Robot(MowbitePlannerNode):
     defaults = {'turn_radius': 0.35}
     cannot = {}
     unusable = ''
+    refuse = None
 
     def replace_map(self, data, based_on):
+        if self.refuse:  # (as another node refuses it, its code)
+            e = PlanningError(self.refuse[1])
+            e.code = self.refuse[0]
+            raise e
         self.written = (data, based_on)
         give(self, '~/map', json.dumps(data))
 
@@ -590,6 +596,9 @@ def test_area_set_one_place_for_each_value(make):
     clean = node.core.plan_map(node.core.current_map())
     assert clean['areas'][0]['properties']['planner'] == {'fill_pattern': 'concentric'}
     assert node.core.current_map()['areas'][0]['properties']['planner']['perimeter_passes'] == -1
+    node.refuse = (-32001, 'the map changed meanwhile')
+    assert rpc(node, 'planner.area.set', {'area_id': 'a', 'settings': {'angle': 0.1}}, 'r6')[1] == (
+        -32001, 'the map changed meanwhile')
 
 
 @fake_only
