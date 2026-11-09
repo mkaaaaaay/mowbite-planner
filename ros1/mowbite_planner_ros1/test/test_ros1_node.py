@@ -176,7 +176,7 @@ def install():
 rospy, node_module, Request, Polygon, Point32 = install()
 
 
-from mowbite_planner import calibread, core, mqtt_service  # noqa: E402
+from mowbite_planner import calibread, core, mqtt_service, progress  # noqa: E402
 import calibsim  # noqa: E402
 from stubplan import Spy  # noqa: E402
 
@@ -1976,6 +1976,67 @@ def test_worker_joins_moves_up_and_supersedes():
     assert got['ahead a'] == ('a', False) and got['asked a'] == ('a', True) and got['view 2'] == ('d', False)
 
 
+def test_worker_stops_planning_ahead():
+    """A job planning ahead (AHEAD) stops at its next step once a MOWER or ASKED job waits, or once what it plans changed
+    (stale), and runs again in its place: who waits for it gets the one result. Not stopped: by an AFTER_MOW job, by
+    the same job asked for again (it's ASKED then), MOWER, ASKED and AFTER_MOW jobs."""
+    worker = core.Worker()
+    stopped, runs, order, got, threads = [], [], [], {}, []
+    worker.stopped = lambda job, why: stopped.append((job.area_id, why))
+
+    def long(name, go):
+        runs.append(name)
+        while not go.is_set():
+            progress.check()
+            time.sleep(0.01)
+        return name
+
+    def ask(key, urgency, fn, *args, **what):
+        threads.append(threading.Thread(target=lambda: got.__setitem__(key, worker.submit(urgency, fn, *args,
+                                                                                          **what))))
+        threads[-1].start()
+        time.sleep(0.2)
+
+    def done(go):
+        go.set()
+        for t in threads:
+            t.join(30)
+        threads.clear()
+
+    go = threading.Event()
+    ask('a', core.AHEAD, long, 'a', go, area_id='a', same='a')
+    ask('after', core.AFTER_MOW, order.append, 'after the mow')
+    ask('a asked', node_module.ASKED, long, 'x', go, area_id='a', same='a')
+    worker.stale()
+    time.sleep(0.2)
+    assert stopped == [] and runs == ['a']
+    done(go)
+    assert got['a'] == ('a', False) and got['a asked'] == ('a', True) and order == ['after the mow']
+    for urgency in (node_module.MOWER, node_module.ASKED, core.AFTER_MOW):
+        go = threading.Event()
+        ask(urgency, urgency, long, urgency, go)
+        worker.stale()
+        ask('ahead', core.AHEAD, order.append, 'ahead')
+        time.sleep(0.2)
+        assert stopped == [] and runs[-1] == urgency
+        done(go)
+    runs.clear()
+    for urgency, why in ((node_module.MOWER, 'a request waits'), (node_module.ASKED, 'a request waits'),
+                         (None, 'the map or the settings changed')):
+        go = threading.Event()
+        ask('b', core.AHEAD, long, 'b', go, area_id='b', same='b', rid='r1')
+        if urgency is None:
+            worker.stale()
+            time.sleep(0.2)
+        else:
+            ask('first', urgency, order.append, urgency)
+        assert stopped[-1] == ('b', why) and runs[-2:] == ['b', 'b']
+        assert worker.running.area_id == 'b' and worker.waiting() == (0, [])
+        done(go)
+        assert got['b'] == ('b', False)
+    assert order[-2:] == [node_module.MOWER, node_module.ASKED] and len(stopped) == 3
+
+
 def test_queue_over_rpc(planner, stub_planner, monkeypatch):
     """planner.plan's ahead and slot over RPC: the same request joins the one planned (kept), a request with a slot
     still waiting gets SUPERSEDED, the waiting ones in the progress (asked before ahead, their RPC ids), none at the
@@ -2021,7 +2082,8 @@ def test_queue_over_rpc(planner, stub_planner, monkeypatch):
 
 
 def test_quick_rpcs_answer_while_it_plans(planner, stub_planner, monkeypatch):
-    """While a planning runs, planner.settings and planner.log answer at once; planner.plan once it's planned."""
+    """While a planning runs, planner.settings, .settings.set, .log and every other method not on a thread of its own
+    (BACKGROUND: they wait for the worker or another node) answer at once; planner.plan once it's planned."""
     send_map(the_map())
     go, began = threading.Event(), threading.Event()
 
@@ -2039,6 +2101,11 @@ def test_quick_rpcs_answer_while_it_plans(planner, stub_planner, monkeypatch):
     settings, error = rpc('planner.settings')
     assert error is None and 'turn_radius' in settings['settings']
     assert rpc('planner.log', {'limit': 1})[1] is None and time.time() - t0 < 5.0
+    assert rpc('planner.settings.set', {'turn_radius': 0.3})[1] is None and time.time() - t0 < 5.0
+    for method in sorted(set(planner.methods) - set(node_module.BACKGROUND)):
+        t0 = time.time()
+        rpc(method, {})
+        assert len(answers()) == 1 and time.time() - t0 < 5.0, method
     go.set()
     for t in threading.enumerate():
         if t.name == 'rpc planner.plan':
@@ -2124,6 +2191,81 @@ def test_progress_of_a_failed_planning(planner, monkeypatch):
     assert rpc('planner.plan', {'area_id': 'a'})[1][1] == 'no lanes fit'
     last = progress_messages()[-1]
     assert last['running'] is False and last['error'] == 'no lanes fit' and last['stage'] != 'done'
+
+
+def test_planning_ahead_stopped(planner, stub_planner, monkeypatch):
+    """Planning ahead stops for a request over RPC (or mower_logic's) and once the map or the settings change: its
+    progress ends without an error, nothing of it kept (no plan, no no, no time), and it's planned again after. The
+    request's planning runs, the map changing doesn't stop it."""
+    second = area('b', [(0, 12), (8, 12), (8, 18), (0, 18)], name='Back', type='mow')
+    send_map(the_map(areas=[second]))
+    calls, began, go, held = [], threading.Event(), threading.Event(), [1]
+
+    def slow(*args, **kw):
+        calls.append(args[0])
+        if held[0]:  # (the first one of each part till go or it's stopped)
+            held[0] -= 1
+            began.set()
+            while not go.is_set():
+                progress.check()
+                time.sleep(0.01)
+        return stub_planner(*args, **kw)
+
+    def again():
+        calls.clear()
+        held[0], rospy.log[:] = 1, []
+        began.clear()
+        go.clear()
+        planner.plans.clear()
+        shutil.rmtree(planner.plans_dir)
+
+    monkeypatch.setattr(core, 'plan_coverage', slow)
+    rospy.published.clear()
+    ahead = threading.Thread(target=planner.plan_ahead)
+    ahead.start()
+    assert began.wait(30)
+    first = progress_messages()[-1]
+    rospy.subscribers['/xbot/rpc/request'](node_module.RpcRequest(method='planner.plan',
+                                                                  params=json.dumps({'area_id': 'b'}), id='b'))
+    for t in threading.enumerate():
+        if t.name == 'rpc planner.plan':
+            t.join(60)
+    ahead.join(60)
+    assert [(topic, m.id) for topic, m in answers()] == [('/xbot/rpc/response', 'b')]
+    assert not json.loads(answers()[0][1].result)['kept']
+    assert len(calls) == 3 and calls[0] == calls[2] != calls[1]
+    assert any('planning a ahead stopped (a request waits), it waits again' in line for _, line in rospy.log)
+    assert any('2 areas planned ahead' in line for _, line in rospy.log)
+    seen = [(m['area_id'], m['running'], m['started'], m['error'], m['stage']) for m in progress_messages()]
+    ended = seen.index(('a', False, first['started'], None, first['stage']))
+    assert ended and all(m[:2] == ('a', True) for m in seen[:ended])
+    assert [m for m in seen[ended:] if m != seen[ended]][0][0] == 'b'  # (its begin may be within the second)
+    assert seen[-1][:2] == ('a', False) and seen[-1][3:] == (None, 'done')
+    assert planner.refused == {} and len(planner.plans) == 2 and set(planner.progress.took) == {'a', 'b'}
+    # stopped once the settings change, not for the same ones again or leftovers_auto alone
+    for changes, stops in (({'turn_radius': 0.3}, True), ({'turn_radius': 0.3}, False),
+                           ({'leftovers_auto': True}, False)):
+        again()
+        job = threading.Thread(target=planner.worker.run, args=(core.AHEAD, planner.rpc_plan, {'area_id': 'a'}))
+        job.start()
+        assert began.wait(30)
+        assert rpc('planner.settings.set', changes)[1] is None
+        time.sleep(0.3)
+        go.set()
+        job.join(60)
+        assert len(calls) == 1 + stops
+        assert any('planning a plan ahead stopped (the map or the settings changed)' in line
+                   for _, line in rospy.log) == stops
+    # the map changing doesn't stop a request's planning
+    again()
+    asked = threading.Thread(target=rpc_waited, args=('planner.plan', {'area_id': 'a'}))
+    asked.start()
+    assert began.wait(30)
+    send_map(the_map())
+    time.sleep(0.3)
+    go.set()
+    asked.join(60)
+    assert len(calls) == 1
 
 
 def test_a_no_kept(planner, monkeypatch):

@@ -7,12 +7,9 @@ it needs). The settings and what a plan is made of are in config.py.
 """
 
 import dataclasses
-import multiprocessing
-import threading
 import time
 import types
-from concurrent.futures import Future, ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
+from concurrent.futures import Future
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Polygon
@@ -28,7 +25,8 @@ from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subt
 from .handover import _blade_on, _compact, _lengths, _origins, _ring_ways, _stats, _warn
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
-from .progress import Progress, Report
+from .pool import _pool, later, result, set_workers, stops_pool  # noqa: F401 (planner.set_workers as before)
+from .progress import Progress, Report, check
 from .levels import Rings, narrow_left, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
@@ -48,32 +46,6 @@ def _point(p: Optional[Sequence[float]]) -> Optional[XY]:
     return (float(p[0]), float(p[1])) if p is not None and len(p) >= 2 else None
 
 
-# set_workers: processes of their own plan (an area's plans round its slots by the edge at once, the plans of callers on
-# threads of their own at once), the same plans as in this one. Started fresh (spawn), not forked from a process with
-# threads of its own
-_WORKERS = 0
-_POOL: Optional[ProcessPoolExecutor] = None
-_POOL_LOCK = threading.Lock()
-
-
-def set_workers(n: int) -> None:
-    """Plans in up to n processes of their own from now on, 0 (the default): all in this one."""
-    global _WORKERS, _POOL
-    with _POOL_LOCK:
-        if _POOL is not None and int(n) != _WORKERS:
-            _POOL.shutdown()  # (it ends what it's at: not waiting, Python 3.8 complains when the pipes close)
-            _POOL = None
-        _WORKERS = max(0, int(n))
-
-
-def _pool() -> Optional[ProcessPoolExecutor]:
-    global _POOL
-    with _POOL_LOCK:
-        if _POOL is None and _WORKERS > 0:
-            _POOL = ProcessPoolExecutor(_WORKERS, mp_context=multiprocessing.get_context('spawn'))
-        return _POOL
-
-
 def _planned(args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
     """_plan_coverage (in a process of the pool): the plan and its probe as _plan_coverage left it. completed: with
     mop_up (_completed)."""
@@ -88,30 +60,14 @@ def _planned(args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
 
 def _later(args: tuple, kw: Dict[str, Any]) -> 'Future':
     """_planned in a process of the pool where there's one (a future of it), else at once."""
-    pool = _pool()
-    if pool is not None:
-        try:
-            return pool.submit(_planned, args, kw)
-        except (BrokenProcessPool, RuntimeError):  # (one of them died, or it's shut down: in this one)
-            set_workers(_WORKERS)
-    done: Future = Future()
-    try:
-        done.set_result(_planned(args, kw))
-    except BaseException as e:  # noqa: BLE001 - handed on by result()
-        done.set_exception(e)
-    return done
+    return later(_planned, args, kw)
 
 
 def _result(future: 'Future', args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
-    try:
-        return future.result()
-    except BrokenProcessPool:  # (a process of the pool died, say out of memory: in this one, the pool anew)
-        with _POOL_LOCK:
-            global _POOL
-            _POOL = None
-        return _planned(args, kw)
+    return result(future, _planned, args, kw)
 
 
+@stops_pool
 def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
                   config: Optional[PlannerConfig] = None, start: Optional[Sequence[float]] = None,
                   end: Optional[Sequence[float]] = None,
@@ -130,7 +86,8 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     the plan's sections itself, MowBite OS: whether it gets to the pose facing its heading from came_from, the end of
     the section before; None for the first): every section starts where it does, see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
     see backing.py; without the body set forwards, said in the warnings. back_out (drive forward): out of a dead end
-    where a section ends backing up, see starts.py (without arrives backed_out)."""
+    where a section ends backing up, see starts.py (without arrives backed_out). Stopped from outside
+    (progress.stoppable): Stopped at its next step, the pool's processes at its plans ended."""
     cfg = config or PlannerConfig()
     cfg.validate()
     if cfg.back_out and cfg.drive == 'forward':
@@ -393,6 +350,7 @@ class _Timer:
         now = time.perf_counter()
         self.timings[key] = round(now - self.lap, 4)
         self.lap = now
+        check()
 
 
 def _recorded_lines(cfg: PlannerConfig, outlines, away_from) -> Tuple[list, list]:

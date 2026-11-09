@@ -9,6 +9,7 @@ from .config import PERIMETER, SWEPT_PIECE, SWEPT_SLACK, TRANSIT, TURN, XY, Cove
 from .footprint import BLADE_SLACK, SPIN, SPIN_BACK, Blade, Footprint
 from .geometry import union
 from .mathutil import Pose2D, normalize_angle
+from .progress import check
 
 
 # blade's answers kept (the same poses again, to the bit: the same geometry; the safety net and the completion stage
@@ -20,6 +21,7 @@ _blades: Dict[tuple, Any] = {}
 def blade(cfg: PlannerConfig, *runs: Sequence[Pose2D], whole: bool = False):
     """Where the blade mows driving poses (each run of them). whole: the whole path (quicker in pieces, see
     swept_area)."""
+    check()  # (a planning stopped from outside ends here, progress.stoppable)
     half, ahead, off = 0.5 * cfg.mower_width, cfg.blade_ahead, cfg.blade_offset
     key = (half, ahead, off, whole, tuple(tuple(poses) for poses in runs))
     got = _blades.get(key)

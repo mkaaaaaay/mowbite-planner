@@ -37,6 +37,8 @@ from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner import export, lead as leadin, spacing  # noqa: E402
 from mowbite_planner.lanes import _lane_cost, scan_lanes, split_cells  # noqa: E402
 from mowbite_planner.planner import _plan_coverage, plan_footprint  # noqa: E402
+from mowbite_planner.progress import Stopped, stoppable  # noqa: E402
+from mowbite_planner import pool  # noqa: E402
 from mowbite_planner.assemble import LaneKit, _drive_way  # noqa: E402
 from mowbite_planner.stripes import Run, Way  # noqa: E402
 from mowbite_planner.objective import Cost, counted  # noqa: E402
@@ -2206,6 +2208,43 @@ def test_workers_plan_the_same():
     for one, other in zip(together, alone):
         assert [(p.x, p.y, p.yaw) for p in one.poses] == [(p.x, p.y, p.yaw) for p in other.poses]
         assert one.stats['edge_slots'] == other.stats['edge_slots'] and one.stats['chosen'] == other.stats['chosen']
+
+
+def test_stopped_planning():
+    """A planning stopped from outside (progress.stoppable) ends with Stopped at its next step, in this thread and with
+    processes of its own (those at its plans ended); the same planned after is the plan planned without it."""
+    args = (rect(0, 0, 10, 8), [rect(0.1, 3, 1.3, 4)], PlannerConfig(**MOWER, **NX60I, lane_spacing_mode='auto'))
+    alone = plan_coverage(*args, start=(5, 1, 0.0))
+    looks = []
+
+    def stop():
+        looks.append(time.perf_counter())
+        return len(looks) > 3
+
+    with stoppable(stop), pytest.raises(Stopped):
+        plan_coverage(*args, start=(5, 1, 0.0))
+    assert len(looks) in (4, 5)  # (a plan in this thread hands it on in its future: one look more, the next one's)
+    processes = []
+
+    def handed():
+        if pool._HANDED and not processes:
+            processes.extend(pool._POOL._processes.values())
+        return bool(pool._HANDED)
+
+    try:
+        planner.set_workers(2)
+        with stoppable(handed), pytest.raises(Stopped):
+            plan_coverage(*args, start=(5, 1, 0.0))
+        for process in processes:
+            process.join(10)
+        assert processes and not any(p.is_alive() for p in processes) and pool._POOL is None
+        again = [plan_coverage(*args, start=(5, 1, 0.0))]
+    finally:
+        planner.set_workers(0)
+    again.append(plan_coverage(*args, start=(5, 1, 0.0)))
+    for plan in again:
+        assert [(p.x, p.y, p.yaw) for p in plan.poses] == [(p.x, p.y, p.yaw) for p in alone.poses]
+        assert plan.stats['chosen'] == alone.stats['chosen']
 
 
 def test_body_rounded_corners():

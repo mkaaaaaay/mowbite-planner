@@ -64,6 +64,7 @@ from .mapfile import _points, area_settings, match_area, mow_areas, openmower_se
 from .mathutil import Pose2D
 from .mqtt_service import PlannerService
 from .planner import plan_coverage, plan_footprint, set_workers
+from .progress import Stopped, stoppable
 from .remote import canon, code_version, plan_key, request_json
 from .report import drive_time, track_mowed
 
@@ -228,6 +229,7 @@ class _Job:
     def __init__(self, urgency, order, fn, args, job, area_id, same, waiter):
         self.urgency, self.order, self.fn, self.args = urgency, order, fn, args
         self.job, self.area_id, self.same, self.waiters = job, area_id, same, [waiter]
+        self.stop = None  # (running AHEAD: why it's stopped)
 
 
 class Worker:
@@ -235,13 +237,16 @@ class Worker:
     .leftovers and .drive, mower_logic's plan_path, planning ahead, the checks after a mow. Two threads at one shape can
     crash GEOS (shapely lets go of the GIL, a prepared geometry builds its indexes when first asked), and the other RPCs
     answer meanwhile. The most urgent job first (MOWER ... AHEAD), of those the one asked for first; a job a job asks for
-    runs at once. changed(): the jobs waiting changed (called outside the worker's lock)."""
+    runs at once. A job planning ahead (AHEAD) stops once a MOWER or ASKED one waits, or once what it plans changed
+    (stale), and waits again in its place (progress.stoppable: its planning ends at its next step). changed(): the jobs
+    waiting changed (called outside the worker's lock), stopped(job, why): one stopped."""
 
     def __init__(self):
         self.cond = threading.Condition()
         self.jobs, self.running = [], None
         self.order = itertools.count()
         self.changed = lambda: None
+        self.stopped = lambda job, why: None
         self.thread = threading.Thread(target=self.serve, name='planner worker', daemon=True)
         self.thread.start()
 
@@ -270,11 +275,22 @@ class Worker:
                 found.urgency = min(found.urgency, urgency)
             else:
                 self.jobs.append(_Job(urgency, next(self.order), fn, args, job, area_id, same, (future, rid, slot)))
+            if any(j.urgency < AFTER_MOW for j in self.jobs):
+                self.stop_ahead('a request waits')
             self.cond.notify()
         for waiter in gone:
             waiter[0].set_exception(Superseded('superseded by a newer request'))
         self.changed()
         return future.result(), found is not None
+
+    def stale(self):
+        """The map or the settings changed: a planning ahead that runs stops (it plans what was)."""
+        with self.cond:
+            self.stop_ahead('the map or the settings changed')
+
+    def stop_ahead(self, why):
+        if self.running is not None and self.running.urgency == AHEAD and self.running.stop is None:
+            self.running.stop = why
 
     def waiting(self):
         """(how many jobs wait, the first WAITING_SHOWN of them in the order they'll run: [{area_id, job, rank,
@@ -296,12 +312,19 @@ class Worker:
             self.changed()
             result, error = None, None
             try:
-                result = job.fn(*job.args)
+                with stoppable(lambda: job.stop is not None):
+                    result = job.fn(*job.args)
             except BaseException as e:  # noqa: BLE001 - handed to whoever waits
                 error = e
             with self.cond:
                 self.running = None
+                why, job.stop = job.stop, None
+                if isinstance(error, Stopped) and why is not None:  # (waits again in its place)
+                    self.jobs.append(job)
                 waiters = list(job.waiters)
+            if isinstance(error, Stopped) and why is not None:
+                self.stopped(job, why)
+                continue
             for future, _, _ in waiters:
                 if error is not None:
                     future.set_exception(error)
@@ -357,8 +380,8 @@ class PlanProgress:
                 return
             self.stage, self.part = stage, max(self.part, float(done) / max(1, of))
 
-    def end(self, error=None):
-        """It ended, error: why it failed."""
+    def end(self, error=None, stopped=False):
+        """It ended, error: why it failed; stopped: from outside (no error, its time not kept)."""
         took = None
         with self.lock:
             shown, self.unshown = not self.unshown, False
@@ -366,7 +389,7 @@ class PlanProgress:
                 return
             if shown:
                 self.running, self.error, self.ended = False, error, time.time()
-                if error is None:
+                if error is None and not stopped:
                     self.took.pop(self.area, None)
                     self.took[self.area] = self.ended - self.started
                     for old in list(self.took)[:max(0, len(self.took) - TOOK_AREAS)]:
@@ -509,6 +532,8 @@ class PlannerCore:
                                      self.logwarn,
                                      os.path.join(os.path.dirname(settings_file), TOOK_FILE) if settings_file else '')
         self.worker.changed = self.progress.queue_changed
+        self.worker.stopped = lambda job, why: self.loginfo('MowBite Planner: planning %s ahead stopped (%s), it waits '
+                                                            'again', job.area_id or 'a plan', why)
         self.launch_width = float(mower_width)
         self.launch = dict(settings or {})
         self.defaults = self.setup(self.launch_width, self.launch, {})
@@ -1053,10 +1078,13 @@ class PlannerCore:
                     stored[name] = value
             current = self.setup(self.launch_width, self.launch, stored)
             self.write_stored(current.stored)
+            # (leftovers_auto changes no plan, the rest of stored is in the others)
+            changed = current._replace(stored=None, leftovers_auto=None) != \
+                self.current._replace(stored=None, leftovers_auto=None)
             self.current = current
             self.armed = None  # (the leftovers were other settings')
         self.loginfo('MowBite Planner: settings %s', json.dumps(current.stored, sort_keys=True))
-        self.plan_ahead_later()
+        self.plan_ahead_later(changed)
         return self.rpc_settings()
 
     def check_floors(self, settings):
@@ -1414,8 +1442,11 @@ class PlannerCore:
         if changed:
             self.plan_ahead_later()
 
-    def plan_ahead_later(self):
-        """Every active mowing area planned ahead PLAN_AHEAD_DELAY s from now (from then on, after another change)."""
+    def plan_ahead_later(self, changed=True):
+        """Every active mowing area planned ahead PLAN_AHEAD_DELAY s from now (from then on, after another change).
+        changed: what's planned changed, a planning ahead that runs stops (Worker.stale)."""
+        if changed:
+            self.worker.stale()
         with self.ahead_lock:
             if self.ahead is not None:
                 self.ahead.cancel()
@@ -1556,6 +1587,9 @@ class PlannerCore:
                         got = (plan, 'house') if plan is not None else (plan_coverage(
                             *args, reach_over=reach_over, unmowed=unmowed, arrives=arrives,
                             progress=self.progress.step), 'mower')
+                    except Stopped:
+                        self.progress.end(stopped=True)
+                        raise
                     except Exception as e:
                         self.progress.end(str(e))
                         if isinstance(e, PlanningError):  # (a no from the request alone, never a crash)

@@ -152,6 +152,8 @@ waiting (the first WAITING_SHOWN of them in the order they'll run: [{area_id (nu
 drive, leftovers, mower, after_mow), rank (mower, asked, after_mow, ahead), ids (the RPC requests waiting for it, none
 for the node's own)}]), planned_on (mower, house), remote_why (why not on the house computer after all, null)}, also as
 the queue changes when nothing plans.
+A planning ahead (rank ahead) stops once a request of rank mower or asked waits, or once the map or the settings
+change: its message ends running false without an error, nothing of it kept, and it waits again in its place.
 
 remote_planning: plans (mower_logic's, planner.plan's, planned ahead; not the leftovers') are asked of a computer in
 the house first (mowbite_planner.house, see RemotePlanning): over the mower's own broker, where its hello says it plans
@@ -210,6 +212,7 @@ from mowbite_planner.core import (ASKED, EVENTS_TOPIC, FTC_PARAMS, LOG, METHOD_N
 from mowbite_planner.export import ANSWER_TOO_BIG, MAX_ANSWER, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.geometry import clean_polygon, polygonal, union
 from mowbite_planner.mapfile import area_job, margins_for, match_area
+from mowbite_planner.progress import check as stop_here
 from mowbite_planner.remote import (MAX_PACKED, PART, TOPIC, RemoteError, loads, plan_from, refused, stack,
                                     unpack)
 from mowbite_sim.simulate import MowerModel, evaluate, simulate
@@ -899,12 +902,14 @@ class RemotePlanning:
                 fetching = house['stack_match'] and now < self.started + REMOTE_CATCH_UP
                 if not (fetching or self.connected and now < self.connected + REMOTE_SETTLE):
                     return why
+                stop_here()
                 self.cond.wait(1.0)
 
     def ask(self, key, form, wait, step):
         """The house's plan for the request with key (remote.request_json's form): (the plan packed, '') or (None, why
         not: no word from the house for REMOTE_STALL s, none within wait s, its answer). step(stage, done, of): the
-        house's progress. PlanningError: the planner's no to it there."""
+        house's progress. PlanningError: the planner's no to it there. Stopped where the planning is stopped
+        (progress.stoppable)."""
         rid = uuid.uuid4().hex
         try:
             payload = json.dumps({'id': rid, 'key': key, 'code': self.code, 'stack': self.stack, 'wait_s': wait,
@@ -930,6 +935,7 @@ class RemotePlanning:
                             self.quiet = now + REMOTE_QUIET
                         return None, self.why or ('no word from it for %.0f s' % REMOTE_STALL if stalled else
                                                   'no plan from it within %.0f s' % wait)
+                    stop_here()
                     self.cond.wait(1.0)
         finally:
             with self.cond:

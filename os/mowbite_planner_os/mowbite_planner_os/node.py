@@ -567,7 +567,7 @@ class TransitCore(base.NodeCore):
         self.methods = {}
         self.follow()
 
-    def plan_ahead_later(self):
+    def plan_ahead_later(self, changed=True):
         pass
 
     def follow(self):

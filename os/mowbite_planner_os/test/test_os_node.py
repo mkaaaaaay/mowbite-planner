@@ -26,7 +26,7 @@ from std_msgs.msg import String  # noqa: E402
 import apicheck  # noqa: E402
 import calibsim  # noqa: E402
 import mowbite_planner  # noqa: E402
-from mowbite_planner import calibread  # noqa: E402
+from mowbite_planner import calibread, progress  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
 from test_contract import test_requires_met  # noqa: E402,F401  (on MowBite OS' Jazzy too)
 from mowbite_planner import node as node_module  # noqa: E402
@@ -288,6 +288,40 @@ def test_events_progress_and_finished_mows(make, planned):
     assert got['finished_mows'] == 1
     out = [m for m in node.publishers['bridge/publish'].published if m.topic == 'mowbite/planner/progress']
     assert out and all(m.retain for m in out) and json.loads(out[-1].payload)['area_id'] == 'a'
+
+
+@fake_only
+def test_planning_ahead_and_the_quick_rpcs(make, planned, monkeypatch):
+    """While it plans ahead planner.settings, .settings.set and .log answer at once over the bridge; mowbite_logic's
+    ~/plan_coverage stops it, it's planned after (masterplan 3.3, 04.11.)."""
+    node = make()
+    send_map(node, the_map())
+    began, go, held = threading.Event(), threading.Event(), [1]
+
+    def slow(*args, **kw):
+        if held[0]:
+            held[0] -= 1
+            began.set()
+            while not go.is_set():
+                progress.check()
+                time.sleep(0.01)
+        return planned(*args, **kw)
+
+    monkeypatch.setattr(core_module, 'plan_coverage', slow)
+    ahead = threading.Thread(target=node.core.plan_ahead)
+    ahead.start()
+    assert began.wait(30)
+    t0 = time.monotonic()
+    assert rpc(node, 'planner.settings', None, 's1', wait=5.0)[1] is None
+    assert rpc(node, 'planner.settings.set', {'turn_radius': node.core.current.base.turn_radius}, 's2', 5.0)[1] is None
+    lines, error = rpc(node, 'planner.log', {'limit': 50}, 's3', wait=5.0)
+    assert error is None and time.monotonic() - t0 < 5.0 and ahead.is_alive()
+    assert plan_area(node).success
+    ahead.join(60)
+    lines, _ = rpc(node, 'planner.log', {'limit': 50}, 's4')
+    said = [line['msg'] for line in lines['lines']]
+    assert any('planning a ahead stopped (a request waits), it waits again' in m for m in said)
+    assert any('1 areas planned ahead' in m for m in said)
 
 
 @fake_only

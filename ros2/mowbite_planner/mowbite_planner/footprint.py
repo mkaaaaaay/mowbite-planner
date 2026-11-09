@@ -13,6 +13,7 @@ from shapely.prepared import prep
 
 from .geometry import QUAD_SEGS, polygons as pieces
 from .mathutil import angle_diff, normalize_angle
+from .progress import check
 
 try:  # shapely 2 tests points without making a geometry of each and bodies all at once, much quicker
     import numpy
@@ -365,6 +366,7 @@ class Footprint:
         """fits_pose for each of the poses (with .x, .y, .yaw), on a turn between lanes (on_turn) spin_margin further
         off the edges. With shapely 2 the bodies of those not in a zone all at once (with shapely 1.7 the points in the
         zones, where numpy is there)."""
+        check()  # (a planning stopped from outside ends here, progress.stoppable)
         if on_turn is not False:
             turn = self._on_turn(poses, on_turn)
             if any(turn) and self.turning is not self:

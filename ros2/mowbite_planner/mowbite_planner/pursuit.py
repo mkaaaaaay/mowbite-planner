@@ -12,6 +12,7 @@ from shapely.prepared import prep
 
 from .config import XY
 from .mathutil import Pose2D, normalize_angle
+from .progress import check
 
 try:  # shapely 2 tests a point without making a geometry of it
     from shapely import contains_xy
@@ -100,6 +101,7 @@ class _Driver:
         """The next pose from p, on an arc turning the heading by the turn closest to want (TRACE_TURN apart, as far
         as the tightest turn) where it keeps inside and the body fits, and TRACE_AHEAD poses straight on fit too (else
         the first that fits only there)."""
+        check()  # (a planning stopped from outside ends here, progress.stoppable)
         turns = [want] + sorted(self.grid, key=lambda t: abs(t - want))
         nxt = [(p.x + TRACE_STEP * math.cos(p.yaw + 0.5 * t), p.y + TRACE_STEP * math.sin(p.yaw + 0.5 * t),
                 normalize_angle(p.yaw + t)) for t in turns]
