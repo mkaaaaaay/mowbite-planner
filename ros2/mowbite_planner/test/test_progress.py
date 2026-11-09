@@ -1,6 +1,9 @@
 """plan_coverage's progress: from angles to done, done never going back, of the same all along, the plan the same."""
 
+import json
+
 from mowbite_planner import PlannerConfig, plan_coverage
+from mowbite_planner import core
 from mowbite_planner.progress import STAGES, Progress
 from shapely.geometry import box
 
@@ -49,3 +52,27 @@ def test_progress_never_goes_back():
     p.at('spacing', 0)
     p.at('done', 9)
     assert seen == [('angles', 0, 4), ('spacing', 1, 4), ('spacing', 1, 4), ('done', 4, 4)]
+
+
+def test_took_kept_over_a_restart(tmp_path, monkeypatch):
+    """The time each area's last planning took is in took_file, a PlanProgress after it estimates with it; failed ones
+    not, only the latest TOOK_AREAS areas, a broken file none (said)."""
+    monkeypatch.setattr(core, 'TOOK_AREAS', 2)
+    path = str(tmp_path / core.TOOK_FILE)
+    sent, warned = [], []
+    p = core.PlanProgress(sent.append, took_file=path)
+    for area, error in (('a', None), ('b', 'no'), ('c', None), ('d', None)):
+        p.begin(area, 'k')
+        p.end(error)
+    with open(path) as f:
+        assert set(json.load(f)['took']) == {'c', 'd'}
+    again = core.PlanProgress(sent.append, took_file=path)
+    assert again.took == p.took
+    del sent[:]
+    again.begin('d', 'k2')
+    assert json.loads(sent[0])['estimate_s'] is not None
+    again.end()
+    with open(path, 'w') as f:
+        f.write('{"took": [1]}')
+    assert core.PlanProgress(sent.append, logwarn=lambda *a: warned.append(a), took_file=path).took == {}
+    assert warned and core.PlanProgress(sent.append).took == {}

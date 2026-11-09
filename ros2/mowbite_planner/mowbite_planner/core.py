@@ -20,8 +20,8 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
                 None: it drives what it's given;
                 arrives.key (JSON, else True) is part of the plans' keys; kept_plan's from_start: arrives.start (x, y,
                 yaw) the robot gets to the first section from (starts.py)
-  storage       the files it keeps: settings_file (next to it the angle steps, timing and the maps before), plans_dir,
-                history_dir (the robot's track, position_history)
+  storage       the files it keeps: settings_file (next to it the angle steps, timing, planning times and the maps
+                before), plans_dir, history_dir (the robot's track, position_history)
   capabilities  cannot: {setting: why} the robot can't have (shown ignored, not settable, the default counts; a planner
                 setting: an area's and a request's own neither),
                 given_by: {setting: where from} the robot gives itself, given(): their values (not settable, not
@@ -172,6 +172,10 @@ PROGRESS_TOPIC = 'mowbite/planner/progress'
 PROGRESS_EVERY = 1.0
 PROGRESS_OF = 1000
 PROGRESS_SLOW = 60.0
+# how long the last planning of each area took, kept over a restart (mowbite_planner_took.json next to the settings
+# file): the latest TOOK_AREAS areas
+TOOK_FILE = 'mowbite_planner_took.json'
+TOOK_AREAS = 64
 # planner.area.set: OpenMower's area properties (and MowBite's) that stand for a planner setting (see area_settings),
 # gone with the area's own value of that setting; the maps before kept
 OPENMOWER_PROPS = {'angle': 'angle', 'perimeter_passes': 'outline_count',
@@ -312,9 +316,10 @@ class PlanProgress:
     a long step runs in a process of its own. A planning of no area of the map (an outline asked for) isn't shown: the
     messages stay the last area's. waiting() (the worker's): what waits, in every message; when no area's planning runs
     a change of it is sent too (a while after it, if it's still changed then: a job begun at once isn't). planned_on:
-    where it's planned (mower, or house with remote_planning, see where), remote_why: why not on the house after all."""
+    where it's planned (mower, or house with remote_planning, see where), remote_why: why not on the house after all.
+    took_file: where the times the areas' last plannings took are kept ('': only in memory)."""
 
-    def __init__(self, publish, waiting=lambda: (0, []), logwarn=log.warning):
+    def __init__(self, publish, waiting=lambda: (0, []), logwarn=log.warning, took_file=''):
         self.publish, self.waiting, self.logwarn = publish, waiting, logwarn
         self.lock = threading.Lock()
         self.area, self.key, self.stage, self.done, self.running, self.sent = None, None, None, 0, False, 0.0
@@ -322,7 +327,8 @@ class PlanProgress:
         self.on, self.remote_why = 'mower', None
         self.told = (0, [])  # (the waiting jobs the last message had)
         self.later = None  # (the timer sending a change of them)
-        self.took = {}  # area id: s its last planning took
+        self.took_file, self.took_lock = took_file, threading.Lock()
+        self.took = self.read_took()  # area id: s its last planning took
 
     def begin(self, area_id, key):
         """A planning of area_id begins, key: the plan's."""
@@ -353,6 +359,7 @@ class PlanProgress:
 
     def end(self, error=None):
         """It ended, error: why it failed."""
+        took = None
         with self.lock:
             shown, self.unshown = not self.unshown, False
             if shown and not self.running:
@@ -360,11 +367,41 @@ class PlanProgress:
             if shown:
                 self.running, self.error, self.ended = False, error, time.time()
                 if error is None:
+                    self.took.pop(self.area, None)
                     self.took[self.area] = self.ended - self.started
+                    for old in list(self.took)[:max(0, len(self.took) - TOOK_AREAS)]:
+                        del self.took[old]
+                    took = dict(self.took)
                     self.stage, self.done = 'done', PROGRESS_OF
         if shown:
             self.send(at_once=True)
+        if took is not None:
+            self.write_took(took)
         self.queue_changed()  # (what waits now, where that wasn't told yet)
+
+    def read_took(self):
+        if not self.took_file:
+            return {}
+        try:
+            with open(self.took_file) as f:
+                took = json.load(f)['took']
+            return {str(a): float(s) for a, s in took.items() if float(s) > 0.0}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            self.logwarn('MowBite Planner: planning times not read (%s): %s', self.took_file, e)
+            return {}
+
+    def write_took(self, took):
+        if not self.took_file:
+            return
+        try:
+            with self.took_lock:
+                with open(self.took_file + '.tmp', 'w') as f:
+                    json.dump({'took': took}, f)
+                os.replace(self.took_file + '.tmp', self.took_file)
+        except OSError as e:
+            self.logwarn('MowBite Planner: planning times not kept (%s): %s', self.took_file, e)
 
     def tick(self):
         while self.running:
@@ -469,7 +506,8 @@ class PlannerCore:
         # (before anything hands it work)
         self.worker = Worker()
         self.progress = PlanProgress(lambda payload: self.publish(PROGRESS_TOPIC, payload, True), self.worker.waiting,
-                                     self.logwarn)
+                                     self.logwarn,
+                                     os.path.join(os.path.dirname(settings_file), TOOK_FILE) if settings_file else '')
         self.worker.changed = self.progress.queue_changed
         self.launch_width = float(mower_width)
         self.launch = dict(settings or {})

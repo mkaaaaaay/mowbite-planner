@@ -741,6 +741,24 @@ def test_events_and_progress(make):
 
 
 @fake_only
+def test_planning_time_over_a_restart(make, tmp_path):
+    """How long an area's last planning took is kept in data_dir/planner: the planner started again estimates its
+    next planning of that area with it."""
+    node = make()
+    send_map(node, the_map())
+    assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] is None
+    assert (tmp_path / 'planner' / core_module.TOOK_FILE).exists()
+    node.destroy_node()
+    again = make()
+    send_map(again, the_map())
+    assert set(again.core.progress.took) == {'a'}
+    assert rpc(again, 'planner.settings.set', {'turn_radius': 0.3})[1] is None
+    assert rpc(again, 'planner.plan', {'area_id': 'a'}, 'r2')[1] is None
+    shown = [json.loads(json.loads(m.data)['payload']) for m in again.publishers['~/publish'].published]
+    assert shown and all(m['estimate_s'] is not None for m in shown if m['area_id'] == 'a')
+
+
+@fake_only
 def test_armed_leftovers_with_none_here(make):
     """An area the armed leftovers have nothing in gets a plan without paths, a success: the robot's job goes on
     with the next area (like mower_logic with no paths)."""

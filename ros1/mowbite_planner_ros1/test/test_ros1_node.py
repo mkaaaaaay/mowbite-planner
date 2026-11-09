@@ -249,7 +249,8 @@ def planner():
     rospy.published.clear()
     rospy.registered.clear()
     rospy.messages.clear()
-    for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json', 'mowbite_planner_angle.json'):
+    for name in ('mowbite_planner_settings.json', 'mowbite_planner_timing.json', 'mowbite_planner_angle.json',
+                 'mowbite_planner_took.json'):
         try:
             os.remove(os.path.join(os.environ['ROS_HOME'], name))
         except FileNotFoundError:
