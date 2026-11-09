@@ -101,16 +101,17 @@ def geometry(node, **values):
 @pytest.fixture
 def make(tmp_path, monkeypatch):
     """OsNodes with data_dir in tmp_path, the Tron's body from robot.geometry (body None: none yet; else values over
-    the Tron's). Every message they sent on bridge/publish kept to the planner's part of the interface (AM6)."""
+    the Tron's), named node_name. Every message they sent on bridge/publish kept to the planner's part of the interface
+    (AM6)."""
     monkeypatch.setattr(core_module, 'PLAN_AHEAD_DELAY', 1e6)  # (planned ahead only where a test says so)
     monkeypatch.setattr(core_module, 'TRACK_WAIT', 0.0)
     if REAL_ROS:
         rclpy.init()
     made = []
 
-    def make(body=(), **params):
+    def make(body=(), node_name='mowbite_planner', **params):
         params = dict({'data_dir': str(tmp_path / 'data')}, **params)
-        n = OsNode(parameter_overrides=[Parameter(k, value=v) for k, v in params.items()])
+        n = OsNode(node_name, parameter_overrides=[Parameter(k, value=v) for k, v in params.items()])
         made.append(n)
         if body is not None:
             geometry(n, **dict(body))
@@ -122,7 +123,7 @@ def make(tmp_path, monkeypatch):
         rclpy.try_shutdown()
     else:
         for n in made:
-            for m in n.publishers['bridge/publish'].published:
+            for m in n.publishers['bridge/publish'].published if 'bridge/publish' in n.publishers else ():
                 assert not apicheck.sent(m.topic, m.payload), (m.topic, m.payload)
 
 
@@ -762,6 +763,98 @@ def test_plan_transit_while_a_plan_is_held(make, monkeypatch):
         go.set()
         executor.shutdown()
         caller.destroy_node()
+
+
+def files(folder) -> dict:
+    """Every folder and file under folder: its size, mtime and digest."""
+    out = {}
+    for root, dirs, names in os.walk(folder):
+        for d in dirs:
+            out[os.path.relpath(os.path.join(root, d), folder)] = 'folder'
+        for name in names:
+            path = os.path.join(root, name)
+            with open(path, 'rb') as f:
+                out[os.path.relpath(path, folder)] = (os.path.getsize(path), os.stat(path).st_mtime_ns,
+                                                      hashlib.sha256(f.read()).hexdigest())
+    return out
+
+
+@fake_only
+def test_role_transit(make):
+    """role transit: ~/plan_transit only, a name of its own, nothing sent, no methods, no clients, nothing planned
+    ahead, one transit at a time (workers 0); map/json, map/status and bridge/params read. planner by default."""
+    assert make().role() == 'planner'
+    node = make(role='transit', node_name='mowbite_planner_transit', workers=2)
+    assert set(node.services) == {'~/plan_transit'} and not node.publishers
+    assert set(node.subscribed) == {'map/json', 'map/status', 'bridge/params'}
+    assert not node.called and not node.timed and not node.rpc_on
+    assert node.core.methods == {} and node.core.workers == 0 and node.files == ''
+    lines = node.get_logger().lines
+    assert ('info', 'workers not taken (role transit: plans in one thread)') in lines
+    assert ('info', 'MowBite Planner ready (role transit): service ~/plan_transit only') in lines
+    send_map(node, the_map())
+    give(node, 'map/status', MapStatus(datum_state=MapStatus.DATUM_MISMATCH, reason=''))
+    send_map(node, the_map(name='Lawn'))
+    geometry(node, version=1, robot_front=0.55)
+    assert node.core.ahead is None and node.core.map['areas'][0]['properties']['name'] == 'Lawn'
+    res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    assert res.success, res.message
+    node.send_out('mowbite/planner/progress', '{}', True)  # (nowhere)
+    with pytest.raises(ValueError, match='role transit needs a name of its own, mowbite_planner is the planner'):
+        make(role='transit')
+    with pytest.raises(ValueError, match='role must be planner or transit, got \'coverage\''):
+        make(role='coverage', node_name='mowbite_planner_coverage')
+
+
+@fake_only
+def test_role_transit_writes_nothing(make, tmp_path):
+    """role transit next to the planner in its data_dir: nothing written there, the planner's counters (angle steps,
+    timing, plans kept) untouched; the planner.* settings the planner stored taken (again once they change, one not
+    readable: the ones before, none: the launch's)."""
+    planner = make()
+    send_map(planner, the_map())
+    assert rpc(planner, 'planner.settings.set', {'turn_radius': 0.6, 'edge_margin': 0.08})[1] is None
+    assert plan_area(planner).success
+    give(planner, 'bridge/publish', MqttPublish(topic='events/json', payload=json.dumps(
+        {'type': 'JOB_COMPLETE', 'job_id': 'j1', 'x': 1.0, 'y': 2.0})))
+    planner.core.drive_thread.join(60.0)
+    data = str(tmp_path / 'data')
+    before = files(data)
+    assert {'planner/mowbite_planner_settings.json', 'planner/mowbite_planner_angle.json'} <= set(before)
+    assert any(n.startswith('planner/plans/') and n.endswith('.pkl') for n in before)
+    node = make(role='transit', node_name='mowbite_planner_transit')
+    send_map(node, the_map())
+    give(node, 'bridge/params', String(data=json.dumps(
+        {'node': '/mowbite_follower', 'params': {'speed_fast': 0.5, 'speed_slow': 0.2, 'max_angular': 1.0}})))
+    cfg = node.transit_config(node.values())
+    assert (cfg.turn_radius, cfg.edge_margin, cfg.robot_front) == (0.6, 0.08, 0.60)
+    assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2)).success
+    geometry(node, version=1, robot_front=0.55)
+    assert transit(node, (1.0, 1.0, 0.0), (1.0, 4.0, math.pi)).success
+    assert files(data) == before
+    assert rpc(planner, 'planner.settings.set', {'edge_margin': 0.12}, 'r2')[1] is None
+    assert node.transit_config(node.values()).edge_margin == 0.08  # (taken with the next transit)
+    transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    cfg = node.transit_config(node.values())
+    assert (cfg.turn_radius, cfg.edge_margin, cfg.robot_front) == (0.6, 0.12, 0.55)
+    settings = os.path.join(data, 'planner', 'mowbite_planner_settings.json')
+    with open(settings, 'w') as f:
+        f.write('{"edge_margin": ')
+    transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    assert node.transit_config(node.values()).edge_margin == 0.12
+    assert any('the planner\'s settings not taken (%s): ' % settings in line for _, line in node.get_logger().lines)
+    os.remove(settings)
+    transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    cfg = node.transit_config(node.values())
+    assert (cfg.turn_radius, cfg.edge_margin, cfg.robot_front) == (0.25, 0.05, 0.55)
+
+
+def test_role_transit_with_the_real_ros(make):
+    """role transit made and asked like on MowBite OS (with a sourced workspace: the real rclpy)."""
+    node = make(role='transit', node_name='mowbite_planner_transit')
+    assert node.get_name() == 'mowbite_planner_transit' and node.core.methods == {}
+    res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    assert res.success, res.message
 
 
 def test_main_is_the_os_node(monkeypatch):

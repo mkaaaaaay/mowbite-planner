@@ -49,6 +49,13 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
     whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read or a timeout: -32603.
     On a thread of its own, the other methods go on. Without calib_root not offered.
+  - role (planner): transit, a second instance for ~/plan_transit only (MowBite OS' heading home, masterplan 40 V2):
+      - a name of its own (the launch's, not mowbite_planner: refused), its own log; one transit at a time, workers 0
+      - not there: ~/plan_coverage, ~/plan_from_parameters, ~/coverage_path, the planner.* methods, bridge/rpc/*
+      - nothing sent: no bridge/publish (no progress), no map/replace; no events read (finished mows), no calibration
+      - nothing planned ahead, no plans kept, no leftovers; map/json, map/status and bridge/params (the body) as above
+      - data_dir: nothing written, only the planner's planner/mowbite_planner_settings.json read (again once it changes)
+      - the planner's counters stay its own: angle steps, timing, plans kept, maps before (data_dir/planner), leftovers
 """
 
 import hashlib
@@ -70,7 +77,7 @@ from mowbite_msgs.msg import MapStatus, MqttPublish, RpcError, RpcMethods, RpcRe
 from mowbite_msgs.srv import ReplaceMap
 from mowbite_planner import core
 from mowbite_planner import node as base
-from mowbite_planner.config import PlannerConfig, PlanningError
+from mowbite_planner.config import INTERNAL, RETIRED, PlannerConfig, PlanningError
 from mowbite_planner.geometry import polygons
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.starts import _Spent
@@ -114,6 +121,10 @@ FLOORS = {'edge_margin': 0.05, 'obstacle_margin': 0.10, 'spin_margin': 0.05}
 THREADS = 2
 # why transit_as_recorded true isn't taken ('': it is; the Tron, G6)
 AS_RECORDED_NOT = 'its margins hold all along the way, not only by the edge pose (point 7)'
+# role: the planner, or a second instance only for ~/plan_transit (see the top); the planner's settings under data_dir
+ROLES = ('planner', 'transit')
+TRANSIT = 'transit'
+SETTINGS_FILE = os.path.join('planner', 'mowbite_planner_settings.json')
 
 
 class OsNode(base.MowbitePlannerNode):
@@ -143,16 +154,49 @@ class OsNode(base.MowbitePlannerNode):
         # robot.geometry's latest (version, {setting: value}), why nothing is planned with it ('' where it is)
         self.geometry = None
         self.geometry_why = ''
+        self._role = None
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
         self.as_recorded()
         self.backs_up()
         self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit,
                             callback_group=MutuallyExclusiveCallbackGroup())
+        if self.role() == TRANSIT:
+            self.get_logger().info('MowBite Planner ready (role transit): service ~/plan_transit only')
         mine = [n for n in GEOMETRY_KEYS if n != 'mower_width' and self._param(n) is not None and (
             len(self._param(n)) if n == 'robot_outline' else self._param(n) not in (-1.0, 0.0))]
         if mine:
             self.get_logger().info(f'parameters not counting here (from {FROM_GEOMETRY}): {", ".join(mine)}')
+
+    def role(self) -> str:
+        if self._role is None:
+            role = self.declare_parameter('role', ROLES[0], ParameterDescriptor(
+                description='planner: the planner of MowBite OS; transit: a second instance for ~/plan_transit only '
+                            '(a name of its own, nothing sent, nothing written; see the node\'s top)')).value
+            if role not in ROLES:
+                raise ValueError(f'role must be planner or transit, got {role!r}')
+            self._role = role
+        return self._role
+
+    def plans_coverage(self) -> bool:
+        return self.role() != TRANSIT
+
+    def _core_setup(self):
+        """As MowbitePlannerNode's; role transit: TransitCore, only the map and bridge/params (see the top)."""
+        if self.role() != TRANSIT:
+            return super()._core_setup()
+        if self.get_name() == NODE_ID:
+            raise ValueError(f'role transit needs a name of its own, {NODE_ID} is the planner\'s')
+        data_dir = os.path.expanduser(self._param('data_dir'))
+        values = self.values()
+        if values['workers']:
+            self.get_logger().info('workers not taken (role transit: plans in one thread)')
+        self.files = ''
+        self.core = TransitCore(self, float(values['mower_width']), base.launch_settings(self.config(values)),
+                                os.path.join(data_dir, SETTINGS_FILE) if data_dir else '')
+        self.create_subscription(String, 'map/json', self._on_map, self.latched)
+        self.create_subscription(MapStatus, 'map/status', self._on_map_status, self.latched)
+        self.params_input()
 
     def calib_root(self) -> str:
         if self._calib_root is None:
@@ -233,12 +277,16 @@ class OsNode(base.MowbitePlannerNode):
             acked(Duration(seconds=END_ACK))
 
     def send_out(self, topic: str, payload: str, retain: bool):
-        self._publish_pub.publish(MqttPublish(topic=topic, payload=payload, retain=retain))
+        if self.role() != TRANSIT:  # (role transit sends nothing)
+            self._publish_pub.publish(MqttPublish(topic=topic, payload=payload, retain=retain))
 
     def events_input(self):
         # (before anything is planned: the progress goes out on it)
         self._publish_pub = self.create_publisher(MqttPublish, 'bridge/publish', 100)
         self.create_subscription(MqttPublish, 'bridge/publish', self._on_publish, 100)
+        self.params_input()
+
+    def params_input(self):
         self.create_subscription(String, 'bridge/params', self._on_params, QoSProfile(
             depth=50, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -425,6 +473,8 @@ class OsNode(base.MowbitePlannerNode):
         return gets_to
 
     def _on_plan_transit(self, request, response):
+        if isinstance(self.core, TransitCore):
+            self.core.follow()
         try:
             values = self.values(request.overrides)
         except ValueError as e:
@@ -504,6 +554,48 @@ class OsNode(base.MowbitePlannerNode):
         if 'error' in result:
             raise _internal(f'the calibration not evaluated: {result["error"]}')
         return result
+
+
+class TransitCore(base.NodeCore):
+    """NodeCore of role transit (see the top): no files of its own, no methods, nothing planned ahead; the planner.*
+    settings the planner stored at source (only read, see follow)."""
+
+    def __init__(self, node, mower_width: float, settings: dict, source: str):
+        self.source, self.seen = source, None
+        base.NodeCore.__init__(self, node, mower_width, settings, '', '', '', 0)
+        self.methods = {}
+        self.follow()
+
+    def plan_ahead_later(self):
+        pass
+
+    def follow(self):
+        """The settings with the planner's stored ones from now on where source changed since (none: the launch's);
+        one it can't read or that don't go together: as before, tried again next time."""
+        if not self.source:
+            return
+        try:
+            st = os.stat(self.source)
+            seen = (st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            seen = None
+        if seen == self.seen:
+            return
+        stored = {}
+        try:
+            if seen is not None:
+                with open(self.source) as f:
+                    stored = json.load(f)
+                if not isinstance(stored, dict):
+                    raise ValueError('not an object')
+            known = set(PlannerConfig.names()) | set(core.NODE_SETTINGS) | set(INTERNAL) | set(RETIRED)
+            with self.set_lock:
+                self.current = self.setup(self.launch_width, self.launch, {
+                    n: v for n, v in stored.items() if n in known})
+        except (OSError, ValueError) as e:  # (PlanningError too)
+            self.logwarn('MowBite Planner: the planner\'s settings not taken (%s): %s', self.source, e)
+            return
+        self.seen = seen
 
 
 def geometry_values(params: dict) -> tuple:

@@ -49,11 +49,12 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
   - not here: the slic3r planner, leftovers_auto (the node doesn't send the robot out), the house computer
     (MowbitePlannerNode.cannot: planner.settings says why).
 A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, the settings it can't have, its own RPC
-methods, its transport (rpc_input, answer, rpc_end, map_input, events_input, send_out), its parameters (robot_param),
-writing the map (replace_map), when the map can't be planned (map_unusable), the settings it gives itself (given_by,
-given) and the floors it holds them to (floors), how it gets to a plan's sections (arrives), drive slope and reverse
-it can't drive (drive_ignored), backing up out of dead ends it can't drive (back_out_ignored, by default as drive);
-main(node_class=it, executor_class=its executor). SIGINT and SIGTERM end it with destroy_node first (see main).
+methods, whether it plans coverage at all (plans_coverage), its transport (rpc_input, answer, rpc_end, map_input,
+events_input, send_out), its parameters (robot_param), writing the map (replace_map), when the map can't be planned
+(map_unusable), the settings it gives itself (given_by, given) and the floors it holds them to (floors), how it gets
+to a plan's sections (arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it
+can't drive (back_out_ignored, by default as drive); main(node_class=it, executor_class=its executor). SIGINT and
+SIGTERM end it with destroy_node first (see main).
 """
 
 import glob
@@ -535,15 +536,17 @@ class MowbitePlannerNode(Node):
 
         self.latched = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self._path_pub = self.create_publisher(Path, '~/coverage_path', self.latched)
-        self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage)
-        self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters)
+        if self.plans_coverage():
+            self._path_pub = self.create_publisher(Path, '~/coverage_path', self.latched)
+            self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage)
+            self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters)
         self.core = None
         self.rpc_on = False
         if self._param('rpc') or self._param('use_map'):
             self._core_setup()
-        self.get_logger().info('MowBite Planner ready: services ~/plan_coverage and ~/plan_from_parameters' +
-                               (', the planner.* RPC methods' if self.rpc_on else ''))
+        if self.plans_coverage():
+            self.get_logger().info('MowBite Planner ready: services ~/plan_coverage and ~/plan_from_parameters' +
+                                   (', the planner.* RPC methods' if self.rpc_on else ''))
 
     # PlannerCore (rpc, use_map)
 
@@ -617,6 +620,10 @@ class MowbitePlannerNode(Node):
             self.answer(rid, result, error)
 
     # what the node does on a robot (a robot's own node: its own)
+
+    def plans_coverage(self) -> bool:
+        """Whether it offers ~/plan_coverage, ~/plan_from_parameters and ~/coverage_path (asked before the core)."""
+        return True
 
     def more_methods(self) -> dict:
         """The robot's own RPC methods: name -> callback(params)."""

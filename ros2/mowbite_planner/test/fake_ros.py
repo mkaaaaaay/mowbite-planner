@@ -386,6 +386,9 @@ class Node:
     def get_logger(self):
         return self._logger
 
+    def get_name(self):
+        return self.name
+
     def get_clock(self):
         return _Clock()
 
