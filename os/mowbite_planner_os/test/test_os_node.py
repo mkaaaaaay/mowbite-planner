@@ -28,6 +28,7 @@ import calibsim  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import calibread  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
+from test_contract import test_requires_met  # noqa: E402,F401  (on MowBite OS' Jazzy too)
 from mowbite_planner import node as node_module  # noqa: E402
 from mowbite_planner.calib import evaluate  # noqa: E402
 from mowbite_planner.config import PlannerConfig, PlanningError  # noqa: E402
@@ -321,6 +322,8 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
     node = make(calib_root=str(root))
     assert list(node.publishers['bridge/rpc/methods'].published[0].methods) == sorted(
         CORE_METHODS + ['planner.calib.evaluate'])
+    with open(os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner', 'contract.json')) as f:
+        assert json.load(f)['methods']['mowbite-os'] == sorted(CORE_METHODS + ['planner.calib.evaluate'])
     mower = calibsim.program(0)
     path = mower.recording(str(root / 'recordings' / 'calib-20261104T010203Z.jsonl.gz'))
     got, error = rpc(node, 'planner.calib.evaluate', {'path': path}, 'r1', wait=120.0)

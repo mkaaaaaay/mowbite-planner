@@ -697,6 +697,8 @@ def test_rpc_methods_registered(planner):
                'planner.calib.start', 'planner.calib.stop', 'planner.drive', 'planner.leftovers', 'planner.log',
                'planner.plan', 'planner.settings', 'planner.settings.set', 'planner.simulate',
                'planner.simulate.cancel', 'planner.simulate.status']
+    with open(os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner', 'contract.json')) as f:
+        assert json.load(f)['methods']['openmower'] == methods
     assert ('mowbite_planner', methods) in rospy.registered
     rospy.registered.clear()
     rospy.subscribers['/xbot/rpc/registry'](None)  # xbot_monitoring started again

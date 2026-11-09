@@ -14,6 +14,8 @@ __version__ = '0.5.0'
 # mowbite_map_backups; not the plans, kept by the code that planned them): one more where a planner before can't read
 # them (MowBite OS keeps data_dir for the image it came from)
 FILES_VERSION = 1
+# the least it runs with: the oldest the tests run on (OpenMower's Python 3.8 and numpy, MowBite OS' shapely)
+REQUIRES = {'numpy': '1.17.4', 'python': '3.8', 'shapely': '2.0.3'}
 
 __all__ = [
     '__version__',

@@ -1,0 +1,378 @@
+{
+  "codes": {
+    "ANSWER_TOO_BIG": -32002,
+    "INTERNAL": -32603,
+    "INVALID_PARAMS": -32602,
+    "METHOD_NOT_FOUND": -32601,
+    "SUPERSEDED": -32003
+  },
+  "files_version": 1,
+  "interface": 1,
+  "interfaces": {
+    "mowbite_planner_interfaces/srv/PlanCoverage": "3fec1d0a444f011807794a7bc8d6eb89c9ebb046e51e291c6c535252d098c6a5",
+    "mowbite_planner_os_interfaces/srv/PlanTransit": "a39b716657c3eb75d4a9ff79bc6fac60e3c7fbc5e6186ee580dc5b508712f102"
+  },
+  "methods": {
+    "mowbite-os": [
+      "planner.angle.reset",
+      "planner.area.set",
+      "planner.calib.evaluate",
+      "planner.drive",
+      "planner.leftovers",
+      "planner.log",
+      "planner.plan",
+      "planner.settings",
+      "planner.settings.set"
+    ],
+    "openmower": [
+      "planner.angle.reset",
+      "planner.area.set",
+      "planner.calib.check",
+      "planner.calib.result",
+      "planner.calib.start",
+      "planner.calib.stop",
+      "planner.drive",
+      "planner.leftovers",
+      "planner.log",
+      "planner.plan",
+      "planner.settings",
+      "planner.settings.set",
+      "planner.simulate",
+      "planner.simulate.cancel",
+      "planner.simulate.status"
+    ]
+  },
+  "owner": "mowbite-planner",
+  "requires": {
+    "numpy": "1.17.4",
+    "python": "3.8",
+    "shapely": "2.0.3"
+  },
+  "schema": 1,
+  "settings": {
+    "angle": {
+      "nullable": true,
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_increment": {
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_increment_every": {
+      "min": 1,
+      "type": "integer"
+    },
+    "angle_max": {
+      "nullable": true,
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_min": {
+      "nullable": true,
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_offset": {
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_step": {
+      "min": 0.008726646259971648,
+      "type": "number",
+      "unit": "rad"
+    },
+    "angle_steps": {
+      "type": "integer"
+    },
+    "angle_strategy": {
+      "choices": [
+        "longest_edge",
+        "min_width",
+        "optimal"
+      ],
+      "type": "string"
+    },
+    "back_out": {
+      "type": "boolean"
+    },
+    "bend_max_gap": {
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "bend_max_offset": {
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "blade_ahead": {
+      "max": 1.0,
+      "min": -1.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "blade_offset": {
+      "max": 1.0,
+      "min": -1.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "body_fit": {
+      "type": "boolean"
+    },
+    "crosshatch_angle": {
+      "type": "number",
+      "unit": "rad"
+    },
+    "drive": {
+      "choices": [
+        "forward",
+        "slope",
+        "reverse"
+      ],
+      "type": "string"
+    },
+    "edge_margin": {
+      "max": 1.0,
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "edges": {
+      "choices": [
+        "recorded",
+        "hard"
+      ],
+      "type": "string"
+    },
+    "fill_pattern": {
+      "choices": [
+        "lanes",
+        "crosshatch",
+        "concentric"
+      ],
+      "type": "string"
+    },
+    "finished_mows": {
+      "type": "integer"
+    },
+    "headland_corners": {
+      "choices": [
+        "rounded",
+        "sharp"
+      ],
+      "type": "string"
+    },
+    "headland_turns": {
+      "type": "boolean"
+    },
+    "lane_order": {
+      "choices": [
+        "snake",
+        "skip"
+      ],
+      "type": "string"
+    },
+    "lane_overlap_limit": {
+      "type": "boolean"
+    },
+    "lane_overlap_passes": {
+      "max": 255,
+      "min": 0,
+      "type": "integer"
+    },
+    "lane_spacing_max": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "lane_spacing_min": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "lane_spacing_mode": {
+      "choices": [
+        "fixed",
+        "auto"
+      ],
+      "type": "string"
+    },
+    "leftovers_auto": {
+      "type": "boolean"
+    },
+    "mop_up": {
+      "type": "boolean"
+    },
+    "mower_width": {
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "narrow_parts": {
+      "choices": [
+        "lanes",
+        "loops"
+      ],
+      "type": "string"
+    },
+    "nested_areas": {
+      "type": "boolean"
+    },
+    "obstacle_margin": {
+      "max": 1.0,
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "obstacle_passes": {
+      "max": 255,
+      "min": -1,
+      "type": "integer"
+    },
+    "overlap": {
+      "max": 1.0,
+      "min": 0.0,
+      "type": "number",
+      "unit": ""
+    },
+    "perimeter_direction": {
+      "choices": [
+        "auto",
+        "ccw",
+        "cw",
+        "random"
+      ],
+      "type": "string"
+    },
+    "perimeter_offset": {
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "perimeter_order": {
+      "choices": [
+        "first",
+        "last"
+      ],
+      "type": "string"
+    },
+    "perimeter_passes": {
+      "max": 255,
+      "min": -1,
+      "type": "integer"
+    },
+    "planner": {
+      "choices": [
+        "mowbite",
+        "slic3r"
+      ],
+      "type": "string"
+    },
+    "recorded_margin": {
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "remote_planning": {
+      "type": "boolean"
+    },
+    "robot_front": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "robot_front_width": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "robot_outline": {
+      "nullable": true,
+      "type": "points",
+      "unit": "m"
+    },
+    "robot_rear": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "robot_rear_width": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "robot_width": {
+      "min": 0.0,
+      "nullable": true,
+      "type": "number",
+      "unit": "m"
+    },
+    "route_order": {
+      "choices": [
+        "nearest",
+        "optimized"
+      ],
+      "type": "string"
+    },
+    "skip_lanes": {
+      "type": "boolean"
+    },
+    "skip_obstacle_loops": {
+      "type": "boolean"
+    },
+    "skip_outline_loops": {
+      "type": "boolean"
+    },
+    "spin_margin": {
+      "max": 1.0,
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "split_zones": {
+      "type": "boolean"
+    },
+    "transit_edge_cost": {
+      "min": 0.0,
+      "type": "number",
+      "unit": ""
+    },
+    "transit_edge_distance": {
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "turn_on_spot": {
+      "type": "boolean"
+    },
+    "turn_radius": {
+      "max": 10.0,
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
+    "turn_radius_auto": {
+      "type": "boolean"
+    },
+    "turn_types": {
+      "choices": [
+        "u_turn",
+        "bulb",
+        "detour",
+        "pivot"
+      ],
+      "type": "list"
+    }
+  },
+  "topics": [
+    "mowbite/planner/progress"
+  ]
+}
