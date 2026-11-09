@@ -478,12 +478,14 @@ def complete(cfg: PlannerConfig, fp: Footprint, transit: TransitPlanner, drive_s
 
 
 def leftovers(cfg: PlannerConfig, fp: Footprint, transit: TransitPlanner, space, mowed, start: XY,
-              home: Optional[XY] = None) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
-    """What a mow left of space.free (mowed: where the blade went) as a path of its own: the moves one after the
-    other, the nearest start first, the way there and home (to home) counted. (poses, segments, stats {left_m2, pieces,
-    passes, area})."""
+              home: Optional[XY] = None, unfilled=None) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
+    """What a mow left of space.free (mowed: where the blade went, unfilled: not there either) as a path of its own:
+    the moves one after the other, the nearest start first, the way there and home (to home) counted. (poses,
+    segments, stats {left_m2, pieces, passes, area})."""
     kit = Kit.of(cfg, fp, transit, space.drive_space, space.transit_space, DRIVES)
     left = space.free.difference(mowed)
+    if unfilled is not None:
+        left = left.difference(unfilled)
     rest = Rest.of(_reachable(cfg, left, space.drive_space), LEAST_MOWED, kit.half)
     moves, why, _ = _moves(kit, rest)
     placer = Placer(kit, [], [], rest)

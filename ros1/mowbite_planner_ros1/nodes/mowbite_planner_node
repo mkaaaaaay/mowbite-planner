@@ -40,14 +40,15 @@ plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once t
 mower's broker, see remote_planning; default true). The request always gives the lane
 spacing (with mower_width the overlap), perimeter_offset, perimeter_passes, lane_overlap_passes, the skip flags and a
 concentric fill_pattern; settings beat the first four (an area's own outline_count, ... beat those), not the others
-(an area's planner property can). The angle too, unless
+(an area's planner property can); skip_fill skips the lanes, so does the setting skip_lanes. The angle too, unless
 settings has angle or angle_strategy and the area has no angle of its own. Whether it has one comes from the saved
 map: a preview in the map editor (mowing.plan with the outline and the edited angle) of an area whose angle was just
 added or removed follows the saved area until the edit is saved.
 
 OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
   planner.settings      every setting: value, default (without the stored ones), stored, type, unit, range or
-                        choices, settable. Not settable: the skip flags of mower_logic's request.
+                        choices, settable. Not settable: skip_area_outline and skip_obstacle_outlines of
+                        mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
                         type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r.
                         leftovers_auto (the node's too): see below. remote_planning (the node's): see below, ignored
@@ -1328,7 +1329,6 @@ class MowbitePlannerRos1(PlannerCore):
             lane_overlap_passes=int(req.outline_overlap_count),
             skip_outline_loops=bool(req.skip_area_outline),
             skip_obstacle_loops=bool(req.skip_obstacle_outlines),
-            skip_lanes=bool(req.skip_fill),
         )
         # the area's own angle (mower_logic adds mow_angle_offset) beats settings, its planner property beats both
         if not current.own_angle or (job is not None and job.overrides.get('angle') is not None):
@@ -1346,7 +1346,9 @@ class MowbitePlannerRos1(PlannerCore):
             cfg = cfg.with_overrides(job.planner)
         if cfg.lane_spacing_mode == 'auto':  # the blade, the spacing is the planner's
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
-        return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished']})
+        # (skip_lanes is a setting too: the request's skip_fill skips the lanes either way)
+        return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished'],
+                                   'skip_lanes': cfg.skip_lanes or bool(req.skip_fill)})
 
     def remote_plan(self, key, form, args, reach_over, unmowed, area_id):
         """remote_planning: the plan from the house computer where it's asked and its plan taken (read with the

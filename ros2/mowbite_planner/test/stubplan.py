@@ -15,6 +15,7 @@ from mowbite_planner import CoveragePlan, NothingLeft, PlannerConfig, PlanningEr
 from mowbite_planner.config import LANE, PERIMETER, TRANSIT, TURN, Lane
 from mowbite_planner.geometry import inset, polygons, rings, union
 from mowbite_planner.lanes import lane_angle
+from mowbite_planner.planner import fill_field
 from mowbite_planner.space import _check_coordinates, build_space, margins_of
 from mowbite_planner.transit import TransitPlanner
 
@@ -53,8 +54,12 @@ def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] =
     levels: List[list] = []  # (of every part, level k: its k-th loops' polygon)
     cells = [(a, []) for a in angles]
     origins = {}
+    # (skip_lanes: inside the loops, left alone as by the planner's fill_field)
+    region = inset(robot, max(cfg.passes, 0) * spacing) if cfg.skip_lanes else robot
+    unfilled = fill_field(cfg, region)
     if mowed is not None:
-        left = [p for p in polygons(free.difference(mowed)) if p.area >= LEAST]
+        lawn = free if unfilled is None else free.difference(unfilled)
+        left = [p for p in polygons(lawn.difference(mowed)) if p.area >= LEAST]
         if not left:
             raise NothingLeft('stub: nothing left')
         for p in sorted(left, key=lambda p: p.representative_point().coords[0]):  # (lanes across each piece)
@@ -145,7 +150,7 @@ def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] =
              'turns_u_turn': turns, 'turns_bulb': 0, 'turns_detour': 0, 'turns_pivot': 0, 'turns_fallback': 0,
              'mop_up': None, 'leftovers': None}
     if mowed is not None:
-        left_space = free.difference(mowed)
+        left_space = lawn.difference(mowed)
         swept = union([LineString(ab).buffer(0.5 * cfg.mower_width) for ab in lanes]).intersection(left_space)
         stats['leftovers'] = {'left_m2': round(left_space.area, 3), 'pieces': len(left), 'passes': len(lanes),
                               'area': round(swept.area, 3)}
@@ -154,7 +159,7 @@ def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] =
         progress('done', 2, 2)
     return CoveragePlan(poses=out, segments=segments, angle=angle, lane_spacing=spacing, perimeter_loops=loops,
                         lanes=lanes, stats=stats, warnings=warnings, area=area, free_space=free,
-                        robot_space=space.drive_space, lane_region=robot, remaining=robot, angles=angles,
+                        robot_space=space.drive_space, lane_region=region, remaining=robot, angles=angles,
                         transit_space=space.transit_space, body_space=space.body_space, config=cfg,
                         section_starts=starts, unmowed=space.unmowed,
                         levels=[union(ls) for ls in levels], origins=origins, cells=cells)

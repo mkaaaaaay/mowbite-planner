@@ -30,7 +30,7 @@ from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.bodyfit import (FIELD_ARC, FIT_LATER, FIT_PLACE, FIT_REACH, FIT_ROUND, FIT_SPOTS,  # noqa: E402
                                      FIT_START, FIT_TRIES, TURN_AHEAD)
 from mowbite_planner.config import (LANE, LOOP_ROUND_TRIES, PERIMETER, SMOOTH_RADII, SPIN_LIMIT, TRANSIT,  # noqa: E402
-                                    TRACK, TURN, ZERO_TURN, Lane, PathSegment)
+                                    TRACK, TURN, ZERO_TURN, Lane, NothingLeft, PathSegment)
 from mowbite_planner.angles import angle_in_range, longest_edge_angle  # noqa: E402
 from mowbite_planner.drive import BODY_OUT, _arcs, _spins, margins, on_spot, turning  # noqa: E402
 from mowbite_planner.export import plan_pieces  # noqa: E402
@@ -2602,6 +2602,34 @@ def test_leftovers():
         plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1), mowed=Polygon(GARDEN).buffer(1.0))
     with pytest.raises(PlanningError, match='body'):
         plan_coverage(GARDEN, [TREE, BED], PlannerConfig(), mowed=mowed)
+
+
+def blade_runs(plan):
+    """The plan's ways with the blade on (all but the drives), as runs for track_mowed."""
+    runs = [[]]
+    for s in plan.segments:
+        if s.kind == TRANSIT:
+            runs.append([])
+        else:
+            runs[-1] += [(p.x, p.y) for p in plan.poses[s.start:s.end + 1]]
+    return [r for r in runs if len(r) > 1]
+
+
+@pytest.mark.parametrize('pattern', ['lanes', 'concentric'])
+def test_skip_lanes_leaves_the_fill_alone(pattern):
+    """skip_lanes (mkay's "Füllung mähen" off): the loops only, mop_up and what a mow left only outside where the
+    lanes would mow (fill_field). Before, mop_up mowed 8.6 m2 of the middle here (16 concentric) and 225 m2 stayed
+    for the leftovers. Not set: no such field."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, perimeter_passes=3, lane_overlap_passes=0, fill_pattern=pattern))
+    plan = plan_coverage(GARDEN, [TREE, BED], cfg.with_overrides({'skip_lanes': True}), start=(1, 1, 0.0), end=(1, 1))
+    check_invariants(plan, plan.config, [TREE, BED])
+    assert plan.lanes == [] and check_plan(plan)['body_out'] == []
+    field = planner.fill_field(plan.config, plan.lane_region)
+    assert field.area > 200.0 and plan.stats['mop_up']['area'] < 0.5 and plan.stats['mop_up']['left_m2'] < 3.0
+    mowed = track_mowed(blade_runs(plan), cfg.mower_width, cfg.blade_ahead, cfg.blade_offset)
+    with pytest.raises(NothingLeft):
+        plan_coverage(GARDEN, [TREE, BED], plan.config, start=(1, 1, 0.0), end=(1, 1), mowed=mowed)
+    assert planner.fill_field(cfg, plan_coverage(GARDEN, [TREE, BED], cfg).lane_region) is None
 
 
 

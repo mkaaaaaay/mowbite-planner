@@ -204,6 +204,8 @@ def test_methods_on_the_bridge(make):
     assert got['settings']['drive']['ignored'] == 'MowBite OS: drives forwards only for now (M8)'
     assert got['settings']['turn_radius']['value'] == 0.25  # (the node's parameters the defaults)
     assert rpc(node, 'planner.settings.set', {'turn_radius': -1}, 'r2')[1][0] == -32602
+    # (skip_lanes settable here: no mower_logic sets it)
+    assert got['settings']['skip_lanes']['settable'] and not got['settings']['skip_outline_loops']['settable']
     assert rpc(node, 'planner.settings', [1], 'r3')[1] == (-32602, 'params must be an object (by name)')
     give(node, 'bridge/rpc/request', RpcRequest(method='map.replace', params='[]', id='r4'))
     time.sleep(0.2)

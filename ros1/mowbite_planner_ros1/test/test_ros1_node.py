@@ -407,13 +407,13 @@ def test_settings_parameter(planner):
 
 def test_settings_parameter_angle(planner):
     # an angle or angle_strategy in ~settings beats mower_logic's angle; lane spacing (overlap), loops and offset
-    # set here beat mower_logic's, the skip flags always come with the request
+    # set here beat mower_logic's, the loops' skip flags always come with the request
     for settings, angle in (({}, 0.7), ({'angle': 0.3}, 0.3), ({'angle_strategy': 'longest_edge'}, None),
                             ({'angle': None}, None)):
-        rospy.params = {'~settings': dict(settings, perimeter_passes=5, overlap=0.5, skip_lanes=True)}
+        rospy.params = {'~settings': dict(settings, perimeter_passes=5, overlap=0.5, skip_outline_loops=True)}
         cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
         assert cfg.angle == angle and cfg.perimeter_passes == 5 and cfg.lane_spacing == pytest.approx(0.09)
-        assert not cfg.skip_lanes and cfg.lane_overlap_passes == request().outline_overlap_count
+        assert not cfg.skip_outline_loops and cfg.lane_overlap_passes == request().outline_overlap_count
         rospy.params = {'~settings': settings}
         cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
         assert cfg.perimeter_passes == 3 and cfg.lane_spacing == pytest.approx(0.13)
@@ -431,6 +431,16 @@ def test_settings_parameter_angle(planner):
     for props, angle in (({}, 0.3), ({'angle': 0.5}, 0.7), ({'angle': 0.5, 'planner': {'angle': 0.2}}, 0.2),
                          ({'angle': 0.5, 'planner': {'angle_strategy': 'min_width'}}, None)):
         assert p.settings(request(angle=0.7), node_module.area_job(the_map(**props), 0)).angle == angle, props
+
+
+@pytest.mark.parametrize('stored, own, skip_fill, skipped', [
+    (False, None, False, False), (True, None, False, True), (False, None, True, True), (False, True, False, True),
+    (True, False, False, False), (False, False, True, True)])
+def test_skip_lanes_setting_or_request(planner, stored, own, skip_fill, skipped):
+    # the lanes left out where the setting (an area's own beats it) or mower_logic's skip_fill says so
+    rospy.params = {'~settings': {'skip_lanes': stored}}
+    job = node_module.area_job(the_map(**({'planner': {'skip_lanes': own}} if own is not None else {})), 0)
+    assert node_module.MowbitePlannerRos1().settings(request(skip_fill=skip_fill), job).skip_lanes is skipped
 
 
 @pytest.mark.parametrize('keeps_all', [False, True])
@@ -835,7 +845,8 @@ def test_rpc_settings(planner):
     assert s['angle'] == {'value': None, 'default': None, 'stored': False, 'type': 'number', 'settable': True,
                           'nullable': True, 'unit': 'rad'}
     assert s['perimeter_passes']['type'] == 'integer' and s['perimeter_passes']['max'] == 255
-    assert not s['skip_lanes']['settable'] and s['skip_lanes']['from']
+    assert not s['skip_outline_loops']['settable'] and s['skip_outline_loops']['from']
+    assert s['skip_lanes']['settable'] and 'from' not in s['skip_lanes']
     # mower_logic's until set here
     for name in ('overlap', 'perimeter_offset', 'perimeter_passes', 'lane_overlap_passes'):
         assert s[name]['settable'] and s[name]['from'].startswith('/mower_logic/'), name
@@ -957,7 +968,7 @@ def test_rpc_settings_angle(planner):
     ({'headland_corners': 'round'}, 'headland_corners must be one of rounded, sharp'),
     ({'robot_outline': [[1.0, 0.2], [0.5, 0.2], [0.5, -0.2]]}, 'robot_outline must be'),
     ({'body_fit': 1}, 'body_fit must be true or false'),
-    ({'allow_reverse': True, 'skip_lanes': True}, 'not settable here: skip_lanes'),
+    ({'allow_reverse': True, 'skip_obstacle_loops': True}, 'not settable here: skip_obstacle_loops'),
     ({'nope': 1}, 'unknown planner settings: nope'),
     ({'planner': 'fast'}, 'planner must be one of mowbite, slic3r'),
     ({'leftovers_auto': 1}, 'leftovers_auto must be true or false'),
@@ -1651,6 +1662,22 @@ def test_leftovers(planner):
     rpc('planner.settings.set', {'turn_radius': 0.3})  # (new settings: the leftovers were the old ones')
     assert len(poses(planner.handle(request()))) > 100
     assert rpc('planner.leftovers', {'job_id': 'nope'})[1][1].startswith('no track')
+
+
+def test_leftovers_skip_lanes(planner):
+    """skip_lanes: what the lanes would mow isn't left over (fill_field), a mow of the loops leaves nothing."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'edges': 'recorded',
+                                 'blade_ahead': 0.17, 'skip_lanes': True})
+    send_map(the_map())
+    full, _ = rpc('planner.plan', {'area_id': 'a', 'poses': True})
+    assert not [seg for seg in full['segments'] if seg['type'] == 'lane' and not seg['maneuver']]
+    folder = os.path.join(os.environ['ROS_HOME'], 'position_history')
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, '1791377699_edges.jsonl'), 'w') as f:
+        f.write(json.dumps({'type': 'new_segment', 'attributes': {'blades': True}, 'points': []}) + '\n')
+        f.write(json.dumps({'type': 'append_points', 'points': [p[:2] for p in full['poses']]}) + '\n')
+    a = rpc('planner.leftovers', {'job_id': 'edges'})[0]['areas']['a']
+    assert a['reason'] == 'nothing_left' and a['left_m2'] < 1.0, a
 
 
 def test_leftovers_auto(planner, monkeypatch):

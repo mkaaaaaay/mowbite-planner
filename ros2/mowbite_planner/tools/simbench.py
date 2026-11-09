@@ -170,6 +170,7 @@ SETTING_VALUES: Dict[Any, Tuple[Any, ...]] = {
     'spin_margin': (0.05, 0.0, 0.15),
     'body_fit': (True, False),
     'mop_up': (False, True),
+    'skip_lanes': (False, True),
     'blade_offset': (0.0, -0.05, 0.08),
     'blade_ahead': (0.0, 0.18, -0.1),
 }

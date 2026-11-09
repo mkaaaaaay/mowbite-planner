@@ -450,6 +450,8 @@ def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]]
     lane_passes = min(lane_out, lane_isl)
     lane_region = inset(free, first + lane_passes * spacing) if lane_out == lane_isl else \
         shrink.shrunk(lane_out, lane_isl)
+    if concentric and cfg.skip_lanes:  # (the loops past the perimeter ones would mow from the next level in)
+        lane_region = levels[most] if len(levels) > most else Polygon()
     if lanes is not None:
         # (body_levels' level k has the edge's min(k, count) loops and each island's own at once: the side with the
         # most loops reaches lane_overlap_passes out, the other no further than its own)

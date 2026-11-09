@@ -270,7 +270,8 @@ class PlannerConfig:
     # taken and checked, but changes nothing since planner 2 (the turns take the room there is in the headland)
     lane_overlap_limit: bool = False
     # leave parts out (OpenMower's skip_area_outline, skip_obstacle_outlines, skip_fill), the rest is
-    # planned as if they were there
+    # planned as if they were there. skip_lanes: no lanes (concentric: no loops past the perimeter ones, narrow strips
+    # no loop of their own), mop_up and what a mow left only outside where the lanes would mow (planner.fill_field)
     skip_outline_loops: bool = False
     skip_obstacle_loops: bool = False
     skip_lanes: bool = False

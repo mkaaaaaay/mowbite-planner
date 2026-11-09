@@ -298,8 +298,17 @@ def _or_widest(area: _Area, best: Optional[CoveragePlan], wide) -> Tuple[Optiona
     return best, None
 
 
+def fill_field(cfg: PlannerConfig, lane_region) -> Optional[Any]:
+    """skip_lanes: where the lanes would mow (lane_region, the blade round it), left to them: mop_up and what a mow
+    left only outside it. None: the lanes are mowed, or there's no room for any."""
+    if not cfg.skip_lanes or lane_region is None or lane_region.is_empty:
+        return None
+    return lane_region.buffer(0.5 * cfg.mower_width, QUAD_SEGS)
+
+
 def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
-    """mop_up on the plan picked: what it leaves of the lawn as drawn mowed where that's worth it (complete.py)."""
+    """mop_up on the plan picked: what it leaves of the lawn as drawn mowed where that's worth it (complete.py),
+    with skip_lanes outside the lanes' field (fill_field)."""
     cfg = plan.config
     if not cfg.mop_up or plan.body_space is None or not plan.poses:
         return plan
@@ -309,6 +318,9 @@ def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
     edges = dict(edge_distance=cfg.transit_edge_distance, edge_cost=cfg.transit_edge_cost)
     transit = TransitPlanner(plan.transit_space, cfg.transit_clearance, **edges)
     lawn = area.lawn()
+    unfilled = fill_field(cfg, plan.lane_region)
+    if unfilled is not None:
+        lawn = polygonal(lawn.difference(unfilled))
     field = polygonal(_lanes_field(plan.cells, 2.0 * cfg.turn_radius, 0.5 * cfg.lane_spacing).intersection(
         plan.remaining)) if cfg.headland_turns and plan.cells else None
     poses, segments, done = complete(cfg, fp, transit, plan.robot_space, plan.transit_space, lawn, plan.poses,
@@ -444,7 +456,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
                                           for ci, cell in enumerate(cells) for lane in cell})
-    poses, segments, done = _finish(route, cfg, space, footprint, mowed, start_xy, timer)
+    poses, segments, done = _finish(route, cfg, space, footprint, mowed, start_xy, timer,
+                                    fill_field(cfg, rings_of.lane_region))
     return CoveragePlan(
         poses=poses, segments=segments, angle=angle, lane_spacing=cfg.lane_spacing, perimeter_loops=route.loops,
         lanes=route.lanes, stats=_stats(route, cfg, space, segments, poses, passes, zones, rings_of, done, timer),
@@ -492,10 +505,10 @@ def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, st
 
 
 def _finish(route: _Route, cfg: PlannerConfig, space, footprint, mowed, start_xy: XY,
-            timer: _Timer) -> Tuple[list, list, Dict[str, Any]]:
-    """The route's path with its turns on the spot rounded off, the body's safety net, what a mow left (mowed), the
-    turns on the spot marked: (poses, segments, {'fitted', 'leftover', 'turning', 'parts'}). mop_up comes later, on
-    the plan picked (_completed)."""
+            timer: _Timer, unfilled=None) -> Tuple[list, list, Dict[str, Any]]:
+    """The route's path with its turns on the spot rounded off, the body's safety net, what a mow left (mowed, not in
+    unfilled: fill_field), the turns on the spot marked: (poses, segments, {'fitted', 'leftover', 'turning',
+    'parts'}). mop_up comes later, on the plan picked (_completed)."""
     if not cfg.turn_on_spot:
         _smooth_spins(route, cfg)
     poses, segments = _assemble(route.segments)
@@ -513,7 +526,7 @@ def _finish(route: _Route, cfg: PlannerConfig, space, footprint, mowed, start_xy
             raise PlanningError('what a mow left is only planned with the body set (robot_width, robot_front, '
                                 'robot_rear)')
         poses, segments, done['leftover'] = leftovers(cfg, footprint, route.transit, space, mowed, start_xy,
-                                                      route.end)
+                                                      route.end, unfilled)
         if not poses:
             raise NothingLeft(f'nothing left to mow where the mower gets to ({done["leftover"]["left_m2"]:.2f} m2 '
                               'left)')

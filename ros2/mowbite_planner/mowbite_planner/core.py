@@ -63,7 +63,7 @@ from .geometry import clean_polygon, polygons, union
 from .mapfile import _points, area_settings, match_area, mow_areas, openmower_settings
 from .mathutil import Pose2D
 from .mqtt_service import PlannerService
-from .planner import plan_coverage, plan_footprint, set_workers
+from .planner import fill_field, plan_coverage, plan_footprint, set_workers
 from .progress import Stopped, stoppable
 from .remote import canon, code_version, plan_key, request_json
 from .report import drive_time, track_mowed
@@ -73,8 +73,9 @@ INVALID_PARAMS = -32602
 INTERNAL = -32603
 METHOD_NOT_FOUND = -32601
 
-# set by every request of mower_logic (from its parameters), a value here wouldn't count. FTC drives forwards only
-FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic', 'skip_lanes': 'mower_logic',
+# set by every request of mower_logic (from its parameters), a value here wouldn't count (skip_lanes is a setting, a
+# request's skip_fill skips the lanes too). FTC drives forwards only
+FIXED = {'skip_outline_loops': 'mower_logic', 'skip_obstacle_loops': 'mower_logic',
          'angle_steps': 'finished mows (planner.angle.reset)', 'finished_mows': 'finished mows'}
 # come with every request of mower_logic (from its parameters, or the area's), unless set here (settings, stored)
 MOWER_LOGIC = {'overlap': '/mower_logic/tool_width', 'perimeter_offset': '/mower_logic/outline_offset',
@@ -1243,14 +1244,17 @@ class PlannerCore:
             turned = -1.0 if cfg.drive == 'reverse' else 1.0  # (mowing it backs up: the blade behind on the track)
             up = keep[-1].angle if keep[-1].stats.get('drive') == 'slope' else None  # (backing down the lanes)
             mowed = track_mowed(runs, cfg.mower_width, turned * cfg.blade_ahead, turned * cfg.blade_offset, up)
-            left = sum(p.area for p in polygons(keep[-1].free_space.difference(mowed)) if p.area >= LEFT_PIECE)
+            # (skip_lanes: what the lanes would mow left alone, see fill_field)
+            unfilled = fill_field(cfg, keep[-1].lane_region)
+            lawn = keep[-1].free_space if unfilled is None else keep[-1].free_space.difference(unfilled)
+            left = sum(p.area for p in polygons(lawn.difference(mowed)) if p.area >= LEFT_PIECE)
             got = []
-            if left > LEFT_MOST * keep[-1].free_space.area:
+            if left > LEFT_MOST * lawn.area:
                 # (not that mow's leftovers: it never mowed this area, or hardly, say it skipped it. Armed it gets no
                 # paths either, the leftovers' job mows leftovers only)
                 out[i] = {'area_id': i, 'paths': [], 'left_m2': round(left, 3), 'reason': 'most_left', 'message':
                           'most of the area is left (%.1f of %.1f m2): left out, mow it on its own' % (
-                              left, keep[-1].free_space.area)}
+                              left, lawn.area)}
                 plans[i] = None
                 continue
             try:
