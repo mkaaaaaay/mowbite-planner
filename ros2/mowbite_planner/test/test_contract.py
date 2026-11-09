@@ -4,6 +4,8 @@ import platform
 import re
 import sys
 
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', 'tools')]
 
@@ -20,12 +22,18 @@ def test_contract_is_the_codes():
         'contract.json is not the code\'s: tools/contract.py --write (a service changed: interface one up)'
 
 
+@pytest.mark.skipif(not os.path.isdir(os.path.join(contract.ROOT, contract.OS)), reason='interface only with os/')
 def test_interface_up_with_a_service_changed():
     before = contract.read()
     assert contract.make(before)['interface'] == before['interface']
     changed = dict(before, interfaces=dict(before['interfaces'], **{'mowbite_planner_interfaces/srv/PlanCoverage': ''}))
     assert contract.make(changed)['interface'] == before['interface'] + 1
     assert contract.make(None)['interface'] == 1
+
+
+def test_no_interface_without_os(tmp_path, monkeypatch):
+    monkeypatch.setattr(contract, 'ROOT', str(tmp_path))
+    assert 'interface' not in contract.make(contract.read()) and 'interfaces' not in contract.make(None)
 
 
 def test_comments_not_counted(tmp_path, monkeypatch):

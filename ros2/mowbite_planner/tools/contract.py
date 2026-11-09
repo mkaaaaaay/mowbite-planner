@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The planner's contract.json (installed to share/mowbite_planner), made from the code: what a robot and its apps may
-rely on. interface counts up with every change of the services the robot builds (the .srv beside this package, on
-branch tron os/'s too, comments not counted); requires: the least Python and packages it runs with.
+rely on. interface (only with os/, MowBite OS' update reads it) counts up with every change of the services the OS
+builds (the .srv beside this package and os/'s, comments not counted); requires: the least Python and packages it runs
+with.
 
   contract.py           the contract as the code has it now
   contract.py --write   into contract.json, interface one up where the services changed
@@ -19,7 +20,8 @@ ROOT = os.path.join(PKG, '..', '..')
 FILE = os.path.join(PKG, 'contract.json')
 sys.path.insert(0, PKG)
 SCHEMA = 1
-INTERFACES = ('ros2/mowbite_planner_interfaces', 'os/mowbite_planner_os_interfaces')
+OS = 'os/mowbite_planner_os_interfaces'
+INTERFACES = ('ros2/mowbite_planner_interfaces', OS)
 # the robots' nodes: the planner.* methods they add to the core's
 ROBOTS = {'openmower': 'ros1/mowbite_planner_ros1/nodes/mowbite_planner_node',
           'mowbite-os': 'os/mowbite_planner_os/mowbite_planner_os/node.py'}
@@ -57,19 +59,19 @@ def make(before=None) -> dict:
     planner = core.PlannerCore(0.18, {}, '', '', '')
     settings = {name: {k: entry[k] for k in SETTING_KEYS if k in entry}
                 for name, entry in sorted(planner.rpc_settings()['settings'].items())}
-    services = digests()
-    interface = (before or {}).get('interface', 0)
-    if not before or before.get('interfaces') != services:
-        interface += 1
     methods = {robot: sorted(set(planner.methods) | added(os.path.join(ROOT, path)))
                for robot, path in sorted(ROBOTS.items()) if os.path.exists(os.path.join(ROOT, path))}
     codes = {'ANSWER_TOO_BIG': export.ANSWER_TOO_BIG, 'INTERNAL': core.INTERNAL,
              'INVALID_PARAMS': core.INVALID_PARAMS, 'METHOD_NOT_FOUND': core.METHOD_NOT_FOUND,
              'SUPERSEDED': core.SUPERSEDED}
-    return {'schema': SCHEMA, 'owner': 'mowbite-planner', 'interface': interface,
-            'requires': dict(sorted(mowbite_planner.REQUIRES.items())), 'files_version': mowbite_planner.FILES_VERSION,
-            'interfaces': services, 'methods': methods, 'codes': codes, 'topics': [core.PROGRESS_TOPIC],
-            'settings': settings}
+    out = {'schema': SCHEMA, 'owner': 'mowbite-planner', 'requires': dict(sorted(mowbite_planner.REQUIRES.items())),
+           'files_version': mowbite_planner.FILES_VERSION, 'methods': methods, 'codes': codes,
+           'topics': [core.PROGRESS_TOPIC], 'settings': settings}
+    if os.path.isdir(os.path.join(ROOT, OS)):
+        services = digests()
+        interface = (before or {}).get('interface', 0)
+        out.update(interface=interface + (not before or before.get('interfaces') != services), interfaces=services)
+    return out
 
 
 def text(contract: dict) -> str:
