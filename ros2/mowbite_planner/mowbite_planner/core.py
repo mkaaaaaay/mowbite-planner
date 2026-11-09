@@ -38,6 +38,7 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
 import collections
 import dataclasses
 import glob
+import hashlib
 import itertools
 import json
 import logging
@@ -65,7 +66,7 @@ from .mathutil import Pose2D
 from .mqtt_service import PlannerService
 from .planner import fill_field, plan_coverage, plan_footprint, set_workers
 from .progress import Stopped, stoppable
-from .remote import canon, code_version, plan_key, request_json
+from .remote import canon, code_version, plan_key, request_json, stack
 from .report import drive_time, track_mowed
 
 # JSON-RPC's codes: the caller's mistake (a PlanningError), the planner's, a method no node answers
@@ -113,10 +114,13 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
           'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET)}
-# plans kept, in memory and on disk (in plans_dir, <code>-<key>.pkl: the ones of another planner code go at the start,
-# none of them is asked for again): the same request again (a preview, then the mow; mowing.plan, then planner.plan)
-# gets the plan at once
+# plans kept, in memory and on disk (in plans_dir, <build>-<key>.pkl: the ones of another planner code or another
+# Python, shapely, GEOS or numpy go at the start, none of them is asked for again), in both the ones last asked for:
+# the same request again (a preview, then the mow; mowing.plan, then planner.plan; a mow going on) gets the plan at once
 CACHED_PLANS = 16
+# MB the plans in memory take at most, the job's too; a plan counts PLAN_ROOM times its pickle's bytes
+CACHED_MB = 100.0
+PLAN_ROOM = 4
 # the planner's no to a request kept too (in memory): an area too small asked for again doesn't take as long again
 REFUSED = 64
 DISK_PLANS = 16
@@ -557,12 +561,14 @@ class PlannerCore:
         self.map, self.map_text = None, None  # (as the robot sent it)
         self.lock = threading.Lock()
         self.set_lock = threading.Lock()
-        self.plans = collections.OrderedDict()
+        self.plans = collections.OrderedDict()  # key -> (plan, where it was planned, its pickle's bytes)
         self.plans_lock = threading.Lock()
         self.refused = collections.OrderedDict()  # key -> the planner's no (PlanningError) to it, the same at once
         self.planning = {}  # a lock for each plan being planned: asked for again meanwhile, it's waited for
         self.plans_dir = plans_dir
         self.code = code_version()
+        # (what the plans in plans_dir are told by: the code and what else they depend on, remote.stack)
+        self.build = hashlib.sha1((self.code + json.dumps(stack(), sort_keys=True)).encode()).hexdigest()[:12]
         self.drop_old_plans()
         self.pinned = self.read_pinned() if self.plans_dir else set()
         self.ahead = None
@@ -1507,8 +1513,9 @@ class PlannerCore:
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
                       reach_over=(), unmowed=()):
-        """plan_coverage(), the last CACHED_PLANS kept, in memory and in plans_dir: the plan only depends on what it's
-        given and the planner's code, the same again (to the last bit) is the same plan."""
+        """plan_coverage(), the plans last asked for kept, in memory (CACHED_PLANS, CACHED_MB) and in plans_dir: the
+        plan only depends on what it's given and the planner's code, the same again (to the last bit) is the same
+        plan."""
         return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over,
                               unmowed)[0]
 
@@ -1569,12 +1576,15 @@ class PlannerCore:
             got = self.plans.get(key)
             if got is not None:
                 self.plans.move_to_end(key)
-                self.local.kept, self.local.on = True, got[1]
-                return self.told(got[0], why), True
-            if key in self.refused:
+            elif key in self.refused:
                 kind, message = self.refused[key]
                 raise kind(message)
-            busy = self.planning.setdefault(key, threading.Lock())
+            else:
+                busy = self.planning.setdefault(key, threading.Lock())
+        if got is not None:
+            self.used(key)
+            self.local.kept, self.local.on = True, got[1]
+            return self.told(got[0], why), True
         with busy:  # (the same asked for meanwhile, planning ahead and a mow: it waits for this one's)
             try:
                 with self.plans_lock:
@@ -1603,18 +1613,45 @@ class PlannerCore:
                                     self.refused.popitem(last=False)
                         raise
                     self.progress.end()
-                    self.write_plan(key, got)
+                    got += (self.write_plan(key, got),)
+                else:
+                    self.used(key)
                 self.local.on = got[1]
                 with self.plans_lock:
                     self.plans[key] = got
                     self.plans.move_to_end(key)
-                    for old in [k for k in self.plans if k not in self.pinned][:max(0, len(self.plans) -
-                                                                                    CACHED_PLANS)]:
-                        del self.plans[old]
+                    gone = self.shed(key)
             finally:
                 with self.plans_lock:
                     self.planning.pop(key, None)
+        if gone:
+            self.loginfo('MowBite Planner: kept plans out of memory: %d, they took more than %.0f MB', gone, CACHED_MB)
         return self.told(got[0], why), kept
+
+    def shed(self, keep):
+        """(plans_lock held) The plans in memory down to CACHED_PLANS and CACHED_MB, the ones asked for longest ago
+        first: over the count not the job's (pin), over the room those too where plans_dir has them (read from there
+        again), never keep's. How many went for the room."""
+        for old in [k for k in self.plans if k not in self.pinned][:max(0, len(self.plans) - CACHED_PLANS)]:
+            del self.plans[old]
+        room, gone = PLAN_ROOM * sum(got[2] for got in self.plans.values()), 0
+        for old in list(self.plans):
+            if room <= CACHED_MB * 1e6:
+                break
+            if old != keep and (old not in self.pinned or
+                                (self.plans_dir and os.path.exists(self.plan_file(old)))):
+                room -= PLAN_ROOM * self.plans.pop(old)[2]
+                gone += 1
+        return gone
+
+    def used(self, key):
+        """The plan of key was asked for again: its file in plans_dir the last used (the oldest go first, write_plan
+        and a robot's own tidying)."""
+        if self.plans_dir:
+            try:
+                os.utime(self.plan_file(key))
+            except OSError:
+                pass
 
     def pin(self, key):
         """The plan of key is the job's (mower_logic got it): kept, in memory and in plans_dir, till the job ends
@@ -1662,13 +1699,14 @@ class PlannerCore:
         return mow_areas(data)[index].get('id') if index is not None else None
 
     def plan_file(self, key):
-        return os.path.join(self.plans_dir, '%s-%s.pkl' % (self.code[:12], key))
+        return os.path.join(self.plans_dir, '%s-%s.pkl' % (self.build, key))
 
     def drop_old_plans(self):
-        """The kept plans of another planner code go (and what a write cut off left), the job's too."""
+        """The kept plans of another planner code or of other versions of what they depend on (remote.stack) go, and
+        what a write cut off left, the job's too."""
         if not self.plans_dir:
             return
-        own = self.code[:12] + '-'
+        own = self.build + '-'
         for path in glob.glob(os.path.join(self.plans_dir, '*.pkl')) + glob.glob(os.path.join(self.plans_dir, '*.tmp')):
             if not (path.endswith('.pkl') and os.path.basename(path).startswith(own)):
                 try:
@@ -1677,13 +1715,14 @@ class PlannerCore:
                     pass
 
     def read_plan(self, key):
-        """(plan, where it was planned) kept in plans_dir, None: none."""
+        """(plan, where it was planned, its pickle's bytes) kept in plans_dir, None: none."""
         if not self.plans_dir:
             return None
         try:
             with open(self.plan_file(key), 'rb') as f:
-                kept = pickle.load(f)  # (written here only: write_plan, never one of the house computer's)
-            return kept['plan'], kept['on']
+                data = f.read()
+            kept = pickle.loads(data)  # (written here only: write_plan, never one of the house computer's)
+            return kept['plan'], kept['on'], len(data)
         except FileNotFoundError:
             return None
         except Exception as e:  # noqa: BLE001 - a broken or old file is planned again
@@ -1712,14 +1751,20 @@ class PlannerCore:
             self.logwarn('MowBite Planner: no time estimate: %s: %s', type(e).__name__, e, exc_info=True)
 
     def write_plan(self, key, got):
-        """(plan, where it was planned) kept in plans_dir, the last DISK_PLANS and the job's (pin)."""
+        """(plan, where it was planned) kept in plans_dir, the DISK_PLANS last used (used) and the job's (pin). Its
+        pickle's bytes, written or not (0: it has none)."""
+        try:
+            data = pickle.dumps({'plan': got[0], 'on': got[1]}, protocol=4)
+        except Exception as e:  # noqa: BLE001 - a plan without a pickle is still the answer
+            self.logwarn('MowBite Planner: plan kept in memory only, no pickle of it: %s: %s', type(e).__name__, e)
+            return 0
         if not self.plans_dir:
-            return
+            return len(data)
         try:
             os.makedirs(self.plans_dir, exist_ok=True)
             path = self.plan_file(key)
             with open(path + '.tmp', 'wb') as f:
-                pickle.dump({'plan': got[0], 'on': got[1]}, f, protocol=4)
+                f.write(data)
             os.replace(path + '.tmp', path)
             with self.plans_lock:
                 pinned = {self.plan_file(k) for k in self.pinned}
@@ -1727,8 +1772,9 @@ class PlannerCore:
                      if f not in pinned]
             for old in files[:-DISK_PLANS]:
                 os.remove(old)
-        except (OSError, pickle.PicklingError) as e:
+        except OSError as e:
             self.logwarn('MowBite Planner: plan not kept in %s: %s', self.plans_dir, e)
+        return len(data)
 
 
 def read_track(path):

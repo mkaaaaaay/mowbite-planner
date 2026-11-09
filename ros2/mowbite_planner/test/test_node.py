@@ -486,13 +486,16 @@ def test_settings_over_rpc(make, tmp_path):
 
 @fake_only
 def test_plan_coverage_of_an_area_is_planner_plans(make):
-    """~/plan_coverage of an area of the map: the plan planner.plan gives (the same fingerprint, kept), with the
-    planner.* settings and the area's own; an outline of no area the same way; the request's lane spacing and
-    overrides of no area's left out with a warning."""
+    """~/plan_coverage of an area of the map: the plan planner.plan gives (the same fingerprint, kept: in memory, and
+    out of it in data_dir, a mow going on after a restart), with the planner.* settings and the area's own; an outline
+    of no area the same way; the request's lane spacing and overrides of no area's left out with a warning."""
     node = make()
     send_map(node, the_map())
     first = plan_area(node)
     assert first.success and first.message.startswith('area a, planned: ')
+    again = plan_area(node)
+    assert again.message.startswith('area a, kept from before: ') and again.fingerprint == first.fingerprint
+    node.core.plans.clear()
     again = plan_area(node)
     assert again.message.startswith('area a, kept from before: ') and again.fingerprint == first.fingerprint
     got, _ = rpc(node, 'planner.plan', {'area_id': 'a'})

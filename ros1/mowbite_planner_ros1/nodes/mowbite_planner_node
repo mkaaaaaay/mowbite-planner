@@ -32,7 +32,7 @@ answer back as it is (where it doesn't answer the MowBite Planner plans). planne
 Parameters (private): mower_width (blade, m), settings (dict of MowBite Planner settings for all areas, on top of
 lane_order skip for OpenMower's forward only FTC controller), settings_file (where the
 settings changed over RPC are kept, on top of these two; default $ROS_HOME/mowbite_planner_settings.json, empty:
-until the next start only), plans_dir (where the plans are kept, the last DISK_PLANS of this planner code, default
+until the next start only), plans_dir (the plans kept, the DISK_PLANS last asked for of this planner code, default
 $ROS_HOME/mowbite_plans, empty: in memory only), max_path_poses (at least 4), frame_id, service, classic_service,
 map_topic, use_map, rpc, web_port (the settings page, see WebPage; 0: none), workers (processes of their own that
 plan, see mowbite_planner.planner.set_workers, the areas planned ahead at once too; 0: all in this one), calib_dir

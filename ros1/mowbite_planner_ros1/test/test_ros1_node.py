@@ -1232,8 +1232,9 @@ def test_rpc_log(planner):
     assert lines[-1]['msg'] == 'MowBite Planner: line %d' % (core.LOG_LINES + 4)
 
 
-def test_plans_of_another_code_dropped(planner):
-    """At the start the kept plans of another planner code go (none of them is asked for again), its own stay."""
+def test_plans_of_another_code_dropped(planner, monkeypatch):
+    """At the start the kept plans of another planner code go (none of them is asked for again), its own stay; with
+    another version of what the plans depend on (remote.stack) those too."""
     os.makedirs(planner.plans_dir, exist_ok=True)
     own = planner.plan_file('a' * 40)
     for name in ('0123456789ab-' + 'a' * 40 + '.pkl', 'b' * 40 + '.pkl', os.path.basename(own) + '.tmp'):
@@ -1241,6 +1242,9 @@ def test_plans_of_another_code_dropped(planner):
     open(own, 'w').close()
     node_module.MowbitePlannerRos1()
     assert os.listdir(planner.plans_dir) == [os.path.basename(own)]
+    monkeypatch.setattr(core, 'stack', lambda: {'shapely': 'another'})
+    assert node_module.MowbitePlannerRos1().plan_file('a' * 40) != own
+    assert os.listdir(planner.plans_dir) == []
 
 
 def test_warnings_logged_once_a_plan(planner):
@@ -2866,3 +2870,68 @@ def test_the_jobs_plans_kept(planner, monkeypatch):
     assert restarted.pinned == {key}
     event('JOB_RESET')
     assert restarted.pinned == set() and node_module.MowbitePlannerRos1().pinned == set()
+
+
+def test_plans_out_of_memory_found_again(planner, monkeypatch):
+    """The plans in memory take CACHED_MB at most (each PLAN_ROOM times its pickle): past it the ones asked for
+    longest ago go, the job's too where plans_dir has it. Asked for again it's read from there, the plan it was, not
+    planned again; without its file there the job's stays. Another map: planned again."""
+    def answer():
+        return [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
+
+    send_map(the_map())
+    first = answer()
+    job, = planner.pinned
+    size = planner.plans[job][2]
+    assert size == os.path.getsize(planner.plan_file(job)) > 0
+    calls, real = [], core.plan_coverage
+    monkeypatch.setattr(core, 'plan_coverage', lambda *args, **kw: calls.append(1) or real(*args, **kw))
+
+    def other(angle):
+        planner.plan_coverage(SMALL, [], planner.current.base.with_overrides({'angle': angle}))
+        return planner.local.key
+
+    a = other(0.1)
+    assert planner.plans[a][2] < 2 * size
+    # (room for the job's and one and a half of the others)
+    monkeypatch.setattr(core, 'CACHED_MB', core.PLAN_ROOM * (size + 1.5 * planner.plans[a][2]) / 1e6)
+    b = other(0.2)
+    assert list(planner.plans) == [a, b] and job in planner.pinned
+    assert [line for _, line in rospy.log if 'out of memory' in line][-1].startswith(
+        'MowBite Planner: kept plans out of memory: 1, ')
+    assert answer() == first and len(calls) == 2
+    assert list(planner.plans) == [b, job]
+    other(0.2)
+    os.remove(planner.plan_file(job))
+    c = other(0.3)
+    assert list(planner.plans) == [job, c] and len(calls) == 3
+    moved = the_map()
+    moved['docking_stations'][0]['position']['x'] = 23.0
+    send_map(moved)
+    planner.handle(request())
+    assert len(calls) == 4 and planner.local.key != job
+
+
+def test_plans_dir_keeps_the_ones_last_asked_for(planner, monkeypatch):
+    """plans_dir keeps the DISK_PLANS last asked for, not the last planned: one asked for again (kept in memory, or
+    read from plans_dir) outlasts the ones planned after it."""
+    monkeypatch.setattr(core, 'DISK_PLANS', 2)
+
+    def other(angle):
+        planner.plan_coverage(SMALL, [], planner.current.base.with_overrides({'angle': angle}))
+        return planner.local.key
+
+    def aged(*keys):
+        for age, key in enumerate(reversed(keys), 1):
+            os.utime(planner.plan_file(key), (time.time() - 100 * age,) * 2)
+
+    a, b = other(0.1), other(0.2)
+    aged(a, b)
+    assert other(0.1) == a
+    c = other(0.3)
+    assert [os.path.exists(planner.plan_file(k)) for k in (a, b, c)] == [True, False, True]
+    planner.plans.clear()
+    aged(a, c)
+    assert other(0.1) == a and planner.local.kept
+    d = other(0.4)
+    assert [os.path.exists(planner.plan_file(k)) for k in (a, c, d)] == [True, False, True]

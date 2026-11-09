@@ -144,9 +144,9 @@ A few worth knowing:
   (`[[x, y], ...]`, x ahead, y left). Without them (or with only a part) the body isn't checked: every plan warns of
   it, in its `warnings` and the log. Blade: `blade_ahead`, `blade_offset`.
 
-Plans are kept (the last 16, the ones of an older planner version go when it starts) and every active area is planned
-ahead 5 s after the map or settings change, so the preview and the next mow find their plan at once. The full list of
-settings is in [`../ros2/README.md`](../ros2/README.md#parameters).
+Plans are kept (the 16 last asked for, the ones of an older planner version go when it starts) and every active area is
+planned ahead 5 s after the map or settings change, so the preview and the next mow find their plan at once. The full
+list of settings is in [`../ros2/README.md`](../ros2/README.md#parameters).
 
 ## Tests
 
