@@ -47,8 +47,9 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     its own (space._body_space: the kept ones as WKB, each thread its own; mowbite_planner's GEOS rule).
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
     at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
-    whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read or a timeout: -32603.
-    On a thread of its own, the other methods go on. Without calib_root not offered.
+    whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read (one without its end
+    line too: its writer ended before it) or a timeout: -32603. On a thread of its own, the other methods go on.
+    Without calib_root not offered.
   - role (planner): transit, a second instance for ~/plan_transit only (MowBite OS' heading home, masterplan 40 V2):
       - a name of its own (the launch's, not mowbite_planner: refused), its own log; one transit at a time, workers 0
       - not there: ~/plan_coverage, ~/plan_from_parameters, ~/coverage_path, the planner.* methods, bridge/rpc/*

@@ -2269,7 +2269,7 @@ def calib_ready(monkeypatch, result=None):
     monkeypatch.setattr(node_module, 'CALIB_TICK', 3600.0)
     asked = []
     if result is not None:
-        monkeypatch.setattr(node_module, 'run_calib', lambda path, interim=False: asked.append((path, interim)) or
+        monkeypatch.setattr(node_module, 'run_calib', lambda path, interim=False, cut=False: asked.append((path, interim)) or
                             dict(result))
     return asked
 

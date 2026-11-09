@@ -178,15 +178,26 @@ def test_too_few_data_no_value(tmp_path):
     assert values(result)['ticks_per_m']['warning'].startswith('too few straight runs: 1 of 4')
 
 
-def test_cut_off(tmp_path):
-    """Cut off in the middle of the stream (the writer gone): read up to there, said so; interim: not said."""
+def test_cut_off(tmp_path, capsys):
+    """Without the end line (its writer gone: ended, crashed, cut off in the middle of the stream or not) refused with
+    why, no evaluation; interim (still recorded) and cut (asked for: OpenMower's node after a restart) read up to there,
+    cut said so."""
     m = calibsim.program(0)
     path = m.recording(str(tmp_path / 'cut.jsonl.gz'), end=None, cut=60000)
-    rec = calibread.read(path)
-    assert rec.cut and rec.end is None
-    result = evaluate(path)
+    whole = m.recording(str(tmp_path / 'whole.jsonl.gz'), end=None)
+    rec = calibread.read(path, unfinished=True)
+    assert rec.cut and rec.end is None and not calibread.read(whole, unfinished=True).cut
+    for refused in (lambda: calibread.read(path), lambda: calibread.read(whole), lambda: evaluate(path),
+                    lambda: evaluate(whole), lambda: evaluate(rec)):
+        with pytest.raises(CalibError) as e:
+            refused()
+        assert str(e.value) == calibread.NO_END == \
+            'no end line: the recording stops in the middle (its writer ended before it), not evaluated'
+    assert calib.main([path]) == 1 and json.loads(capsys.readouterr().out) == {'error': calibread.NO_END}
+    result = evaluate(path, cut=True)
     assert any(w.startswith('the recording stops in the middle') for w in result['warnings'])
     assert not [w for w in evaluate(path, interim=True)['warnings'] if w.startswith('the recording stops')]
+    assert calib.main(['--cut', path]) == 0 and json.loads(capsys.readouterr().out)['values']
 
 
 def test_imu_frame_not_base_link(tmp_path):
@@ -276,14 +287,17 @@ def test_reader_limits_and_order(tmp_path, monkeypatch):
 
 
 def test_no_odometry_or_rtk(tmp_path):
-    result = evaluate(written(tmp_path, '{"t": 1, "k": "imu", "gx": 0, "gy": 0, "gz": 0, "ax": 0, "ay": 0, "az": 9.8}'))
+    end = '{"t": 99, "k": "end", "why": "stop"}'
+    result = evaluate(written(tmp_path, '{"t": 1, "k": "imu", "gx": 0, "gy": 0, "gz": 0, "ax": 0, "ay": 0, "az": 9.8}',
+                              end))
     assert not result['ready'] and all(v['warning'] == 'no odometry' for v in result['values'])
     path = written(tmp_path, *['{"t": %d, "k": "twist", "v": 0.2, "w": 0}' % t for t in range(1, 50)])
-    assert evaluate(path)['warnings'] == ['the recording stops in the middle (no end line): evaluated up to there',
-                                          'no rotation: neither imu nor ticks lines']
+    assert evaluate(path, cut=True)['warnings'] == [
+        'the recording stops in the middle (no end line): evaluated up to there',
+        'no rotation: neither imu nor ticks lines']
     path = written(tmp_path, *['{"t": %d, "k": "twist", "v": 0.2, "w": 0}' % t for t in range(1, 50)] +
                    ['{"t": %d, "k": "imu", "gx": 0, "gy": 0, "gz": 0, "ax": 0, "ay": 0, "az": 9.8}' % t
-                    for t in range(1, 50)])
+                    for t in range(1, 50)] + [end])
     assert all(v['warning'] == 'no RTK fixed' for v in evaluate(path)['values'])
 
 
@@ -436,8 +450,10 @@ def test_recorder(tmp_path, monkeypatch):
     rec.add('gps', 100.6, x=1.0, y=2.0, z=0.0, acc=0.01, fix='fixed', vh=None, mh=None, ve=None, vn=None)
     assert rec.tick(101.0) is None
     rec.flush()
-    got = calibread.read(rec.path)  # (read while it's written: cut off there)
+    got = calibread.read(rec.path, unfinished=True)  # (read while it's written: cut off there)
     assert got.cut and list(got.columns['gps']['x']) == [1.0] and got.params == params
+    with pytest.raises(CalibError, match='^no end line'):  # (as it stands when its writer is ended now)
+        calibread.read(rec.path)
     assert rec.tick(100.0 + calibrecord.LIMIT_S['joystick']) == ('time', None)
     monkeypatch.setattr(calibrecord, 'MAX_BYTES', 1)
     assert rec.tick(102.0) == ('size', None)
@@ -453,5 +469,5 @@ def test_recorder(tmp_path, monkeypatch):
     monkeypatch.setattr(calibrecord, 'FREE', 0)
     rec.start('mow', params, 'base_link', 'x', 200.0)  # (the one before gone, its result too)
     rec.flush()
-    assert not os.path.exists(rec.result) and calibread.read(rec.path).columns['twist']['t'].size == 0
+    assert not os.path.exists(rec.result) and calibread.read(rec.path, unfinished=True).columns['twist']['t'].size == 0
     assert rec.end('stop', 201.0) is None

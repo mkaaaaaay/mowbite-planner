@@ -2,8 +2,8 @@
 antenna_offset_y, on MowBite OS imu_roll and imu_pitch too, each a proposal next to the old value with its sigma,
 quality and whether it's fit to take (ok). Nothing here writes them anywhere.
 
-    python3 -m mowbite_planner.calib [--interim] <recording>   prints the result as JSON (a recording it can't read:
-                                                               {"error": why} and exit code 1)
+    python3 -m mowbite_planner.calib [--interim|--cut] <recording>   prints the result as JSON (one it can't read or
+                                                                     without its end line: {"error": why}, exit 1)
 
 The recording (calibread.py): from OpenMower's ROS 1 node a drive by joystick or a mow (passive), from MowBite OS its
 calibration program (phase marks). Only numpy, no shapely: any thread will do.
@@ -37,7 +37,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from .calibfit import CHUNK_M, RUN_V, Fit, Odometry, antenna_mean, cumulative, ratio, rot, segments, wrap
-from .calibread import FORMAT, PARAMS, CalibError, Recording, read
+from .calibread import FORMAT, NO_END, PARAMS, CalibError, Recording, read
 
 __all__ = ['FORMAT', 'MIN', 'VALUES', 'CalibError', 'Recording', 'evaluate', 'read']
 
@@ -266,14 +266,16 @@ def _tilt(rec: Recording, fit: Fit, stands, need: dict, info: dict, warnings: Li
     return {'imu_roll': (roll, sigma), 'imu_pitch': (pitch, sigma)}
 
 
-def evaluate(path, interim: bool = False) -> dict:
+def evaluate(path, interim: bool = False, cut: bool = False) -> dict:
     """The calibration from a recording (a path or a Recording): {ready, version, based_on: {m, turns (full turns),
     runs}, warnings, values: [{name, value, unit, old, sigma, quality, ok, warning}], info: {gyro_scale, gyro_bias,
     gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_source, ticks_per_m_left,
-    ticks_per_m_right}}. interim:
-    one still recorded (no warning that it stops in the middle). CalibError: no recording that can be read."""
-    rec = path if isinstance(path, Recording) else read(path)
+    ticks_per_m_right}}. interim: one still recorded; cut: one whose writer ended before its end line (evaluated up to
+    there, said so). CalibError: no recording that can be read, one without its end line else (calibread.NO_END)."""
+    rec = path if isinstance(path, Recording) else read(path, unfinished=interim or cut)
     warnings = []
+    if rec.end is None and not interim and not cut:
+        raise CalibError(NO_END)
     if rec.end is None and not interim:
         warnings.append('the recording stops in the middle (no end line): evaluated up to there')
     elif rec.end is not None and rec.end['why'] == 'error':
@@ -410,11 +412,11 @@ def _warn(rec: Recording, odo: Odometry, fit: Fit, values: List[dict], info: dic
 def main(argv: Optional[List[str]] = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     paths = [a for a in args if not a.startswith('--')]
-    if len(paths) != 1 or any(a != '--interim' for a in args if a.startswith('--')):
-        print('usage: python3 -m mowbite_planner.calib [--interim] <recording>', file=sys.stderr)
+    if len(paths) != 1 or any(a not in ('--interim', '--cut') for a in args if a.startswith('--')):
+        print('usage: python3 -m mowbite_planner.calib [--interim|--cut] <recording>', file=sys.stderr)
         return 2
     try:
-        result = evaluate(paths[0], interim='--interim' in args)
+        result = evaluate(paths[0], interim='--interim' in args, cut='--cut' in args)
     except CalibError as e:
         print(json.dumps({'error': str(e)}))
         return 1

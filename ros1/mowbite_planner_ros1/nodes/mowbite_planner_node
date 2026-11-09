@@ -430,7 +430,8 @@ class Calibration:
     size limit, after a mow in mode mow (JOB_COMPLETE), and with enough data: once the runs and turns counted while it's recorded are enough, it's
     evaluated as it stands every CALIB_CHECK s until that's ready. Then it's evaluated (run_calib: a process of its
     own) into folder/result.json, result answers with it. A recording found without its result (the node restarted)
-    is evaluated as the node starts. Not in the worker: it never looks at a plan's shapes.
+    is evaluated as the node starts, without its end line up to there (said so). Not in the worker: it never looks
+    at a plan's shapes.
     Only what's driven with RTK fixed counts (calibrecord.Counts): a mow may be begun without it (in the dock), rtk in
     the progress says it's waiting for it.
     How far it got goes to CALIB_TOPIC (retained, at most every CALIB_EVERY s): {phase (recording, evaluating, done),
@@ -454,7 +455,7 @@ class Calibration:
         if os.path.exists(self.recorder.path) and not os.path.exists(self.recorder.result):
             rospy.loginfo('MowBite Planner: the calibration recorded before the node started is evaluated')
             self.phase = 'evaluating'
-            threading.Thread(target=self.evaluate, name='calibration evaluation', daemon=True).start()
+            threading.Thread(target=self.evaluate, args=(True,), name='calibration evaluation', daemon=True).start()
 
     @staticmethod
     def rtk(msg):
@@ -634,9 +635,9 @@ class Calibration:
                       ': ' + reason if reason else '')
         threading.Thread(target=self.evaluate, name='calibration evaluation', daemon=True).start()
 
-    def evaluate(self):
+    def evaluate(self, cut=False):
         self.send(at_once=True)
-        result = run_calib(self.recorder.path)
+        result = run_calib(self.recorder.path, cut=cut)
         error = result.get('error', 'the evaluation gave no values') if 'values' not in result else None
         if error is None:
             try:

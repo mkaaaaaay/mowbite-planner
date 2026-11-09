@@ -26,6 +26,7 @@ from std_msgs.msg import String  # noqa: E402
 import apicheck  # noqa: E402
 import calibsim  # noqa: E402
 import mowbite_planner  # noqa: E402
+from mowbite_planner import calibread  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
 from mowbite_planner import node as node_module  # noqa: E402
 from mowbite_planner.calib import evaluate  # noqa: E402
@@ -343,6 +344,9 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
         f.write('{"not": "a recording"}\n')
     code, message = rpc(node, 'planner.calib.evaluate', {'path': str(broken)}, 'r8', wait=120.0)[1]
     assert code == -32603 and message.startswith('the calibration not evaluated: ')
+    unended = mower.recording(str(root / 'recordings' / 'unended.jsonl.gz'), end=None)  # (its writer gone)
+    assert rpc(node, 'planner.calib.evaluate', {'path': unended}, 'r8e', wait=120.0)[1] == (
+        -32603, 'the calibration not evaluated: ' + calibread.NO_END)
     # (CALIB_TIMEOUT s at most, on a thread of its own)
     asked, go = [], threading.Event()
     monkeypatch.setattr(core_module, 'run_calib', lambda p, interim=False, timeout=None: asked.append(timeout) or

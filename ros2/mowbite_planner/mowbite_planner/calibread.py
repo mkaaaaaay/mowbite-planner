@@ -1,7 +1,8 @@
 """Reading a calibration recording (format mowbite-calib/1, see mowbite_planner.calib): gzip'd JSON lines, the header
 first, then gps, imu, ticks or twist, cmd, pose and phase lines and the end line. Strict: a line too long, nested,
-not JSON, a number not finite or a field missing is an error, so are a file and its text too big; lines of a kind not
-known are skipped. Only the standard library and numpy."""
+not JSON, a number not finite or a field missing is an error, so are a file and its text too big and one without the
+end line (unless asked for: one still written, or cut off); lines of a kind not known are skipped. Only the standard
+library and numpy."""
 
 import gzip
 import json
@@ -34,6 +35,8 @@ MAX_TEXT = 1024 * 1024 * 1024
 MAX_LINE = 4096
 MAX_LINES = 5000000
 MAX_DEPTH = 3
+# why one without the end line isn't read (its writer ended before it: stopped, crashed or the disk full)
+NO_END = 'no end line: the recording stops in the middle (its writer ended before it), not evaluated'
 
 
 class CalibError(ValueError):
@@ -185,9 +188,10 @@ class _Lines:
             raise CalibError('line %d: no kind (k)' % no)
 
 
-def read(path: str) -> Recording:
-    """The recording at path; CalibError where it isn't one or breaks a limit of the reader (MAX_*). A stream that
-    stops in the middle (still written, or its writer gone) is read up to there (cut)."""
+def read(path: str, unfinished: bool = False) -> Recording:
+    """The recording at path; CalibError where it isn't one or breaks a limit of the reader (MAX_*), or it has no end
+    line (NO_END). unfinished: one without it (still written, or its writer gone) read up to there (cut where the
+    stream stops in the middle)."""
     try:
         size = os.path.getsize(path)
     except OSError as e:
@@ -228,4 +232,6 @@ def read(path: str) -> Recording:
                 got.add(line, lines)
     if header is None:
         raise CalibError('no header: the recording is empty')
+    if got.end is None and not unfinished:
+        raise CalibError(NO_END)
     return Recording(header, got.data, got.fixes, sorted(got.phases), got.end, cut, got.skipped)
