@@ -41,7 +41,10 @@ def failed(rec: Optional[Dict[str, Any]]) -> bool:
 
 
 def sims(rec: Optional[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    return {s['seed']: s for s in (rec or {}).get('sim') or []}
+    # (a planner before 10.11. counted the outermost loop's contacts apart, against the same R0: added in)
+    return {s['seed']: dict(s, r0_n=(s.get('r0_n') or 0) + s['ring_r0_n'],
+                            r0_worst=max(s.get('r0_worst') or 0.0, s.get('ring_r0_worst') or 0.0))
+            if 'ring_r0_n' in s else s for s in (rec or {}).get('sim') or []}
 
 
 def group_of(case: str) -> str:
