@@ -147,12 +147,19 @@ class _Mend:
 
     def _on(self, end: float) -> Tuple[int, List[Pose2D]]:
         """From end (m along the loop) on along it to its pose j, TRACE_STEP apart (no gap where it gets back onto
-        it): (j, the poses before it)."""
+        it), each facing as the loop's pose before it, the way to the next where that's more than TRACE_FACING off (in
+        a bend): (j, the poses before it)."""
         at, ring, n = self.at, self.ring, self.n
         j = min(bisect.bisect_left(at, end + TRACE_ON), n)
-        us = [end + TRACE_STEP * m for m in range(1, int((at[j] - end) / TRACE_STEP) + 1)]
-        return j, [Pose2D(*ring.at(u), self.loop[min(n - 1, bisect.bisect_right(at, u) - 1)].yaw) for u in us
-                   if u < at[j] - 1e-6]
+        us = [u for u in (end + TRACE_STEP * m for m in range(1, int((at[j] - end) / TRACE_STEP) + 1))
+              if u < at[j] - 1e-6]
+        pts = [ring.at(u) for u in us] + [(self.loop[j % n].x, self.loop[j % n].y)]
+        out = []
+        for k, u in enumerate(us):
+            (x, y), (nx, ny) = pts[k], pts[k + 1]
+            yaw, way = self.loop[min(n - 1, bisect.bisect_right(at, u) - 1)].yaw, math.atan2(ny - y, nx - x)
+            out.append(Pose2D(x, y, way if angle_diff(yaw, way) > TRACE_FACING else yaw))
+        return j, out
 
     def turnaround(self, k: int, last: int, ends: Tuple[int, int], footprint,
                    taken: Optional[Callable] = None) -> Optional[Tuple[int, int, List[Pose2D]]]:
