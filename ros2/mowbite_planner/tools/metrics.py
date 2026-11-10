@@ -195,10 +195,6 @@ STRIP = 0.03
 BANDS = {'tango': 0.50}  # m, by mower (long nose), else BAND
 IDLE_CELL, IDLE_STEP, IDLE_NEW = 0.05, 0.2, 0.10
 BODY_PLAN, BODY_DEEP, BODY_CONTACT = 0.01, 0.05, 0.02
-# the outermost loop is measured against where the body was while the outline was recorded, RECORDED_MARGIN off it
-# (edge_margin at most; the request's recorded_margin where its planner has one), apart from all the rest (Master and
-# mkay 31.10.)
-RECORDED_MARGIN = 0.01
 TURN_DEG, TURN_WIN = math.radians(90.0), 0.3  # m each way (U-turns and corners, not the rings round trees)
 EPS = 1e-9
 OUT_TOL, DUP = 0.02, 1e-7
@@ -234,14 +230,12 @@ class Ref:
         # the areas not to mow next to it (the blade keeps off them)
         unmowed = [Polygon(r).buffer(0) for r in req.get('unmowed', []) if len(r) >= 3]
         self.unmowed = unary_union(unmowed) if unmowed else None
-        self.rm = self.r0 = self.rec = None
+        self.rm = self.r0 = None
         if self.cfg.body:
             margin_of = [self.cfg.obstacle_margin if m is None else m for m in req['margins']]
             margin_of += [self.cfg.obstacle_margin] * (len(away) - len(margin_of))
             self.rm = frozen.body_space(rings, away, margin_of, self.cfg)
             self.r0 = frozen.body_space(rings, away, [0.0] * len(away), self.cfg.with_overrides({'edge_margin': 0.0}))
-            margin = min(getattr(self.cfg, 'recorded_margin', RECORDED_MARGIN), self.cfg.edge_margin)
-            self.rec = frozen.body_space(rings, away, margin_of, self.cfg.with_overrides({'edge_margin': margin}))
 
 
 def _as(plan, **kw):
@@ -347,42 +341,6 @@ def _places(found, near=PLACE):
     return out
 
 
-def outer_ring(plan) -> List[bool]:
-    """For each pose whether it's on the outermost loop along the outline (its PERIMETER segments, by plan.origins:
-    of the outline, from level 0), or on a way of the safety net from a pose of it to one of it (like sweep.body_out
-    takes them), also where the completion stage put a detour in that way (out and back to where it left, the way goes
-    on from there: the detour's own poses not). Without origins none."""
-    origins = getattr(plan, 'origins', None) or {}
-    loops = {name for name, o in origins.items() if o.get('kind') == 'outline' and o.get('parent') == 'level-0'}
-    on = [False] * len(plan.poses)
-    for seg in plan.segments:
-        if seg.kind == PERIMETER and seg.source in loops:
-            on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
-    segs, P = plan.segments, plan.poses
-    k = 0
-    while k < len(segs):
-        if segs[k].maneuver != 'body':
-            k += 1
-            continue
-        run, j = [segs[k]], k + 1
-        while True:  # (the next piece of the way after a detour that comes back to where it left)
-            m = j
-            while m < len(segs) and segs[m].maneuver == 'mop_up':
-                m += 1
-            if m == j or m == len(segs) or segs[m].maneuver != 'body':
-                break
-            a, b = P[segs[j].start], P[segs[m - 1].end]
-            if math.hypot(a.x - b.x, a.y - b.y) > 1e-3:
-                break
-            run.append(segs[m])
-            j = m + 1
-        if on[run[0].start] and on[run[-1].end]:
-            for seg in run:
-                on[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
-        k = j
-    return on
-
-
 def _ringish(plan) -> List[bool]:
     """For each pose whether it's on a loop or on a way between pieces of loops (the drives _ring_ways makes), not on
     the completion stage's moves in a loop's path."""
@@ -400,9 +358,8 @@ def _on_spot(P, i: int) -> bool:
 
 
 def plan_body(plan, ref: Ref) -> Dict[str, Any]:
-    """Where the planned body gets out: off the outermost loop more than BODY_PLAN out of R_m (rm_out), turning
-    spin_margin further in (rm_turn_out); on it out of the recorded space (ring_out), and, to know, out of R_m
-    (ring_rm). rm_turn_rule: rm_turn_out's places as mkay counts them (31.10.): on the loops (and the ways between
+    """Where the planned body gets out: more than BODY_PLAN out of R_m (rm_out), turning spin_margin further in
+    (rm_turn_out). rm_turn_rule: rm_turn_out's places as mkay counts them (31.10.): on the loops (and the ways between
     their pieces) only those turning on the spot, of the others (rm_turn_arc) none."""
     from mowbite_planner.footprint import Footprint
     from mowbite_planner.sweep import _backwards
@@ -410,20 +367,17 @@ def plan_body(plan, ref: Ref) -> Dict[str, Any]:
         return {}
     backing = _backwards(plan.segments, len(plan.poses))  # (drive slope, reverse: turning on the spot backed up)
     fp = Footprint(ref.rm, ref.cfg.body_outline, ref.cfg.spin_margin)
-    rec = Footprint(ref.rec, ref.cfg.body_outline, 0.0)
-    ring = outer_ring(plan)
     got = {}
-    for key, space, geometric, mine in (('rm_out', fp, False, False), ('rm_turn_out', fp, True, False),
-                                        ('ring_out', rec, False, True), ('ring_rm', fp, False, True)):
+    for key, geometric in (('rm_out', False), ('rm_turn_out', True)):
         found, where = [], {}
         for a, part in zip(plan.section_starts, _sections_of(plan.poses, plan.section_starts)):
             turn = _turning(part) if geometric else False
             back = backing[a:a + len(part)] if any(backing[a:a + len(part)]) else None
-            bad = [i for i in space.bad_poses(part, turn, back) if ring[a + i] == mine]
+            bad = fp.bad_poses(part, turn, back)
             if bad:
                 on = [turn[i] for i in bad] if geometric else False
-                for i, (d, xy) in zip(bad, space.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
-                                                        on_turn=on, backwards=back and [back[i] for i in bad])):
+                for i, (d, xy) in zip(bad, fp.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
+                                                     on_turn=on, backwards=back and [back[i] for i in bad])):
                     if xy is not None and d > BODY_PLAN:
                         found.append((d, xy))
                         where.setdefault((d, xy), a + i)
@@ -539,29 +493,20 @@ def plan_numbers(plan, ref: Ref, area_id=None) -> Dict[str, Any]:
 
 
 def sim_numbers(plan, samples, ref: Ref) -> Dict[str, Any]:
-    """The simulation's numbers. The body: of the samples following a pose off the outermost loop (outer_ring; the
-    drives OpenMower makes itself too, plan index -1) the places BODY_DEEP in R_m (rm_n5, rm_worst, rm_excess, rm_at)
-    and BODY_CONTACT past the real edges (r0_n, r0_worst, r0_at); of those following one on it the places BODY_DEEP
-    out of the recorded space (ring_n5, ring_worst, ring_at) and past the real edges (ring_r0_n, ring_r0_worst,
-    ring_r0_at)."""
+    """The simulation's numbers. The body: of the samples (the drives OpenMower makes itself too, plan index -1) the
+    places BODY_DEEP in R_m (rm_n5, rm_worst, rm_excess, rm_at) and BODY_CONTACT past the real edges (r0_n, r0_worst,
+    r0_at)."""
     from mowbite_sim.simulate import body_places, mowed_area
     out: Dict[str, Any] = {}
     rest = _rest(ref.lawn, mowed_area(_as(plan, free_space=ref.lawn, config=ref.cfg), samples))
     out['lawn_left_m2'] = round(sum(p.area for p in rest), 4)
     out.update(edge_numbers(ref, rest))
     if ref.rm is not None:
-        ring = outer_ring(plan)
-        on = [s for s in samples if len(s) > 9 and 0 <= s[9] < len(ring) and ring[s[9]]]
-        off = [s for s in samples if not (len(s) > 9 and 0 <= s[9] < len(ring) and ring[s[9]])]
-        for prefix, part, space, contact in (('rm', off, ref.rm, 'r0'), ('ring', on, ref.rec, 'ring_r0')):
-            places, _ = body_places(_as(plan, body_space=space, config=ref.cfg), part)
-            deep = [p for p in places if p[2] >= BODY_DEEP]
-            out.update({prefix + '_n5': len(deep), prefix + '_worst': places[0][2] if places else 0.0,
-                        prefix + '_at': deep[:AT_MAX]})
-            if prefix == 'rm':
-                out['rm_excess'] = round(sum(max(0.0, p[2] - BODY_CONTACT) for p in places), 4)
-            places, _ = body_places(_as(plan, body_space=ref.r0, config=ref.cfg), part)
-            touch = [p for p in places if p[2] >= BODY_CONTACT]
-            out.update({contact + '_n': len(touch), contact + '_worst': places[0][2] if places else 0.0,
-                        contact + '_at': touch[:AT_MAX]})
+        places, _ = body_places(_as(plan, body_space=ref.rm, config=ref.cfg), samples)
+        deep = [p for p in places if p[2] >= BODY_DEEP]
+        out.update({'rm_n5': len(deep), 'rm_worst': places[0][2] if places else 0.0, 'rm_at': deep[:AT_MAX],
+                    'rm_excess': round(sum(max(0.0, p[2] - BODY_CONTACT) for p in places), 4)})
+        places, _ = body_places(_as(plan, body_space=ref.r0, config=ref.cfg), samples)
+        touch = [p for p in places if p[2] >= BODY_CONTACT]
+        out.update({'r0_n': len(touch), 'r0_worst': places[0][2] if places else 0.0, 'r0_at': touch[:AT_MAX]})
     return out

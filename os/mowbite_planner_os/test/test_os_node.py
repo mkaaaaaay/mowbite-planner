@@ -453,30 +453,21 @@ def test_arrives(make, planned, monkeypatch):
 
 
 @fake_only
-def test_transit_as_recorded(make, monkeypatch):
-    """transit_as_recorded (off by default, true not taken for now: AS_RECORDED_NOT): on, ~/plan_transit and arrives
-    try a way by the outermost loop's rules where no other gets there; off: neither does, the plans got to so kept
-    apart from the others (arrives' key)."""
+def test_transit_by_its_margins(make, monkeypatch):
+    """~/plan_transit and arrives plan every way with the margins as they are, no second try (mkay 10.11.); the plans
+    got to so kept by the code alone (arrives' key)."""
     asked = []
 
     def spy(start, goal, *args, **kw):
-        asked.append(kw.get('as_recorded'))
+        asked.append(kw)
         raise PlanningError(f'no way arrives at the goal ({goal[0]:.2f}, {goal[1]:.2f})')
     monkeypatch.setattr(os_module, 'plan_transit', spy)
-    cfg = tron_cfg()
-    for on, params, why in ((False, {}, os_module.AS_RECORDED_NOT),
-                            (False, {'transit_as_recorded': True}, os_module.AS_RECORDED_NOT),
-                            (True, {'transit_as_recorded': True}, ''), (False, {'transit_as_recorded': False}, '')):
-        monkeypatch.setattr(os_module, 'AS_RECORDED_NOT', why)
-        node = make(**params)
-        if params.get('transit_as_recorded') and why:
-            assert any('transit_as_recorded true not taken' in m for _, m in node.get_logger().lines)
-        assert not transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).success
-        gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
-        assert not gets_to(Pose2D(2.0, 2.5, 0.0))
-        assert gets_to.key == dict({'os': os_module.os_code()}, **({} if on else {'as_recorded': False}))
-        assert len(asked) > 1 and set(asked) == {on}
-        asked.clear()
+    node = make()
+    assert not transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).success
+    gets_to = node.core.arrives(GARDEN, [BED], tron_cfg(), [], [])
+    assert not gets_to(Pose2D(2.0, 2.5, 0.0))
+    assert gets_to.key == {'os': os_module.os_code()}
+    assert len(asked) > 1 and all('as_recorded' not in kw for kw in asked)
 
 
 # a lawn a hedge parts: no way from one side to the other
@@ -592,7 +583,8 @@ def test_tron_case_starts_where_a_way_gets_to(make, body):
     """The Tron's case of 30.10. (its map, 2.6 x 1.6 m, its body then and now): every section of the plan after the
     first starts where a way gets to it as mowbite_logic asks ~/plan_transit for it (max_outside 0.3, the area as the
     drivable one), from where the section before it ends. With the request's start where the mower was then (the
-    middle) none is got to from there (the margins kept all the way): refused, START_UNREACHABLE first."""
+    middle) the first section is got to from there too (the outermost loop keeping the margins like the others, mkay
+    10.11.; refused with START_UNREACHABLE before)."""
     case = tron_case()
     node = make(body, **TRON)
     data = case['map_json']
@@ -609,7 +601,12 @@ def test_tron_case_starts_where_a_way_gets_to(make, body):
         assert got.success, (i, got.message)
     request.use_start_pose, request.start_pose = True, pose(*case['pose_at_start_mowing'])
     res = node._on_plan_coverage(request, PlanCoverage.Response())
-    assert not res.success and res.message.startswith(f'area {data["areas"][0]["id"]}: start unreachable: no way ')
+    assert res.success, res.message
+    first = res.path.poses[0].pose
+    got = transit(node, case['pose_at_start_mowing'], (first.position.x, first.position.y,
+                                                       2.0 * math.atan2(first.orientation.z, first.orientation.w)),
+                  drivable=(outline,), obstacles=(), max_outside=0.3)
+    assert got.success, got.message
 
 
 @fake_only
@@ -722,32 +719,29 @@ def test_body_from_robot_geometry(make, planned, tmp_path):
 
 
 @fake_only
-def test_margins_no_less_than_the_floors(make, planned, tmp_path):
-    """edge_margin, obstacle_margin and spin_margin no less than FLOORS (the Tron's, G6): less not settable, a stored
-    one less the floor, an area's, an obstacle's and a transit's own no less."""
+def test_margins_as_set(make, planned, tmp_path):
+    """edge_margin, obstacle_margin and spin_margin as set, no floors (mkay 10.11.): stored, an area's, an obstacle's
+    and a transit's own taken as they are."""
     os.makedirs(tmp_path / 'data' / 'planner')
     with open(tmp_path / 'data' / 'planner' / 'mowbite_planner_settings.json', 'w') as f:
         json.dump({'spin_margin': 0.0, 'edge_margin': 0.08}, f)
     node = make(edge_margin=0.01)
     base = node.core.current.base
-    assert (base.edge_margin, base.obstacle_margin, base.spin_margin) == (0.08, 0.1, 0.05)
+    assert (base.edge_margin, base.obstacle_margin, base.spin_margin) == (0.08, 0.1, 0.0)
     got, _ = rpc(node, 'planner.settings')
-    assert {n: got['settings'][n]['min'] for n in os_module.FLOORS} == os_module.FLOORS
+    assert all(got['settings'][n]['min'] == 0.0 for n in ('edge_margin', 'obstacle_margin', 'spin_margin'))
     assert got['settings']['edge_margin']['max'] == 1.0
-    assert rpc(node, 'planner.settings.set', {'spin_margin': 0.0}, 'r2')[1] == (
-        -32602, 'spin_margin 0.05 m at least here, got 0.0')
-    assert rpc(node, 'planner.settings.set', {'obstacle_margin': 0.2}, 'r3')[1] is None
+    assert rpc(node, 'planner.settings.set', {'spin_margin': 0.0, 'obstacle_margin': 0.2}, 'r2')[1] is None
     data = the_map(planner={'edge_margin': 0.0, 'spin_margin': 0.01})
     data['areas'][1]['properties']['margin'] = 0.02
     send_map(node, data)
     plan_area(node)
     cfg = planned.config()
-    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.05, 0.2, 0.05)
-    assert list(planned.calls[-1][0][7]) == [0.1]
+    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.0, 0.2, 0.01)
+    assert list(planned.calls[-1][0][7]) == [0.02]
     over = [override('edge_margin', 0.0), override('obstacle_margin', 0.03), override('spin_margin', 0.0)]
     cfg = node.transit_config(node.values(over))
-    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.08, 0.2, 0.05)  # (the settings count)
-    assert node.transit_config(node.values([override('edge_margin', 0.3)])).edge_margin == 0.3
+    assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.0, 0.03, 0.0)
 
 
 @fake_only

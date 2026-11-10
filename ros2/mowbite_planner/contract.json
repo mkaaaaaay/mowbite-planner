@@ -272,11 +272,6 @@
       ],
       "type": "string"
     },
-    "recorded_margin": {
-      "min": 0.0,
-      "type": "number",
-      "unit": "m"
-    },
     "remote_planning": {
       "type": "boolean"
     },

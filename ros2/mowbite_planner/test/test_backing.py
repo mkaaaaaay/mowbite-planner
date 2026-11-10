@@ -106,12 +106,11 @@ def test_reverse_is_the_plan_for_the_body_turned_round():
     """reverse: every pose turned round and backwards, the body where the plan for the body turned round has it,
     check_plan finds it inside also turning on the spot (the way in ahead of the pose: it came backing up), the stump
     too; the blade where it mows the same; the outermost loop goes round the other way than the outline was recorded
-    (the mower backing up the way it recorded it: its body where it was then; with the blade in the middle, else the
-    blade's side decides)."""
+    (the mower backing up the way it recorded it; with the blade in the middle, else the blade's side decides)."""
     back = plan_of('reverse', GARDEN, [STUMP], blade_offset=0.0)
     turned = backing.settings(back.config.with_overrides({'drive': 'reverse'}))
     assert back.config.drive == 'reverse' and back.config.robot_front == 0.43 and back.stats['drive'] == 'reverse'
-    assert all(s.reverse for s in back.segments) and back.perimeter_loops and back.recorded_loops
+    assert all(s.reverse for s in back.segments) and back.perimeter_loops
     for seg in back.segments:
         assert all(steps_against(back, seg))
     spins = [i for i in range(1, len(back.poses)) if Footprint.spins(None, back.poses, i)]
@@ -131,7 +130,8 @@ def test_reverse_is_the_plan_for_the_body_turned_round():
                                                         for p in (a, b)):
             assert abs(math.cos(a.yaw - b.yaw) + 1) < 0.01, i
     # (the plan's first loop: driven clockwise, against the outline's counterclockwise points)
-    loop = next(s for s in back.segments if s.kind == PERIMETER and s.source in back.recorded_loops)
+    outer = {n for n, o in back.origins.items() if o['kind'] == 'outline' and o['parent'] == 'level-0'}
+    loop = max((s for s in back.segments if s.kind == PERIMETER and s.source in outer), key=lambda s: s.end - s.start)
     pts = [(p.x, p.y) for p in back.poses[loop.start:loop.end + 1]]
     assert sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(pts, pts[1:] + pts[:1])) < 0
 

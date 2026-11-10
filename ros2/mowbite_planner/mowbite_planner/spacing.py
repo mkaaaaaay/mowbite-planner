@@ -47,21 +47,14 @@ def strip_between_lanes(piece, angles: Sequence[float]) -> bool:
 def turn_places(plan: CoveragePlan, fp: Optional[Footprint]) -> int:
     """(for lane_spacing_mode 'auto') the places, TURN_NEAR apart, where the body sticks more than TURN_OUT into
     spin_margin where the path turns (drive.turning) or turns on the spot: on the loops only turning on the spot (mkay
-    31.10.), none on the outermost one driven as recorded and the safety net's ways along it."""
+    31.10.)."""
     n, P = len(plan.poses), plan.poses
     if fp is None or not n:
         return 0
-    loops = {name for name, o in (plan.origins or {}).items()
-             if o.get('kind') == 'outline' and o.get('parent') == 'level-0'}
-    outer, ringish = [False] * n, [False] * n
+    ringish = [False] * n
     for seg in plan.segments:
-        if seg.kind == PERIMETER and seg.source in loops:
-            outer[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
         if (seg.kind == PERIMETER or seg.maneuver == 'ring') and seg.maneuver != 'mop_up':
             ringish[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
-    for seg in plan.segments:
-        if seg.maneuver == 'body' and outer[seg.start] and outer[seg.end]:
-            outer[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
 
     def spot(i: int) -> bool:
         return any(0 <= j < n and math.hypot(P[j].x - P[i].x, P[j].y - P[i].y) < TURN_SPOT and
@@ -71,7 +64,7 @@ def turn_places(plan: CoveragePlan, fp: Optional[Footprint]) -> int:
     for a, b in zip(plan.section_starts, list(plan.section_starts[1:]) + [n]):
         part = P[a:b]
         turn = turning(part).tolist()
-        bad = [i for i in fp.bad_poses(part, turn) if not outer[a + i] and (not ringish[a + i] or spot(a + i))]
+        bad = [i for i in fp.bad_poses(part, turn) if not ringish[a + i] or spot(a + i)]
         for d, xy in fp.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
                                on_turn=[turn[i] for i in bad]) if bad else ():
             if xy is not None and d > TURN_OUT:

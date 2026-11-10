@@ -1,13 +1,12 @@
 """The way onto the plan's first loop (rings.drive_ring): OpenMower's FTC takes a path on up to its max_goal_angle_error
-off its first pose's heading, along the outermost loop driven as recorded the body turned that much sticks out; the
-path starts before it with a way from where the body turns whatever way it faces, easing onto the loop."""
+off its first pose's heading, along the outermost loop the body turned that much sticks out; the path starts before it
+with a way from where the body turns whatever way it faces, easing onto the loop."""
 
 import math
 from typing import List, Optional, Tuple
 
 from shapely.geometry import Point
 
-from .footprint import Footprint
 from .maneuvers import join, sample_straight
 from .mathutil import Pose2D, angle_diff
 
@@ -16,7 +15,7 @@ from .mathutil import Pose2D, angle_diff
 # (LEAD_IN)
 START_SWING = math.radians(20.0)
 START_SWUNG = 0.5
-# m: where the body turned START_SWING doesn't fit there (the outermost loop along the recorded edge), the path starts
+# m: where the body turned START_SWING doesn't fit there (the outermost loop along the edge), the path starts
 # with a way onto the loop: along the loop's last LEAD_LEN m, LEAD_IN off it on the mowable side there, getting onto it
 # smoothly (the offset (3 - 2 u) u^2 of u from 1 to 0), turning LEAD_TURN at most a step; the first from where the body
 # turns whatever way it faces, fitting turned START_SWING its first START_SWUNG and with the loop's check all along and
@@ -30,10 +29,10 @@ LEAD_SPREAD = 0.25
 LEAD_TRIES = 40
 
 
-def way_onto(route, poses: List[Pose2D], side: float, body: Footprint) -> Optional[List[Pose2D]]:
+def way_onto(route, poses: List[Pose2D], side: float) -> Optional[List[Pose2D]]:
     """The way onto the plan's first loop (poses, the mowable side on the left with side 1, else on the right) from
     where the body turns whatever way it faces (see LEAD_IN), None where it fits turned START_SWING at its start
-    or no such way fits (body: the loop's). [] where it fits turned START_SWING at its start."""
+    or no such way fits. [] where it fits turned START_SWING at its start."""
     fp, step = route.footprint, route.step
     swing = fp.swung(START_SWING)
     at, k = 0.0, 1
@@ -72,20 +71,19 @@ def way_onto(route, poses: List[Pose2D], side: float, body: Footprint) -> Option
             while j < len(way) and at <= START_SWUNG:
                 at += math.hypot(way[j].x - way[j - 1].x, way[j].y - way[j - 1].y)
                 j += 1
-            if all(swing.fit(way[:j])) and body.poses_fit(way[:-1] + poses[:k]):
+            if all(swing.fit(way[:j])) and fp.poses_fit(way[:-1] + poses[:k]):
                 return way
     return None
 
 
-def lead_in(route, poses: List[Pose2D], side: float, body: Footprint) -> Tuple[List[Pose2D], Optional[List[Pose2D]]]:
+def lead_in(route, poses: List[Pose2D], side: float) -> Tuple[List[Pose2D], Optional[List[Pose2D]]]:
     """(the first loop's poses, the way onto it or None): where none fits onto the loop where it starts (way_onto), the
     loop starting at one of its poses LEAD_SPREAD apart instead, the closest to where it would first (LEAD_TRIES). Only
-    for the plan's first loop (part of it: checked like it, in the recorded space where it's driven so), closed (the way
-    runs along its end)."""
+    for the plan's first loop, closed (the way runs along its end)."""
     if route.started or route.segments or route.footprint is None or len(poses) <= 3 or \
             math.hypot(poses[0].x - poses[-1].x, poses[0].y - poses[-1].y) >= 1e-6:
         return poses, None
-    lead = way_onto(route, poses, side, body)
+    lead = way_onto(route, poses, side)
     if lead is None:
         picks, at, last = [], 0.0, -math.inf
         for j in range(1, len(poses) - 1):
@@ -96,7 +94,7 @@ def lead_in(route, poses: List[Pose2D], side: float, body: Footprint) -> Tuple[L
         picks.sort(key=lambda j: (math.hypot(poses[j].x - poses[0].x, poses[j].y - poses[0].y), j))
         for j in picks[:LEAD_TRIES]:
             turned = poses[j:-1] + poses[:j] + [poses[j]]
-            lead = way_onto(route, turned, side, body)
+            lead = way_onto(route, turned, side)
             if lead is not None:
                 return turned, lead
     return poses, lead or None

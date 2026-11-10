@@ -19,9 +19,9 @@ from .calibread import _constant, _float, _int
 from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, Lane, PlannerConfig, PlanningError, SegmentInfo
 from .levels import ring_levels
 from .mathutil import Pose2D, angle_diff
-from .planner import _fixed, _narrow, _recorded_lines, _spacings, _turning
+from .planner import _fixed, _narrow, _spacings, _turning
 from .report import rules
-from .space import build_space, margins_of, recorded_space
+from .space import build_space, margins_of
 
 FORMAT = 'mowbite-plan/1'
 # over MQTT, the mower's own broker without a prefix: the topics under TOPIC (hello, want, request, progress/<id>,
@@ -40,7 +40,7 @@ KINDS = (PERIMETER, LANE, TURN, TRANSIT)
 FACING = math.radians(6.0)
 # the plan's fields in its form; the rest the mower works out: lane_spacing, config and the geometry (plan_geometry)
 SENT = ('poses', 'segments', 'angle', 'perimeter_loops', 'lanes', 'stats', 'warnings', 'angles', 'section_starts',
-        'cells', 'origins', 'recorded_loops')
+        'cells', 'origins')
 
 
 class RemoteError(ValueError):
@@ -175,7 +175,7 @@ def plan_json(plan: CoveragePlan, cfg: PlannerConfig) -> Dict[str, Any]:
             'cells': [[angle, [[[lane.row, lane.x0, lane.x1, lane.y,
                                  [[x0, x1, [v for p in way for v in p]] for x0, x1, way in lane.bends]]
                                 for lane in cell] for cell in cells]] for angle, cells in plan.cells],
-            'origins': plan.origins, 'recorded_loops': plan.recorded_loops}
+            'origins': plan.origins}
 
 
 def planned_with(cfg: PlannerConfig, spacing: Optional[float] = None) -> Tuple[PlannerConfig, PlannerConfig]:
@@ -218,14 +218,10 @@ def plan_geometry(boundary, obstacles, cfg: PlannerConfig, drivable=(), keep_out
     space, footprint = build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of, cfg, False,
                                    unmowed)
     rings_of = ring_levels(space, cfg, None, footprint)
-    recorded = None
-    if footprint is not None and cfg.edges == 'recorded' and rings_of.owners is not None:
-        recorded = recorded_space(*_recorded_lines(cfg, [boundary] + list(drivable) + reach_over,
-                                                   list(obstacles) + list(keep_out)), margin_of, cfg)
     return dict(area=space.area, free_space=space.free, robot_space=space.drive_space,
                 lane_region=rings_of.lane_region, remaining=rings_of.remaining, transit_space=space.transit_space,
                 body_space=space.body_space, levels=rings_of.levels, narrow=_narrow(rings_of, cells, cfg),
-                recorded_space=recorded, unmowed=space.unmowed)
+                unmowed=space.unmowed)
 
 
 def _spacing_of(plan: CoveragePlan, cfg: PlannerConfig) -> Optional[float]:
@@ -256,8 +252,7 @@ def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = (
     sent = dict(poses=poses, segments=segments, angle=_number(form.get('angle'), 'angle'), perimeter_loops=loops,
                 lanes=lanes, stats=_object(form.get('stats'), 'stats'), warnings=_strings(form, 'warnings'),
                 angles=[_number(a, 'angles') for a in _list(form.get('angles'), 'angles')], section_starts=starts,
-                cells=cells, origins=_object(form.get('origins'), 'origins'),
-                recorded_loops=_strings(form, 'recorded_loops'))
+                cells=cells, origins=_object(form.get('origins'), 'origins'))
     boundary, obstacles, _, _, _, drivable, keep_out, margins = args
     return CoveragePlan(lane_spacing=used.lane_spacing, config=own, **sent, **plan_geometry(
         boundary, obstacles, used, drivable, keep_out, margins, reach_over, unmowed, cells))

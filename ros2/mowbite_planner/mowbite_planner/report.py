@@ -10,7 +10,7 @@ from shapely.prepared import prep
 from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
 from .geometry import inset, polygons, union
 from .mathutil import Pose2D
-from .sweep import blade_over, blade_points, body_out, plan_footprint, recorded_footprint, swept_area
+from .sweep import blade_over, blade_points, body_out, plan_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
@@ -195,7 +195,7 @@ def rules(plan: CoveragePlan) -> Dict[str, Any]:
             and (cfg is None or cfg.drive == 'forward'):
         hard.append('drives backwards')
     footprint = plan_footprint(plan, blade=False)
-    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
+    body = body_out(poses, plan.segments, plan.section_starts, footprint) \
         if footprint is not None else []
     if body:
         hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '

@@ -14,7 +14,7 @@ from shapely.geometry import LineString
 from .config import DRIVE_SPIN_MARGIN, LANE, TURN, CoveragePlan, PlannerConfig, PlanningError, SegmentInfo
 from .handover import _lengths
 from .mathutil import Pose2D, normalize_angle
-from .sweep import body_out, plan_footprint, recorded_footprint
+from .sweep import body_out, plan_footprint
 
 # m along the lane the S takes to get one lane spacing across (longer, flatter, where the body doesn't fit: by
 # SHIFT_MORE up to SHIFT_MAX), m between poses on it
@@ -64,7 +64,7 @@ def backed(cfg: PlannerConfig) -> Tuple[PlannerConfig, List[str]]:
 def settings(cfg: PlannerConfig) -> PlannerConfig:
     """What a plan with cfg.drive (slope, reverse) is planned with: the body checked, spin_margin at least
     DRIVE_SPIN_MARGIN; slope lanes only; reverse the body turned round (its front and rear swapped, the blade's place
-    and the outline turned with it). drive stays (planner._as_recorded goes by it)."""
+    and the outline turned with it). drive stays (planner._new_route goes by it)."""
     safe = cfg.with_overrides({'body_fit': True, 'spin_margin': max(cfg.spin_margin, DRIVE_SPIN_MARGIN)})
     if cfg.drive == 'slope':
         return safe.with_overrides({'perimeter_passes': 0, 'obstacle_passes': 0, 'fill_pattern': 'lanes'})
@@ -241,7 +241,6 @@ def updown(base: CoveragePlan) -> CoveragePlan:
         return dataclasses.replace(base, warnings=list(base.warnings) + [
             'drive slope: too small for lanes up and down, planned with turns between the lanes'])
     fp = plan_footprint(base, blade=False)
-    rec = recorded_footprint(base)
     step = min(STEP * 2, base.config.waypoint_spacing or STEP * 2) if base.config else STEP * 2
     shifts = [SHIFT] * len(spans)
     straight = fp.spun(base.config.spin_margin) if fp is not None and base.config else fp
@@ -251,7 +250,7 @@ def updown(base: CoveragePlan) -> CoveragePlan:
         poses = [Pose2D(*to_map(u, v), normalize_angle(yaw + base.angle))
                  for u, v, yaw, _, _, _ in local]
         segments = _segments(local)
-        out = body_out(poses, segments, [0], fp, rec) if fp is not None else []
+        out = body_out(poses, segments, [0], fp) if fp is not None else []
         if not out:
             break
         # where the body would fit facing up the lane, an S too steep gets flatter, at its flattest the lane at the

@@ -510,16 +510,19 @@ def test_margins_of_the_map_obstacles(planner, monkeypatch):
 
 
 def test_settings_of_before_left_out(planner):
-    """Settings that are fixed now or gone (allow_reverse, min_turn_radius, smooth_spins, waypoint_spacing, ...) are
+    """Settings that are fixed now or gone (allow_reverse, min_turn_radius, smooth_spins, recorded_margin, ...) are
     left out where they still come: from the settings file (it plans as without, they're gone from it after the next
     set) and from an app, the rest set as asked. planner.settings doesn't list them."""
     with open(stored_file(), 'w') as f:
-        json.dump({'allow_reverse': True, 'min_turn_radius': 0.3, 'body_tolerance': 0.1, 'turn_radius': 0.3}, f)
+        json.dump({'allow_reverse': True, 'min_turn_radius': 0.3, 'body_tolerance': 0.1, 'turn_radius': 0.3,
+                   'recorded_margin': 0.0}, f)
     node = node_module.MowbitePlannerRos1()
     assert node.current.stored == {'turn_radius': 0.3} and not hasattr(node.base, 'allow_reverse')
-    result, error = rpc('planner.settings.set', {'smooth_spins': False, 'waypoint_spacing': 0.2, 'edge_margin': 0.06})
+    result, error = rpc('planner.settings.set', {'smooth_spins': False, 'waypoint_spacing': 0.2, 'edge_margin': 0.06,
+                                                 'recorded_margin': 0.02})
     assert error is None and result['settings']['edge_margin']['value'] == 0.06
-    assert not {'allow_reverse', 'min_turn_radius', 'smooth_spins', 'waypoint_spacing'} & set(result['settings'])
+    assert not {'allow_reverse', 'min_turn_radius', 'smooth_spins', 'waypoint_spacing', 'recorded_margin'} & \
+        set(result['settings'])
     with open(stored_file()) as f:
         assert json.load(f) == {'edge_margin': 0.06, 'turn_radius': 0.3}
     assert 'can_back_up' not in result

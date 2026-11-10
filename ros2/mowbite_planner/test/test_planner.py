@@ -1298,19 +1298,6 @@ def test_compact_leaves_out_poses_on_the_line():
     assert max(math.hypot(q.x - p.x, q.y - p.y) for p, q in zip(kept, kept[1:])) <= cfg.waypoint_spacing + 1e-9
 
 
-def test_recorded_space_no_tighter_than_the_body_space():
-    """The outermost loop driven as recorded may go where the body was then, recorded_margin off it, but edge_margin
-    at most: where the other loops may go too (with recorded_margin 0.05 and edge_margin 0.03 the safety net's ways,
-    checked in the body space, would stick out of it)."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, edge_margin=0.03, recorded_margin=0.05))
-    lawn = rect(0, 0, 10, 6)
-    body = space._body_space([lawn], [], [], cfg)[0]
-    rec = space.recorded_space([lawn], [], [], cfg)
-    assert rec.symmetric_difference(body).area < 1e-9
-    looser = space.recorded_space([lawn], [], [], dataclasses.replace(cfg, recorded_margin=0.01))
-    assert looser.contains(body) and looser.area > body.area + 0.5
-
-
 def test_trace_gets_back_onto_a_loop_before_its_end():
     """A way driven anew (trace.repaired) gets back onto the loop, blended onto it, only where that's done before the
     loop's end (where it was opened): past it it'd be on its start again, a step back (real-ape/2@tango, 5b)."""
@@ -1397,9 +1384,7 @@ def forget_bodies():
 def test_robot_outline_of_the_rectangle_plans_the_same():
     """robot_outline the corners of the rectangle of robot_width, robot_front and robot_rear: the same plans to the
     last bit (poses, segments, stats, warnings, body space), at other angles, with headland_turns, concentric with the
-    loops worked out, in a dead end; given on its own or with them (as JSON gives it). (The loops the other way round
-    than the outline was recorded: with robot_outline the outermost loop driven that way is checked against where the
-    body was then, see route.recorded_fp.)"""
+    loops worked out, in a dead end; given on its own or with them (as JSON gives it)."""
     shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
     garden = dict(start=(1, 1, 0.0), end=(1, 1))
     cases = [(GARDEN, [TREE, BED], PlannerConfig(**dict(MOWER, **NX60I, angle=math.radians(33))), garden),
@@ -1410,7 +1395,6 @@ def test_robot_outline_of_the_rectangle_plans_the_same():
               dict(start=(0.54, 9.5, 0.0), end=(0.54, 9.5))),
              (shape, [], PlannerConfig(**dict(MOWER, **NX60I)), dict(start=(1, 1, 0.0)))]
     for i, (lawn, obstacles, cfg, ends) in enumerate(cases):
-        cfg = dataclasses.replace(cfg, perimeter_direction='cw' if Polygon(lawn).exterior.is_ccw else 'ccw')
         corners = [list(p) for p in cfg.body_outline]
         outline = cfg.with_overrides({'robot_outline': corners}) if i % 2 else \
             dataclasses.replace(cfg, robot_width=None, robot_front=None, robot_rear=None, robot_outline=corners)
@@ -1428,10 +1412,9 @@ def test_robot_outline_rounded_front(monkeypatch):
     """The front corners rounded: turning on the spot the body reaches 4 cm less far from the centre, a turn by a wall
     the rectangle's front corner swings over fits. The real edges are where the rounded body was while they were
     recorded, less than the rectangle's. In a dead end too narrow to turn round in at its end the path drives a metre
-    further in before it turns round than the rectangle's with its outermost loop keeping the margins like the others
-    (loops_not_as_recorded, as before mkay's word of 31.10.), leaving less unmowed, nothing sticking out (also against
-    the real edges worked out here on their own with the rounded body, the outermost loop driven the way the outline
-    was recorded against where the body was then)."""
+    further in before it turns round than the rectangle's with its outermost loop going round by the heading
+    (loops_by_heading), leaving less unmowed, nothing sticking out (also against the real edges worked out here on their
+    own with the rounded body)."""
     room = Polygon(rect(0, 0, 10, 10))
     box, front = Footprint(room, BODY), Footprint(room, ROUNDED)
     assert box.reach == math.hypot(0.43, 0.2) and front.reach < box.reach - 0.04
@@ -1440,18 +1423,14 @@ def test_robot_outline_rounded_front(monkeypatch):
     assert front.fits_turn(9.55, 5, 0.0, math.pi / 2) and not box.fits_turn(9.55, 5, 0.0, math.pi / 2)
     shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
     rounded = plan_coverage(shape, [], PlannerConfig(**dict(MOWER, robot_outline=ROUNDED)), start=(1, 1, 0.0))
-    loops_not_as_recorded(monkeypatch)
+    loops_by_heading(monkeypatch)
     plans = [plan_coverage(shape, [], PlannerConfig(**dict(MOWER, **NX60I)), start=(1, 1, 0.0)), rounded]
     assert plans[0].body_space.buffer(1e-6).covers(plans[1].body_space)
     assert plans[1].body_space.area < plans[0].body_space.area - 0.05
     plan, cfg = plans[1], plans[1].config
     check_invariants(plan, cfg)
     assert plan.stats['body_fit']['jumps'] == [] and check_plan(plan)['body_out'] == []
-    # (the outermost loop driven the way the outline was recorded: where the body was then, see recorded_poses)
-    mild, rec = recorded_poses(plan), dataclasses.replace(cfg, edge_margin=cfg.recorded_margin)
-    assert mild and [i for i in outside_room(plan, recorded_room(cfg, [shape], [], []), spin=cfg.spin_margin)
-                     if i not in mild] == []
-    assert [i for i in outside_room(plan, recorded_room(rec, [shape], [], [])) if i in mild] == []
+    assert outside_room(plan, recorded_room(cfg, [shape], [], []), spin=cfg.spin_margin) == []
     # (the rectangle's plan, starting away from the corner by the dock too, gets further in than it did before that)
     assert max(p.y for p in plan.poses) > max(p.y for p in plans[0].poses) + 0.5
     assert check_plan(plan)['left_m2'] < check_plan(plans[0])['left_m2'] - 0.5
@@ -1638,9 +1617,9 @@ def test_body_fit_starts_later(monkeypatch):
     driving on) FIT_LATER after it at most, it starts later too, that a place left out. Places left out further on
     still are, with a warning. (Not starting elsewhere, see rings.START_CLEAR: as where the plan doesn't start with a
     loop. The loops as planned: trace.repaired drives the corner by the dock anew, the body fitting all along. The dock
-    a little closer to the western edge: the loop starts on it, the corner right after. The outermost loop keeping the
-    margins like the others, loops_not_as_recorded.)"""
-    loops_not_as_recorded(monkeypatch)
+    a little closer to the western edge: the loop starts on it, the corner right after. The outermost loop going round
+    by the heading, loops_by_heading.)"""
+    loops_by_heading(monkeypatch)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     monkeypatch.setattr(bodyfit, 'FIT_ROUND', 0)
     monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
@@ -1751,7 +1730,7 @@ def test_lead_onto_the_first_loop(monkeypatch):
     assert all(swing.fit(ahead)) and not all(swing.fit(plan.poses[first.end:first.end + 6]))
     assert max(angle_diff(a.yaw, b.yaw) for a, b in zip(way, way[1:])) <= leadin.LEAD_TURN + 1e-9
     assert check_plan(plan)['body_out'] == []
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])
     plain = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(5, 1, 0.0), end=(5, 1))
     assert plain.segments[0].maneuver != 'lead'
     assert check_plan(plan)['left_m2'] <= check_plan(plain)['left_m2'] + 0.01
@@ -1799,7 +1778,7 @@ def test_body_fit_late_start_left_out(monkeypatch):
     the plan doesn't start with a loop. The loops as planned: trace.repaired would drive the poses made not to fit
     here anew.)"""
     monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])
     monkeypatch.setattr('mowbite_planner.rings.repaired', lambda poses, *args, **kw: (poses, 0, 0))
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
@@ -1862,10 +1841,9 @@ def test_body_fit_late_start_left_out(monkeypatch):
 def test_body_fit_turns_round(monkeypatch):
     """A dead end narrowing to a point, too narrow to turn round in at its end without backing up: the path drives in
     only as far as it can still turn round and turns there, nowhere jumping, nothing sticking out (also against the real
-    edges worked out here on their own), stats saying where and what that leaves out. (The outermost loop keeping the
-    margins like the others, loops_not_as_recorded; the way it was recorded it gets further in, see
-    test_robot_outline_rounded_front.)"""
-    loops_not_as_recorded(monkeypatch)
+    edges worked out here on their own), stats saying where and what that leaves out. (The outermost loop going round
+    by the heading, loops_by_heading.)"""
+    loops_by_heading(monkeypatch)
     shape = [(0, 0), (6, 0), (6, 3), (3.5, 3), (3.1, 9), (2.9, 9), (2.5, 3), (0, 3)]
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
     plan = plan_coverage(shape, [], cfg, start=(1, 1, 0.0))
@@ -2100,20 +2078,18 @@ def test_turns_from_the_way_keep_spin_margin(spin):
     """Where the path turns as a turn does (drive.turning: 90 degrees within 0.3 m, as the measuring tools find it), on
     the loops only turning on the spot, the body keeps spin_margin (but BODY_OUT) further off the edges of its space:
     the drives into the lanes and the safety net's ways too, a bigger spin_margin as well (it kept none on some of
-    those, stage 8). The outermost loop driven as recorded keeps to where the body was then."""
+    those, stage 8)."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, spin_margin=spin))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     fp, poses = Footprint(plan.body_space, cfg.body_outline, spin), plan.poses
-    ring, kept = [False] * len(poses), [False] * len(poses)
+    ring = [False] * len(poses)
     for s in plan.segments:
         if (s.kind == PERIMETER or s.maneuver == 'ring') and s.maneuver != 'mop_up':
             ring[s.start:s.end + 1] = [True] * (s.end + 1 - s.start)
-        if s.kind == PERIMETER and s.source in plan.recorded_loops:
-            kept[s.start:s.end + 1] = [True] * (s.end + 1 - s.start)
     turn = [False] * len(poses)
     for a, b in zip(plan.section_starts, plan.section_starts[1:] + [len(poses)]):
         turn[a:b] = turning(poses[a:b]).tolist()
-    at = [i for i in range(1, len(poses)) if turn[i] and not kept[i] and (not ring[i] or on_spot(poses, i)) and
+    at = [i for i in range(1, len(poses)) if turn[i] and (not ring[i] or on_spot(poses, i)) and
           i not in plan.section_starts]
     assert len(at) > 500
     out = fp.out_by([(poses[i - 1], poses[i]) for i in at], on_turn=True)
@@ -2150,21 +2126,14 @@ PATH_END = [(6.809, -4.12), (6.631, -4.748), (6.553, -4.971), (6.358, -5.828), (
 def test_body_fit_turns_round_further_to_the_side():
     """Where the loops go round the end of the path a front rounded a little fits facing their way closer to its edge
     than it turns round there: where nothing else fits the path turns round further to the side, nowhere jumping,
-    nothing sticking out (also against the real edges worked out here on their own; the outermost loop, driven the way
-    the outline was recorded, against where the body was then: recorded_margin off them, turning without
-    spin_margin)."""
+    nothing sticking out (also against the real edges worked out here on their own)."""
     cfg = PlannerConfig(**dict(SHADE_MOWER, fill_pattern='lanes', perimeter_passes=3, edge_margin=0.04,
                                obstacle_margin=0.04, robot_outline=rounded(0.41, 0.43, 0.18, 0.15)))
     plan = plan_coverage(PATH_END, [], cfg, start=(5.973, -4.3, -1.57), end=(5.973, -4.3))
     check_invariants(plan, cfg)
     assert plan.stats['body_fit']['jumps'] == [] and len(plan.section_starts) == 1
     assert check_plan(plan)['body_out'] == []
-    recorded = {i for s in plan.segments if s.kind == PERIMETER and s.source in plan.recorded_loops
-                for i in range(s.start, s.end + 1)}
-    assert recorded and [i for i in outside_room(plan, recorded_room(cfg, [PATH_END], [], []), spin=cfg.spin_margin)
-                         if i not in recorded] == []
-    mild = dataclasses.replace(cfg, edge_margin=cfg.recorded_margin)
-    assert outside_room(plan, recorded_room(mild, [PATH_END], [], [])) == []
+    assert outside_room(plan, recorded_room(cfg, [PATH_END], [], []), spin=cfg.spin_margin) == []
 
 
 def test_body_fit_drives_on(monkeypatch):
@@ -2174,9 +2143,9 @@ def test_body_fit_drives_on(monkeypatch):
     getting back on at the first pose it gets to of every FIT_STEP[-1] m (FIT_ON). Trying twice as far each time from
     the place on (FIT_ON 0) it gets back on further round the loop, more of it left out, more unmowed (the loops not
     going on past their start for what's left out of them there, _Route.loops_on: FIT_ON's own). The outermost loop
-    keeping the margins like the others (loops_not_as_recorded)."""
+    going round by the heading (loops_by_heading)."""
     monkeypatch.setattr(_Route, 'loops_on', lambda self, ends: {})
-    loops_not_as_recorded(monkeypatch)
+    loops_by_heading(monkeypatch)
     lawn, obstacles = rect(0, 0, 5.3, 4.9), [rect(0.28, 2.7, 1.82, 3.86), circle(0.42, 2.25, 0.33, 16)]
     cfg = PlannerConfig(**dict(SHADE_MOWER, edge_margin=0.05, obstacle_margin=0.05, angle=math.radians(30)))
     plan = plan_coverage(lawn, obstacles, cfg, start=(5.0, 0.3, 1.6), end=(5.0, 0.3))
@@ -2296,7 +2265,7 @@ def test_body_fit_drives_on_not_too_far(monkeypatch):
     23 degree spike's tip nothing fit, and driving on got back onto the path only some 140 m further on, the outer loops
     all left out in between. Driving on leaves FIT_ON_MAX m of loops and lanes out at most (with the loops' levels from
     the body no place there comes near that any more: shown with a limit of 4 m), turning round further to the side
-    instead, less left out, no jump. (The outermost loop keeping the margins like the others, loops_not_as_recorded.)"""
+    instead, less left out, no jump. (The outermost loop going round by the heading, loops_by_heading.)"""
     def kept(pts):
         return [tuple(struct.unpack('f', struct.pack('f', v))[0] for v in p) for p in pts]
 
@@ -2313,8 +2282,8 @@ def test_body_fit_drives_on_not_too_far(monkeypatch):
     cfg = PlannerConfig(mower_width=0.18, overlap=1 - 0.14 / 0.18, perimeter_passes=3, angle=0.0, perimeter_offset=0.0,
                         lane_order='skip', narrow_parts='loops', robot_width=0.41, robot_front=0.43, robot_rear=0.18,
                         blade_ahead=0.185)
-    loops_not_as_recorded(monkeypatch)
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (where it starts as before)
+    loops_by_heading(monkeypatch)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])  # (where it starts as before)
     before = plan_coverage(zone, islands, cfg, start=(-1.5, 0.5, 0.0), end=(-1.5, 0.5))
     was = before.stats['body_fit']
     assert max(m for _, _, m in was['places']) <= bodyfit.FIT_ON_MAX
@@ -2406,7 +2375,7 @@ def test_body_fit_tries_grow_with_the_area(monkeypatch):
     there)."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     lawn, dock = rect(0, 0, 10, 6), (5, -0.3, 0.0)
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (the safety net's way to the start)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])  # (the safety net's way to the start)
     planned = plan_coverage(lawn, [], dataclasses.replace(cfg, body_fit=False), start=dock, end=dock[:2])
     space = plan_footprint(planned).space
     k = next(k for k in range(len(planned.poses)) if path_length(planned.poses[:k + 1]) > 3.0)
@@ -2492,9 +2461,8 @@ def outside_room(plan, room, slack=1e-3, spin=0.0):
     return bad
 
 
-def loops_not_as_recorded(monkeypatch):
-    """The outermost loop driven like the others, not the way the outline was recorded (as the rectangle's was before
-    mkay's word of 31.10.): the body keeping the margins there too."""
+def loops_by_heading(monkeypatch):
+    """The outermost loop going round by the heading like the others, not the way the outline was recorded."""
     new_route = planner._new_route
 
     def route(*args, **kw):
@@ -2505,27 +2473,8 @@ def loops_not_as_recorded(monkeypatch):
 
 
 def outside_rooms(plan, cfg, outlines, holes, margins, spin=0.0):
-    """outside_room against recorded_room(cfg, outlines, holes, margins) (spin), but the outermost loop driven the way
-    the outline was recorded (recorded_poses): against where the body was then, recorded_margin off it (edge_margin at
-    most), turning without spin_margin. Since 01.11. every body's (mkay 31.10.), the rectangle's too."""
-    mild = recorded_poses(plan)
-    rec = dataclasses.replace(cfg, edge_margin=min(cfg.recorded_margin, cfg.edge_margin))
-    room, then = recorded_room(cfg, outlines, holes, margins), recorded_room(rec, outlines, holes, margins)
-    return [i for i in outside_room(plan, room, spin=spin) if i not in mild] + \
-        [i for i in outside_room(plan, then) if i in mild]
-
-
-def recorded_poses(plan):
-    """The poses of the loops driven the way the outline was recorded and of the safety net's ways from a pose of one
-    to one of it (checked against where the body was then, recorded_margin off it, turning without spin_margin)."""
-    loops, out = set(plan.recorded_loops), set()
-    for s in plan.segments:
-        if s.kind == PERIMETER and s.source in loops:
-            out.update(range(s.start, s.end + 1))
-    for s in plan.segments:
-        if s.maneuver == 'body' and s.start in out and s.end in out:
-            out.update(range(s.start, s.end + 1))
-    return out
+    """outside_room against recorded_room(cfg, outlines, holes, margins) (spin)."""
+    return outside_room(plan, recorded_room(cfg, outlines, holes, margins), spin=spin)
 
 
 def turn_poses(plan):
@@ -2680,12 +2629,9 @@ def test_margins_kept():
     check_invariants(plan, cfg, [bed])
     assert check_plan(plan)['body_out'] == []
     assert outside_rooms(plan, cfg, [lawn], [bed, keep], [cfg.obstacle_margin] * 2) == []
-    corners, fp, mild = MultiPoint(lawn).buffer(1.0), plan_footprint(plan), recorded_poses(plan)
-    # (the outermost loop driven the way the outline was recorded: recorded_margin off the line, see outside_rooms)
-    lines = [Polygon(lawn).buffer(0.5 * cfg.robot_width - m + 1e-3, join_style=2)
-             for m in (cfg.edge_margin, min(cfg.recorded_margin, cfg.edge_margin))]
-    assert all(lines[i in mild].covers(fp.body(p.x, p.y, p.yaw)) for i, p in enumerate(plan.poses)
-               if not corners.contains(Point(p.x, p.y)))
+    corners, fp = MultiPoint(lawn).buffer(1.0), plan_footprint(plan)
+    line = Polygon(lawn).buffer(0.5 * cfg.robot_width - cfg.edge_margin + 1e-3, join_style=2)
+    assert all(line.covers(fp.body(p.x, p.y, p.yaw)) for p in plan.poses if not corners.contains(Point(p.x, p.y)))
     loops = [p for s in plan.segments if s.kind == PERIMETER and s.maneuver != 'mop_up'
              for p in plan.poses[s.start:s.end + 1]]
     # (round the corners of the area to keep out of into the lawn RING_EPS closer at most, levels.body_levels)
@@ -3224,7 +3170,7 @@ def test_body_fit_kept(monkeypatch):
     """Where _fit_body got to is kept every FIT_KEEP poses: a plan at another angle goes on from where its path (the
     loops) was still the same, the same plan as worked out afresh. Other settings of it start afresh."""
     monkeypatch.setattr(bodyfit, 'FIT_KEEP', 50)
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])  # (the loops from the start on)
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])  # (the loops from the start on)
     lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
     config._FITTED.clear()
@@ -3358,7 +3304,7 @@ def test_turn_on_spot():
 def test_one_turn_radius():
     """No turn, drive or loop out tighter than turn_radius (min_turn_radius is it): turning on the spot instead, but
     for a U-turn between lanes where none of it fits, which is rounded as wide as fits (lanes ending earlier for it).
-    min_turn_radius and smooth_spins of before are left out of the settings."""
+    min_turn_radius, smooth_spins and recorded_margin of before are left out of the settings."""
     def arcs(plan):
         # radii of the runs of turning poses that turn 45 degrees at least (not counting turns on the spot)
         out, i, P = [], 1, plan.poses
@@ -3386,7 +3332,7 @@ def test_one_turn_radius():
         dataclasses.replace(plan, poses=plan.poses[s.start:s.end + 1])))]
     assert turns and all(s.maneuver == 'u_turn' for s in tight)
     assert cfg.with_overrides({'min_turn_radius': 0.4, 'smooth_spins': False, 'allow_reverse': True,
-                               'waypoint_spacing': 0.5}) == cfg
+                               'waypoint_spacing': 0.5, 'recorded_margin': 0.0}) == cfg
 
 
 def test_angle_increment():

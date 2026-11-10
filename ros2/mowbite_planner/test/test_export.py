@@ -228,7 +228,7 @@ def test_body_fit_of_the_answer(monkeypatch):
     """The answer's stats say where the path goes another way for the body and leaves out what (body_fit): its places
     [x, y, m left out] and their poses [x, y, yaw, m the body sticks out there, 1 where it turns on the spot there] one
     for one, the place where its pose is. (Without the way onto the first loop: the path starts where it doesn't fit.)"""
-    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side, body: [])
+    monkeypatch.setattr(leadin, 'way_onto', lambda route, poses, side: [])
     plan = plan_coverage(AREA, [BED], PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14,
                                                     perimeter_offset=0.0))  # (not plan_of's: that may have the way)
     fit = json.loads(json.dumps(to_openmower_json(plan)['stats']['body_fit']))

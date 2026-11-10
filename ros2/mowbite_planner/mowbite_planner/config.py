@@ -124,9 +124,6 @@ LOOP_ON = 0.5
 # front swinging out FIT_EASE_OFF m at most)
 FIT_EASE = 1.5
 FIT_EASE_OFF = 0.01
-# m, the outermost loop driven the way the outline was recorded: its centre this far past the lines as drawn at most
-# (rounding a corner, a stretch driven anew; with edge_margin 0 the space the body was in let it out further)
-RECORDED_CENTRE = 0.02
 # swept_area: points per piece of the way at least
 SWEPT_PIECE = 400
 # m, swept_area: on the blade's half width. Loops or lanes exactly the blade's width apart made GEOS buffer a way along
@@ -173,7 +170,7 @@ class PlannerConfig:
     # 'ccw', 'cw' around every loop, 'auto': the way the mower faces, 'random': ccw or cw at random for each count of
     # finished_mows (another way round every mow, all of a plan asked for again before the next one finishes the same).
     # With the body checked (auto, random) the outermost loop along the outline goes the way it was recorded (the way
-    # its points go): the body only where it was then, see edges
+    # its points go, as the body's space along recorded edges is swept, see edges)
     perimeter_direction: str = 'auto'
     angle: Optional[float] = None  # rad, lane direction. None: worked out by angle_strategy
     # 'longest_edge', 'min_width' (narrowest width) or 'optimal' (tries angle_step apart, fewest lanes and
@@ -195,8 +192,7 @@ class PlannerConfig:
     # on the outline. OpenMower records outlines driving the mower's centre along the edge and uses 0,
     # negative goes outside the outline (OpenMower's outline_offset allows that too). With the body checked the
     # first loop keeps edge_margin + simplify_tolerance off the lines (hard edges: half the body's width more, see
-    # blade_loop_offset): less changes nothing there but how far past the lines the outermost loop driven as
-    # recorded may go where it's driven anew (RECORDED_CENTRE at least)
+    # blade_loop_offset): less changes nothing there
     perimeter_offset: Optional[float] = None
     # m, radius of the turns between lanes, and no arc of a turn, a drive or a loop out is tighter (min_turn_radius):
     # where none fits the drives turn on the spot instead (with the body checked a drive's corner gets a tighter arc
@@ -310,11 +306,6 @@ class PlannerConfig:
     # the lanes too (U-turns, loops, detours, all of them): there the mower keeps less exactly to its path, its corners
     # swinging further. 0: only at the point, the margins as everywhere
     spin_margin: float = 0.05
-    # m, with the body checked and recorded edges: how far the outermost loop, driven the way the outline was recorded,
-    # keeps the body off where it was while the outline was recorded (turning on the spot too, spin_margin not on top;
-    # edge_margin at most: it may go where the other loops may): it may go where the mower went then (mkay 31.10.); the
-    # other loops keep edge_margin and spin_margin
-    recorded_margin: float = 0.01
     # where the body would still stick out (a turn on the spot, a loop in a tight spot), the path goes another way there
     # that fits, leaving a little of a loop or lane out where it has to (_fit_body, stats['body_fit']). False: the path
     # as planned
@@ -551,7 +542,6 @@ class PlannerConfig:
         finite('edge_margin', 0.0, MAX_BLADE_OFFSET)
         finite('obstacle_margin', 0.0, MAX_BLADE_OFFSET)
         finite('spin_margin', 0.0, MAX_BLADE_OFFSET)
-        finite('recorded_margin', 0.0, MAX_BLADE_OFFSET)
         for name in ('lane_spacing_min', 'lane_spacing_max'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, self.mower_width, lo_open=True)
@@ -590,8 +580,9 @@ class PlannerConfig:
 INTERNAL = ('waypoint_spacing', 'simplify_tolerance', 'min_lane_length', 'transit_clearance',
             'body_tolerance', 'perimeter_corner_radius')
 # settings (and a turn type) of before, with_overrides leaves them out: min_turn_radius is turn_radius, smooth_spins
-# not turn_on_spot, allow_reverse and k_turn (backing up) gone: OpenMower's FTC drives forwards
-RETIRED = ('min_turn_radius', 'smooth_spins', 'allow_reverse', 'k_turn')
+# not turn_on_spot, allow_reverse and k_turn (backing up) gone: OpenMower's FTC drives forwards, recorded_margin
+# edge_margin (mkay 10.11.)
+RETIRED = ('min_turn_radius', 'smooth_spins', 'allow_reverse', 'k_turn', 'recorded_margin')
 # settings where None means something (worked out, mower_width / 2), and the ones that take a float
 _OPTIONAL = ('angle', 'angle_min', 'angle_max', 'perimeter_offset', 'robot_width', 'robot_front', 'robot_rear',
              'robot_front_width', 'robot_rear_width', 'robot_outline', 'lane_spacing_min', 'lane_spacing_max')
@@ -697,10 +688,6 @@ class CoveragePlan:
     narrow: object = None
     cells: List[Tuple[float, List[List['Lane']]]] = dataclasses.field(default_factory=list)
     origins: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
-    # with the body checked and recorded edges: where the body was while the outline was recorded (recorded_margin off
-    # it) and the loops driven the way it was (by name), which may go there
-    recorded_space: object = None
-    recorded_loops: List[str] = dataclasses.field(default_factory=list)
     # the areas not to mow next to it (plan_coverage's unmowed), the blade kept off them (None: none)
     unmowed: object = None
 

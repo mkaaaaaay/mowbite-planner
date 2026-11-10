@@ -30,9 +30,6 @@ class BodyRoute(Protocol):
     transit: TransitPlanner  # drives, through the drivable areas too
     area: TransitPlanner  # the mowing area
     field: Any  # headland_turns: the lanes' field, else None
-    # the body where it was while the outline was recorded, the loops (by name) driven the way it was: checked in that
-    recorded_fp: Optional[Footprint]
-    recorded_loops: Set[str]
     rounded: Set[XY]  # headland_corners 'rounded': the arcs into the field (_round_corners adds them)
     sharp: Set[XY]  # headland_corners 'sharp': the drives along the headland
 
@@ -152,15 +149,6 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     for info in infos:
         on_turn[info.start + 1:info.end + 1] = [info.kind == TURN] * (info.end - info.start)
     fit, turn_room = fp.fit(poses, on_turn), fp.turning.anywhere
-    # (the outermost loop driven the way the outline was recorded: where the body was then, see route.recorded_fp)
-    rec, lenient = getattr(route, 'recorded_fp', None), [False] * n
-    if rec is not None:
-        for info in infos:
-            if info.kind == PERIMETER and info.source in route.recorded_loops:
-                lenient[info.start:info.end + 1] = [True] * (info.end + 1 - info.start)
-        mild = [i for i in range(n) if lenient[i]]
-        for i, f in zip(mild, rec.fit([poses[i] for i in mild])):
-            fit[i] = f
     # where the way turns as a turn does (drive.turning) spin_margin too, but BODY_OUT; on the loops (and the ways
     # between their pieces) only turning on the spot there (mkay 31.10.)
     if fp.turning is not fp:
@@ -169,7 +157,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
             if (info.kind == PERIMETER or info.maneuver == 'ring') and info.maneuver != 'mop_up':
                 ring[info.start:info.end + 1] = [True] * (info.end + 1 - info.start)
         geo = turning(poses).tolist()
-        more = [i for i in range(n) if geo[i] and fit[i] and not on_turn[i] and not lenient[i] and
+        more = [i for i in range(n) if geo[i] and fit[i] and not on_turn[i] and
                 (not ring[i] or on_spot(poses, i))]
         tight = [i for i, f in zip(more, fp.turning.fit([poses[i] for i in more])) if not f]
         # (clear where the body fits BODY_OUT less OUT_EPS further in, or doesn't BODY_OUT and OUT_EPS more: out_by,
@@ -200,39 +188,29 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     def fits(prev: Optional[Pose2D], i: int) -> bool:
         p = poses[i]
         if prev is not None and angle_diff(p.yaw, prev.yaw) > SPIN:
-            return (rec if lenient[i] else fp).fits_turn(p.x, p.y, prev.yaw, p.yaw)
+            return fp.fits_turn(p.x, p.y, prev.yaw, p.yaw)
         return fit[i]
 
     def spent() -> bool:
         return tries[0] >= min(cap[0], most[0])
 
-    def ok(before: List[Pose2D], way: List[Pose2D], mild: bool = False,
+    def ok(before: List[Pose2D], way: List[Pose2D],
            near: Tuple[Sequence[Pose2D], Sequence[Pose2D]] = ((), ())) -> bool:
         if spent():
             return False
         tries[0] += 1
-        f = rec if mild else fp
         # (where it leaves and gets back on first: a way that sticks out mostly does so there)
-        return len(way) > 1 and all(f.fits_pose(q.x, q.y, q.yaw) for q in (way[0], way[-2])) and \
-            route.transit.is_free([(q.x, q.y) for q in way]) and f.poses_fit(before + way) and \
-            (strict[0] is None or mild or keeps_margin(strict[0], step, list(near[0]) or before[-MARGIN_BEFORE:], way,
-                                                       None, near[1]))
-
-    def recorded(k: int, j: int) -> bool:  # (a way from out[k] to poses[j], both of a loop driven as recorded)
-        return rec is not None and orig[k] is not None and lenient[orig[k]] and lenient[j]
+        return len(way) > 1 and all(fp.fits_pose(q.x, q.y, q.yaw) for q in (way[0], way[-2])) and \
+            route.transit.is_free([(q.x, q.y) for q in way]) and fp.poses_fit(before + way) and \
+            (strict[0] is None or keeps_margin(strict[0], step, list(near[0]) or before[-MARGIN_BEFORE:], way,
+                                               None, near[1]))
 
     def checked(k: int, j: int, way: List[Pose2D]) -> bool:  # ok() for a way from out[k] to poses[j]
-        # (out[k] on a way put in before: what's kept of that is checked with this one where it gets off the loops
-        # driven as recorded, it may have been checked as one between poses of those)
-        mild, a = recorded(k, j), k
-        while rec is not None and not mild and not lenient[j] and a > first and orig[a] is None:
-            a -= 1
         # (spin_margin where it turns as a turn does: with the path before and after it, in its section)
         on = j + 1
         while on < min(n, j + 1 + MARGIN_BEFORE) and section[on] == section[j]:
             on += 1
-        return ok(out[min(a + 1, k - 1):k] if k > first else [], way, mild,
-                  (out[max(first, k - MARGIN_BEFORE):k], poses[j + 1:on]))
+        return ok(out[k - 1:k] if k > first else [], way, (out[max(first, k - MARGIN_BEFORE):k], poses[j + 1:on]))
 
     def straight(a: Pose2D, b: Pose2D) -> List[Pose2D]:
         return join(sample_straight(a.x, a.y, b.x, b.y, math.atan2(b.y - a.y, b.x - a.x), step), [b])
@@ -514,11 +492,10 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                                 FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY, FIT_ON, FIT_ON_MAX,
                                 route.cfg.turn_radius, route.cfg.min_turn_radius, route.cfg.turn_on_spot,
                                 route.cfg.allowed_turns, route.cfg.headland_corners)).encode())
-    for geom in (fp.space, route.transit.space, route.field, rec and rec.space):
+    for geom in (fp.space, route.transit.space, route.field):
         hashed.update(b'-' if geom is None else geom.wkb)
     if fp.blade is not None:  # (the blade kept off the areas not to mow)
         hashed.update(repr(fp.blade.key).encode())
-    hashed.update(repr(sorted(getattr(route, 'recorded_loops', ()) if rec is not None else ())).encode())
     key = hashed.hexdigest()
     with _KEPT_LOCK:
         earlier = _FITTED.get(key)

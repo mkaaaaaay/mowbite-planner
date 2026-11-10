@@ -48,8 +48,6 @@ def check(t, start, goal, cfg=None, areas=AREAS, obstacles=(TREE,)):
     spins = [i for i in range(1, len(poses)) if angle_diff(poses[i].yaw, poses[i - 1].yaw) > SPIN]
     assert t.spins == ([0] if angle_diff(poses[0].yaw, start[2]) > SPIN else []) + spins
     cfg = PlannerConfig(**dict(TRON, **(cfg or {})))
-    if any('as the outline was recorded' in w for w in t.warnings):  # (by the edge as the outermost loop)
-        cfg = cfg.with_overrides({'edge_margin': min(cfg.recorded_margin, cfg.edge_margin), 'spin_margin': 0.0})
     space, _ = _body_space(list(areas), list(obstacles), [cfg.obstacle_margin] * len(obstacles), cfg)
     fp = Footprint(space, cfg.body_outline, cfg.spin_margin)
     # (the stretches outside, start_outside and goal_outside long, unchecked)
@@ -189,41 +187,12 @@ def test_without_body():
     assert min(tree.distance(Point(p.x, p.y)) for p in t.poses) >= 0.11 - 1e-6
 
 
-def test_by_the_edge_as_recorded():
-    # a pose of the outermost loop by the edge (the Tron's body): no way gets there by the rules of the lanes, one by
-    # that loop's (a warning); with as_recorded False none (MowBite OS' transit_as_recorded)
+def test_by_the_edge_no_way_past_the_margins():
+    # a pose by the edge where the body doesn't keep edge_margin (the Tron's): no way, no second try with less (mkay
+    # 10.11.)
     cfg = dict(perimeter_passes=3, turn_radius=0.44, robot_front=0.60, robot_rear=0.12, blade_ahead=0.23)
-    start, goal = (3.0, 1.5, 0.0), (2.458, 0.11, 0.0)
-    t = transit(start, goal, cfg, areas=[LAWN], max_outside=0.3)
-    assert any('as the outline was recorded' in w for w in t.warnings)
-    check(t, start, goal, cfg, areas=[LAWN])
     with pytest.raises(PlanningError, match='^no way arrives at the goal|^the goal |^the body sticks out'):
-        transit(start, goal, cfg, areas=[LAWN], max_outside=0.3, as_recorded=False)
-
-
-def test_by_the_edge_only_from_or_to_the_edge(monkeypatch):
-    # that loop's rules only where the start or the goal lies by the edge, the body not keeping the usual margins there:
-    # none in the middle of the lawn or by an obstacle only, also where the way sticks out on its way
-    import mowbite_planner_os.transit_route as route
-    real, tries = route._transit, []
-
-    def first_fails(start, goal, drivable, obstacles, cfg, *rest):
-        tries.append(cfg.edge_margin)
-        if len(tries) == 1:
-            raise PlanningError('the body sticks out on the way at (5.00, 3.00)')
-        return real(start, goal, drivable, obstacles, cfg, *rest)
-
-    monkeypatch.setattr(route, '_transit', first_fails)
-    cfg = dict(perimeter_passes=3, turn_radius=0.44, robot_front=0.60, robot_rear=0.12, blade_ahead=0.23)
-    for start, goal in (((2.0, 3.0, 0.0), (8.0, 3.0, 0.0)), ((5.0, 2.2, 0.0), (8.0, 3.0, 0.0))):
-        tries.clear()
-        with pytest.raises(PlanningError, match='^the body sticks out on the way'):
-            transit(start, goal, cfg, areas=[LAWN])
-        assert len(tries) == 1
-    tries.clear()
-    t = transit((3.0, 1.5, 0.0), (2.458, 0.11, 0.0), cfg, areas=[LAWN], max_outside=0.3)
-    assert len(tries) == 2 and tries[1] < tries[0]
-    assert any('as the outline was recorded' in w for w in t.warnings)
+        transit((3.0, 1.5, 0.0), (2.458, 0.11, 0.0), cfg, areas=[LAWN], max_outside=0.3)
 
 
 def test_from_and_to_the_poses_of_a_plan():

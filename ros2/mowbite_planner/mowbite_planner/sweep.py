@@ -1,7 +1,7 @@
 """Where the blade mows along poses, and where a plan's body sticks out."""
 
 import math
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from shapely.geometry import LineString, MultiLineString, Polygon
 
@@ -89,49 +89,25 @@ def _backwards(segments: List[SegmentInfo], n: int) -> List[bool]:
     return out
 
 
-def recorded_footprint(plan: CoveragePlan) -> Optional[Tuple[Footprint, Set[str]]]:
-    """(where the body was while the outline was recorded, the loops driven the way it was by name) as body_out takes
-    it, None where there are none."""
-    cfg = plan.config
-    if cfg is None or not cfg.body or plan.recorded_space is None or not plan.recorded_loops:
-        return None
-    return Footprint(plan.recorded_space, cfg.body_outline, 0.0), set(plan.recorded_loops)
-
-
 def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
-             footprint: Footprint, recorded: Optional[Tuple[Footprint, Set[str]]] = None) -> List[Dict[str, Any]]:
+             footprint: Footprint) -> List[Dict[str, Any]]:
     """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
     'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
-    (footprint.OnTurn). recorded (recorded_footprint): those loops' poses in where the body was then instead. Turning
-    on the spot where it came backing up, the way in is ahead of it (segments driven backwards)."""
+    (footprint.OnTurn). Turning on the spot where it came backing up, the way in is ahead of it (segments driven
+    backwards)."""
     kind_at: Dict[int, str] = {}
     on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
-    lenient = [False] * len(poses)
     for seg in segments:
         kind = {TURN: 'turn', TRANSIT: 'transit', PERIMETER: 'loop'}.get(seg.kind, 'loop' if seg.maneuver == 'ring'
                                                                          else 'lane_end')
         for i in range(seg.start, seg.end + 1):
             kind_at[i] = kind
         on_turn[seg.start + 1:seg.end + 1] = [seg.kind == TURN] * (seg.end - seg.start)
-        if recorded is not None and seg.kind == PERIMETER and seg.source in recorded[1]:
-            lenient[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
-    # (the safety net's ways from a pose of such a loop to one of it: in there too, as bodyfit checks them)
-    for seg in segments if recorded is not None else ():
-        if seg.maneuver == 'body' and lenient[seg.start] and lenient[seg.end]:
-            lenient[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
     out = []
     backwards = _backwards(segments, len(poses))
     for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
         part = poses[a:b]
         bad = footprint.bad_poses(part, on_turn[a:b], backwards[a:b] if any(backwards[a:b]) else None)
-        mild = [i for i in range(len(part)) if lenient[a + i]]
-        if mild:
-            rec = recorded[0]
-            fit = dict(zip(mild, rec.fit([part[i] for i in mild])))
-            mine = {i for i in mild if not (rec.fits_turn(part[i].x, part[i].y, part[i - 1].yaw, part[i].yaw,
-                                                          backwards[a + i])
-                                            if rec.spins(part, i) else fit[i])}
-            bad = sorted(mine.union(i for i in bad if not lenient[a + i]))
         for i in bad:
             p = part[i]
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),

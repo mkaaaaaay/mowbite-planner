@@ -22,8 +22,7 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     Not settable here (planner.settings says from where), the node's parameters, the stored ones, an area's and a
     request's own don't count; a new version: plans with the values before not taken (they're in the plans' keys), the
     areas planned ahead again. None yet, or ones the settings don't go with: nothing planned (planner.plan,
-    ~/plan_coverage, ~/plan_transit say why), never without the body. The margins (edge_margin, obstacle_margin,
-    spin_margin) no less than FLOORS (the Tron's, G6), an area's and an obstacle's own and a transit's too.
+    ~/plan_coverage, ~/plan_transit say why), never without the body.
   - not here: the slic3r planner, leftovers_auto (MowBite OS' schedule starts the mower), the house computer.
     planner.settings says why.
   - back_up_with_plan (false): the robot backs up where a plan's poses face against the way (MowBite OS from M8):
@@ -39,9 +38,6 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     With a ~/plan_coverage request's start (use_start_pose: where mowbite_logic undocks to) the first section from
     there the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE); none got to from there: refused with
     START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
-    transit_as_recorded (false): true: where no way gets to or from a pose by the edge, a way by the outermost loop's
-    rules (plan_transit's as_recorded), for ~/plan_transit and the plans' sections alike; not taken for now
-    (AS_RECORDED_NOT: its margins hold all along the way, the Tron's G6 till they're only the piece by the edge pose).
     ~/plan_transit in a callback group of its own on a MultiThreadedExecutor: answered while a ~/plan_coverage waits for
     its plan (the other callbacks one after another as before). It plans in the executor's thread, on geometries of
     its own (space._body_space: the kept ones as WKB, each thread its own; mowbite_planner's GEOS rule).
@@ -116,12 +112,8 @@ GEOMETRY = '/mowbite_geometry'
 GEOMETRY_KEYS = ('robot_width', 'robot_front', 'robot_rear', 'robot_outline', 'mower_width', 'blade_ahead',
                  'blade_offset')
 FROM_GEOMETRY = 'robot.geometry (/mowbite_geometry)'
-# m the margins are no less than (G6)
-FLOORS = {'edge_margin': 0.05, 'obstacle_margin': 0.10, 'spin_margin': 0.05}
 # the executor's threads: the node's callbacks and ~/plan_transit's
 THREADS = 2
-# why transit_as_recorded true isn't taken ('': it is; the Tron, G6)
-AS_RECORDED_NOT = 'its margins hold all along the way, not only by the edge pose (point 7)'
 # role: the planner, or a second instance only for ~/plan_transit (see the top); the planner's settings under data_dir
 ROLES = ('planner', 'transit')
 TRANSIT = 'transit'
@@ -139,7 +131,6 @@ class OsNode(base.MowbitePlannerNode):
               'robot_front_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)',
               'robot_rear_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)'}
     given_by = {n: FROM_GEOMETRY for n in GEOMETRY_KEYS}
-    floors = FLOORS
     background = base.MowbitePlannerNode.background + ('planner.calib.evaluate',)
     answers_unknown = False
 
@@ -150,7 +141,6 @@ class OsNode(base.MowbitePlannerNode):
         self.maps = threading.Condition()
         self.map_count = 0
         self._calib_root = None
-        self._as_recorded = None
         self._backs_up = None
         # robot.geometry's latest (version, {setting: value}), why nothing is planned with it ('' where it is)
         self.geometry = None
@@ -158,7 +148,6 @@ class OsNode(base.MowbitePlannerNode):
         self._role = None
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
-        self.as_recorded()
         self.backs_up()
         self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit,
                             callback_group=MutuallyExclusiveCallbackGroup())
@@ -206,17 +195,6 @@ class OsNode(base.MowbitePlannerNode):
                             'calibration), empty: not offered')).value or ''
         return self._calib_root
 
-    def as_recorded(self) -> bool:
-        if self._as_recorded is None:
-            asked = bool(self.declare_parameter('transit_as_recorded', False, ParameterDescriptor(
-                description='where no way gets to or from a pose by the edge, a way by the outermost loop\'s rules '
-                            '(~/plan_transit and the plans\' sections alike; its margins all along the way). Not '
-                            f'taken for now: {AS_RECORDED_NOT}')).value)
-            if asked:
-                self.get_logger().warning(f'transit_as_recorded true not taken: {AS_RECORDED_NOT}')
-            self._as_recorded = asked and not AS_RECORDED_NOT
-        return self._as_recorded
-
     def backs_up(self) -> bool:
         if self._backs_up is None:
             self._backs_up = bool(self.declare_parameter('back_up_with_plan', False, ParameterDescriptor(
@@ -234,9 +212,9 @@ class OsNode(base.MowbitePlannerNode):
         return super().values(overrides)
 
     def config(self, values: dict, **overrides) -> PlannerConfig:
-        """As MowbitePlannerNode's, robot.geometry's values and the floors over it (where the core is)."""
+        """As MowbitePlannerNode's, robot.geometry's values over it (where the core is)."""
         cfg = super().config(values, **overrides)
-        return cfg if self.core is None else self.core.bound(cfg)[0]
+        return cfg if self.core is None else self.core.bound(cfg)
 
     def plan(self, boundary, obstacles, values, overrides, *args, **kwargs):
         """As MowbitePlannerNode's (~/plan_coverage without a map, ~/plan_from_parameters), in the core's worker (no
@@ -416,7 +394,7 @@ class OsNode(base.MowbitePlannerNode):
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
         """Whether ~/plan_transit gets to a pose facing its heading (yaw None: there facing any way, the way out of
         where a section ends), through the area and the drivable areas but the obstacles and the areas to keep out of,
-        by transit_as_recorded as ~/plan_transit. From came_from (where the section before ends) the way mowbite_logic
+        as ~/plan_transit. From came_from (where the section before ends) the way mowbite_logic
         asks for (max_outside ARRIVE_OUTSIDE), none where the room the centre has on a way parts the two (nothing
         planned then); the first section's (came_from None) the body checked up to the pose (none of it outside): from
         ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where
@@ -424,11 +402,10 @@ class OsNode(base.MowbitePlannerNode):
         case of 30.10.). None without the body: nothing to check."""
         if not cfg.body:
             return None
-        recorded = self.as_recorded()
         areas, away = [list(boundary)] + [list(d) for d in drivable], [list(o) for o in obstacles] + \
             [list(k) for k in keep_out]
         space = []  # (worked out once a plan, when it's first asked)
-        parts = []  # (the parts of the widest room a way may take: as the outermost loop's where that's on)
+        parts = []  # (the parts of the room a way may take)
         ways = [0]
 
         def way(start, p: Pose2D, max_outside: float) -> bool:
@@ -437,16 +414,14 @@ class OsNode(base.MowbitePlannerNode):
             ways[0] += 1
             goal = (p.x, p.y) if p.yaw is None else (p.x, p.y, p.yaw)
             try:
-                plan_transit(start, goal, areas, away, cfg, max_outside=max_outside, as_recorded=recorded)
+                plan_transit(start, goal, areas, away, cfg, max_outside=max_outside)
                 return True
             except PlanningError:
                 return False
 
         def part(q: Pose2D) -> set:
             if not parts:
-                wide = cfg.with_overrides({'edge_margin': min(cfg.recorded_margin, cfg.edge_margin),
-                                           'spin_margin': 0.0}) if recorded and cfg.edges == 'recorded' else cfg
-                parts.extend(polygons(centre_space(areas, away, wide)[0]))
+                parts.extend(polygons(centre_space(areas, away, cfg)[0]))
             point = Point(q.x, q.y)
             return {i for i, a in enumerate(parts) if a.distance(point) <= ARRIVE_OUTSIDE + 1e-9}
 
@@ -469,8 +444,8 @@ class OsNode(base.MowbitePlannerNode):
                         froms.append((q.x, q.y))
                 far *= 0.5
             return any(way((x, y, math.atan2(p.y - y, p.x - x)), p, 0.0) for x, y in froms)
-        # (a plan kept with the other code or the other way isn't taken)
-        gets_to.key = dict({'os': os_code()}, **({} if recorded else {'as_recorded': False}))
+        # (a plan kept with other code isn't taken)
+        gets_to.key = {'os': os_code()}
         return gets_to
 
     def _on_plan_transit(self, request, response):
@@ -503,8 +478,7 @@ class OsNode(base.MowbitePlannerNode):
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         try:
             transit = plan_transit(start, goal, drivable, obstacles, self.transit_config(values),
-                                   float(request.goal_straight_length), max_outside,
-                                   as_recorded=self.as_recorded())
+                                   float(request.goal_straight_length), max_outside)
         except PlanningError as e:
             response.success = False
             response.message = base.with_warnings(f'planning the transit failed: {e}', warnings)
@@ -537,7 +511,7 @@ class OsNode(base.MowbitePlannerNode):
         plain = self.config(self.values())
         current = self.core.current
         return self.core.bound(current.base.with_overrides(dict({'mower_width': current.mower_width}, **{
-            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)})))[0]
+            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)})))
 
     # planner.calib.evaluate
 

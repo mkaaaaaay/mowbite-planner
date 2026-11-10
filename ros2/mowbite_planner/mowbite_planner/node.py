@@ -51,8 +51,7 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
 A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, the settings it can't have, its own RPC
 methods, whether it plans coverage at all (plans_coverage), its transport (rpc_input, answer, rpc_end, map_input,
 events_input, send_out), its parameters (robot_param), writing the map (replace_map), when the map can't be planned
-(map_unusable), the settings it gives itself (given_by, given) and the floors it holds them to (floors), how it gets
-to a plan's sections (arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it
+(map_unusable), the settings it gives itself (given_by, given), how it gets to a plan's sections (arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it
 can't drive (back_out_ignored, by default as drive); main(node_class=it, executor_class=its executor). SIGINT and
 SIGTERM end it with destroy_node first (see main).
 """
@@ -388,7 +387,7 @@ class NodeCore(PlannerCore):
 
     def __init__(self, node, *args, **kwargs):
         self.node = node
-        self.cannot, self.given_by, self.floors = dict(node.cannot), dict(node.given_by), dict(node.floors)
+        self.cannot, self.given_by = dict(node.cannot), dict(node.given_by)
         self.clean = None  # (the map plan_map got last, as it gave it)
         PlannerCore.__init__(self, *args, **kwargs)
 
@@ -504,9 +503,8 @@ class MowbitePlannerNode(Node):
     cannot = {'planner': 'no slic3r planner here',
               'leftovers_auto': 'this node doesn\'t send the robot out',
               'remote_planning': 'no house computer here'}
-    # the settings the robot gives itself (given) and the floors it holds them to, see PlannerCore
+    # the settings the robot gives itself (given), see PlannerCore
     given_by = {}
-    floors = {}
     # the planner.* methods answered on a thread of their own (they wait for the worker or another node)
     background = ('planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
     # an RPC method no node here answers gets its error (no other node shares the requests)

@@ -19,9 +19,9 @@ from . import backing
 from .assemble import mow_parts
 from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
 from .complete import complete, leftovers
-from .config import (_BODY_SPACE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, SPACING_CANDIDATES, TRACK, XY, RECORDED_CENTRE,
-                     ZERO_TURN, CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
-from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subtract, union
+from .config import (_BODY_SPACE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, SPACING_CANDIDATES, TRACK, XY, ZERO_TURN,
+                     CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
+from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subtract
 from .handover import _blade_on, _compact, _lengths, _origins, _ring_ways, _stats, _warn
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
@@ -30,7 +30,7 @@ from .progress import Progress, Report, check
 from .levels import Rings, narrow_left, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
-from .space import _check_coordinates, build_space, margins_of, recorded_space
+from .space import _check_coordinates, build_space, margins_of
 from .starts import Arrives, backed_out, reached_starts
 from .spacing import left_alone, left_whole, strip_between_lanes, turn_places
 from .sweep import plan_footprint, swept_area
@@ -110,7 +110,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
 def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, keep_out, margins, mowed, reach_over,
               unmowed, arrives: Optional[Arrives], progress: Optional[Report]) -> CoveragePlan:
     """plan_coverage with cfg checked, every pose forwards (drive reverse: the outermost loop as recorded goes the
-    other way round, see _as_recorded)."""
+    other way round, see _new_route)."""
     area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed)
     auto = mowed is None and cfg.lane_spacing_mode == 'auto'
     area.progress, area.stage = Progress(progress, 1 if mowed is not None else SPACING_CANDIDATES + 3 if auto else 3), \
@@ -365,31 +365,12 @@ class _Timer:
         check()
 
 
-def _recorded_lines(cfg: PlannerConfig, outlines, away_from) -> Tuple[list, list]:
-    """The outlines and what the body keeps away from, the way the mower went recording them: drive reverse the body
-    turned round going the other way (see route.recorded)."""
-    if cfg.drive == 'reverse':
-        return [list(o)[::-1] for o in outlines], [list(o)[::-1] for o in away_from]
-    return outlines, away_from
-
-
 def _narrow(rings_of: Rings, passes, cfg: PlannerConfig):
     """The strips too narrow for lanes that get a loop: those the lanes leave something of (levels.narrow_left)."""
     narrow = rings_of.narrow
     if not narrow.is_empty and passes and not (cfg.skip_outline_loops or cfg.skip_obstacle_loops):
         narrow = narrow_left(narrow, passes, rings_of.remaining, 0.5 * cfg.mower_width)
     return narrow
-
-
-def _as_recorded(route: _Route, cfg: PlannerConfig, footprint, outlines, away_from, margin_of) -> None:
-    """The outermost loop the way the outline was recorded (rings.drive_ring): the body where it was then, the centre
-    no further than RECORDED_CENTRE past the lines, a negative perimeter_offset that far (drive_space reaches
-    body_tolerance past the first loop, with edge_margin 0 past the lines: rounding a corner cut it out)."""
-    outlines, away_from = _recorded_lines(cfg, outlines, away_from)
-    route.recorded_fp = Footprint(recorded_space(outlines, away_from, margin_of, cfg), cfg.body_outline, 0.0,
-                                  blade=footprint.blade)
-    out = max(RECORDED_CENTRE, -(cfg.perimeter_offset or 0.0))
-    route.recorded_centre = union([clean_polygon(r) for r in outlines]).buffer(out, QUAD_SEGS)
 
 
 def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequence[Sequence[float]]] = (),
@@ -449,9 +430,6 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if isinstance(probe, dict):  # (what _left_alone needs: plan_coverage may ask for this spacing's later)
         probe['alone'] = (space.free, loop_rings, passes, 0.5 * cfg.mower_width)
     route, start_xy = _new_route(cfg, space, footprint, rings_of, passes, start, end, boundary)
-    if footprint is not None and cfg.edges == 'recorded' and rings_of.owners is not None:
-        _as_recorded(route, cfg, footprint, [boundary] + list(drivable) + list(reach_over),
-                     list(obstacles) + list(keep_out), margin_of)
     if mowed is None:
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
@@ -465,9 +443,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         lane_region=rings_of.lane_region, remaining=rings_of.remaining, angles=[a for a, _ in passes] or [angle],
         transit_space=space.transit_space, body_space=space.body_space, config=cfg,
         section_starts=[s.start for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section],
-        levels=rings_of.levels, narrow=narrow, cells=passes, origins=route.origins,
-        recorded_space=route.recorded_fp.space if route.recorded_fp is not None else None,
-        recorded_loops=sorted(route.recorded_loops), unmowed=space.unmowed)
+        levels=rings_of.levels, narrow=narrow, cells=passes, origins=route.origins, unmowed=space.unmowed)
 
 
 def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, start, end,

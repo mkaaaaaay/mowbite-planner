@@ -148,8 +148,7 @@ class Loops:
             return (self.cfg.blade_offset > 0) != (self.blade_in.get(id(ring)) is ring)
         if self.recorded is not None and self.cfg.perimeter_direction in ('auto', 'random') and kind == PERIMETER \
                 and not hole and level == 0:
-            # the outermost loop the way the outline was recorded: the body where it was then (its real edges), the
-            # front nowhere else (rings come ccw)
+            # the outermost loop the way the outline was recorded (rings come ccw)
             return not self.recorded
         if direction == 'auto':
             # the start pose's heading counts too: no half turn on the spot before the first loop
@@ -188,25 +187,16 @@ class Loops:
         flip = self._flip(ring, loop, hole, kind, level)
         if flip:
             loop = loop[::-1]
-        # the outermost loop the way the outline was recorded: where the body was then (route.recorded_fp)
-        as_recorded = kind == PERIMETER and not hole and level == 0 and self.recorded is not None and \
-            self.recorded_fp is not None and flip == (not self.recorded)
-        args = (loop, closed, entry, target, hole, flip, as_recorded, radius, level, spacing)
-        poses, flip, counted = self._loop_poses(*args)
-        if as_recorded and self.recorded_centre is not None and not self._centre_kept(poses):
-            # (its centre further past the lines than RECORDED_CENTRE: again, every way checked so)
-            poses, flip, counted = self._loop_poses(*args, strict=True)
+        poses, flip, counted = self._loop_poses(loop, closed, entry, target, hole, flip, radius, level, spacing)
         if counted is not None:
             self.counts['loops_repaired'] = self.counts.get('loops_repaired', 0) + counted[0]
             self.counts['loops_left'] = self.counts.get('loops_left', 0) + counted[1]
         entry = (poses[0].x, poses[0].y)
         name = f'loop-{len(self.loops)}'
-        if as_recorded:
-            self.recorded_loops.add(name)
         self.source = name
         self.origins[name] = {'parent': parent or f'level-{level}', 'kind': 'obstacle' if hole else 'outline',
                               'level': level}
-        poses, lead = lead_in(self, poses, -1.0 if flip else 1.0, self.recorded_fp if as_recorded else self.footprint)
+        poses, lead = lead_in(self, poses, -1.0 if flip else 1.0)
         self.go_to((poses[0].x, poses[0].y), poses[0].yaw)
         self.add(kind, lead or [], maneuver='lead')  # (the plan's first loop's way onto it, see lead.py)
         self.add(kind, poses, maneuver=maneuver)
@@ -214,18 +204,16 @@ class Loops:
         self.loop_side[name] = -1.0 if flip else 1.0
 
     def _loop_poses(self, loop: List[XY], closed: List[XY], entry: XY, target: Optional[XY], hole: bool, flip: bool,
-                    as_recorded: bool, radius: float, level: int, spacing: float, strict: bool = False):
+                    radius: float, level: int, spacing: float):
         """drive_ring's poses round loop (closed: the ring closed, from entry; flip: driven the other way round):
-        (the poses, flip, (stretches driven anew, poses left as they were) where the loop was traced, else None).
-        strict: the outermost loop driven the way it was recorded with its centre kept in route.recorded_centre."""
-        body, fits, room = self._checks(as_recorded, strict)
+        (the poses, flip, (stretches driven anew, poses left as they were) where the loop was traced, else None)."""
 
         def driven(loop: List[XY]) -> List[Pose2D]:
             # with the mowable side on the left only left turns go round a corner of it and get rounded
             # (right turns too: the arc cuts their corner on the side mowed already or keeps off the edge where it
             # doesn't fit)
-            return drive_polyline(loop, self.step, radius, fits, 0, CORNER_CUT * self.cfg.mower_width,
-                                  level, spacing, self.cfg.mower_width, body)
+            return drive_polyline(loop, self.step, radius, self.area.is_free, 0, CORNER_CUT * self.cfg.mower_width,
+                                  level, spacing, self.cfg.mower_width, self.body)
 
         poses = driven(loop)
         # the plan's first loop: where mower_logic gets to it on its own (see START_CLEAR), the same way round, found
@@ -236,14 +224,13 @@ class Loops:
         if was_traced:
             # with the levels from the body: where the body doesn't fit along it, that stretch driven anew as the
             # mower would (trace.py), not the safety net's way round
-            fp = self.recorded_fp if as_recorded else self.footprint
-            poses, fixed, left = self._repaired(poses, fp, loop, hole, spacing, room)
+            poses, fixed, left = self._repaired(poses, loop, hole, spacing)
             poses = turned_to(poses, entry if better is None else better)
             if better is None and self.started and self.segments:
                 got = self._fitting_entry(poses)
-                if got is poses and hole and not as_recorded:
+                if got is poses and hole:
                     # (no way onto an island's loop fits: the other way round, where one onto that does)
-                    back, more, less = self._repaired(driven(loop[::-1]), fp, loop[::-1], hole, spacing, room)
+                    back, more, less = self._repaired(driven(loop[::-1]), loop[::-1], hole, spacing)
                     back = turned_to(back, entry)
                     turned = self._fitting_entry(back)
                     if turned is not back and less <= left:
@@ -259,32 +246,11 @@ class Loops:
             poses = driven(loop)
         return poses, flip, None
 
-    def _checks(self, as_recorded: bool, strict: bool = False):
-        """A loop's (body(poses), fits(points) of the centre, room: where the centre may go, None: the area's space):
-        the outermost one driven the way the outline was recorded where the body was then (route.recorded_fp), strict:
-        its centre in route.recorded_centre too."""
-        if not as_recorded:
-            return self.body, self.area.is_free, None
-        if not strict:
-            return self.recorded_fp.poses_fit, self.area.is_free, None
-        room = self.area.space.intersection(self.recorded_centre)
-        centre = prep(room)
-
-        def fits(points: List[XY]) -> bool:
-            return self.area.is_free(points) and centre.covers(LineString(points))
-        return self.recorded_fp.poses_fit, fits, room
-
-    def _centre_kept(self, poses: List[Pose2D]) -> bool:
-        """Whether the poses' centres stay in route.recorded_centre."""
-        if self._recorded_centre is None:
-            self._recorded_centre = prep(self.recorded_centre)
-        return self._recorded_centre.covers(LineString([(p.x, p.y) for p in poses])) if len(poses) > 1 else True
-
-    def _repaired(self, poses: List[Pose2D], footprint, loop: List[XY], hole: bool, spacing: float, room=None):
+    def _repaired(self, poses: List[Pose2D], loop: List[XY], hole: bool, spacing: float):
         """trace.repaired of the closed loop's poses (loop: its points, the first again last), the turns round in
-        dead ends off the loops driven so far. room: where the centre may go (default the area's space)."""
-        return repaired(poses, footprint, loop[:-1], hole, self.step, self.cfg.mower_width, self.cfg.blade_ahead,
-                        (self.area.space if room is None else room).buffer(1e-3, 4), taken=self._taken(spacing))
+        dead ends off the loops driven so far."""
+        return repaired(poses, self.footprint, loop[:-1], hole, self.step, self.cfg.mower_width, self.cfg.blade_ahead,
+                        self.area.space.buffer(1e-3, 4), taken=self._taken(spacing))
 
     def _taken(self, spacing: float):
         """taken(xs, ys) for repaired: which of the points lie within HAIR_KEEP lane spacings of the loops driven so

@@ -27,9 +27,6 @@ from mowbite_planner.transit import TransitPlanner
 
 # m, how far the start or the goal may lie outside of where the body fits by default
 MAX_OUTSIDE = 0.5
-# plan_transit's errors where the start or the goal lies by the edge, the body sticking out (see plan_transit)
-BY_THE_EDGE = ('the start ', 'the goal ', 'no way leaves the start ', 'no way arrives at the goal ',
-               'the body sticks out on the way ')
 # (m, rad): onto the line through the goal from that far beside it, or off the start's that far, on an S of two arcs
 # turning by that much each way (as wide as that takes, none tighter than turn_radius)
 MERGES = ((0.3, math.radians(25.0)), (0.3, math.radians(15.0)), (0.5, math.radians(25.0)))
@@ -76,7 +73,7 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
 
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
-                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, as_recorded: bool = True) -> Transit:
+                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -87,63 +84,12 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     start (where that doesn't get there and the body fits turning at the start, towards the closest point of the
     areas), on the goal's heading to the goal (without one, from the closest point). The same request gives the same
     poses. An empty way where it's at the goal already (closer than waypoint_spacing, facing its way; with turn_on_spot
-    whatever way it faces, turning there is up to whoever drives it). Where that's no way to or from a pose of a plan's
-    outermost loop driven the way the outline was recorded (recorded edges: the body where it was then, recorded_margin
-    off it, no spin_margin on top), the way by that loop's rules, if there's one (a warning; not with as_recorded
-    False): only where the start or the goal lies by the edge (_by_the_edge), not for a way that only sticks out on its
-    way. Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its
-    heading, where the body sticks out turning into it there too, says so), or the input is out of range."""
+    whatever way it faces, turning there is up to whoever drives it). Raises PlanningError where there's no way (a
+    goal by the edge no arc of turn_radius gets to facing its heading, where the body sticks out turning into it there
+    too, says so), or the input is out of range."""
     cfg = config or PlannerConfig()
     cfg.validate()
     cfg = _turning(cfg)  # (as in plan_coverage)
-    try:
-        return _transit(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
-    except PlanningError as e:
-        margin = min(cfg.recorded_margin, cfg.edge_margin)
-        if not (as_recorded and cfg.body and cfg.edges == 'recorded' and margin < cfg.edge_margin and
-                str(e).startswith(BY_THE_EDGE) and _by_the_edge(start, goal, drivable, obstacles, cfg)):
-            raise
-        try:
-            got = _transit(start, goal, drivable, obstacles, cfg.with_overrides({'edge_margin': margin,
-                                                                                 'spin_margin': 0.0}),
-                           goal_straight, max_outside)
-        except PlanningError:
-            raise e from None
-    got.warnings.append(f'by the edge as the outline was recorded: edge_margin {margin} m, no spin_margin (as the '
-                        'outermost loop)')
-    return got
-
-
-def _by_the_edge(start, goal, drivable, obstacles, cfg: PlannerConfig) -> bool:
-    """Whether the start or the goal lies by the edge where the body doesn't keep the usual margins: within its reach,
-    spin_margin and edge_margin of the drivable areas' edge, the body there sticking out of where it fits with them
-    standing (facing its way) or turning on the spot (any way round; a goal without a heading: its centre where the
-    body doesn't fit). Not a way in the middle of the lawn or by an obstacle only, nor one that only sticks out on its
-    way."""
-    if not cfg.body:
-        return False
-    try:
-        space, fp = centre_space(drivable, obstacles, cfg)
-    except PlanningError:
-        return True
-    if fp is None:
-        return False
-    edge = union(clean_polygon(d) for d in drivable).boundary
-    for p in (start, goal):
-        x, y = float(p[0]), float(p[1])
-        if edge.distance(Point(x, y)) > fp.reach + cfg.spin_margin + cfg.edge_margin:
-            continue
-        if len(p) < 3 or p[2] is None:
-            if not space.covers(Point(x, y)):
-                return True
-        elif not fp.fits_pose(x, y, float(p[2])) or not fp.fits_turn(x, y, float(p[2]), float(p[2]) + math.pi):
-            return True
-    return False
-
-
-def _transit(start, goal, drivable, obstacles, cfg: PlannerConfig, goal_straight: float,
-             max_outside: float) -> Transit:
-    """plan_transit with cfg checked (see there), edge_margin as cfg says."""
     if len(start) < 3 or len(goal) < 2:
         raise PlanningError('the start needs x, y and yaw, the goal x and y')
     _check_coordinates('the start or goal', [start, goal])

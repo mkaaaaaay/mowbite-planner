@@ -134,20 +134,6 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
     return wkb.loads(found[1].wkb), found[2]
 
 
-def recorded_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
-                   margin_of: List[float], cfg: PlannerConfig):
-    """Where the body was while the outline was recorded, recorded_margin off it (_body_space with that in place of
-    edge_margin, no more than that: where the other loops may go too; the obstacles' margins kept): the outermost loop
-    driven the way it was recorded may go there (mkay 31.10.: "genauso fahren wie aufgenommen"). The kept spaces of
-    this thread left as they were."""
-    last = getattr(_BODY_SPACE, 'last', None)
-    try:
-        margin = min(cfg.recorded_margin, cfg.edge_margin)
-        return _body_space(outlines, away_from, margin_of, dataclasses.replace(cfg, edge_margin=margin))[0]
-    finally:
-        _BODY_SPACE.last = last
-
-
 def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY]):
     """Where a body of these corners (counter-clockwise round its centre, see PlannerConfig.body_outline) was while the
     centre drove along each of the rings the way its points go: along every edge from where it was at the edge's start

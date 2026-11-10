@@ -135,13 +135,12 @@ def test_every_plan(shape, body, setting):
 
 
 def keeps_the_rules(plan, r):
-    """The fixed rules (the acceptance's gates): the body no more than 1 cm out of where it may be off the outermost
-    loop, that loop no more than 1 cm out of the space the body took while recording, the centre on the allowed areas
-    only, never a step against the heading, no segment backwards, no two poses on one spot."""
+    """The fixed rules (the acceptance's gates): the body no more than 1 cm out of where it may be, the centre on the
+    allowed areas only, never a step against the heading, no segment backwards, no two poses on one spot."""
     check_invariants(plan, r['cfg'], r['obstacles'])
     ref = metrics.Ref(lawn(r), r)
     got = dict(metrics.rules(plan, ref), **metrics.plan_body(plan, ref))
-    for key in ('centre_out', 'backwards', 'reverse_segs', 'dup_steps', 'rm_out', 'ring_out', 'blade_over'):
+    for key in ('centre_out', 'backwards', 'reverse_segs', 'dup_steps', 'rm_out', 'blade_over'):
         assert not got.get(key), (key, got.get(key), got.get(key + '_at'))
     assert not got.get('cfg_diff')
 
