@@ -397,9 +397,10 @@ class OsNode(base.MowbitePlannerNode):
         as ~/plan_transit. From came_from (where the section before ends) the way mowbite_logic
         asks for (max_outside ARRIVE_OUTSIDE), none where the room the centre has on a way parts the two (nothing
         planned then); the first section's (came_from None) the body checked up to the pose (none of it outside): from
-        ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where
-        the lawn is too small for those. A pose none of them gets to isn't got to: no start it can't get to (the Tron's
-        case of 30.10.). None without the body: nothing to check."""
+        ARRIVE_FROM m behind, beside or ahead of it (the closest place to there where the body turns whatever way, where
+        there's none where the centre may go), from nearer where the lawn is too small for those. A pose none of them
+        gets to isn't got to: no start it can't get to (the Tron's case of 30.10.). None without the body: nothing to
+        check."""
         if not cfg.body:
             return None
         areas, away = [list(boundary)] + [list(d) for d in drivable], [list(o) for o in obstacles] + \
@@ -432,7 +433,9 @@ class OsNode(base.MowbitePlannerNode):
                     return False
                 return way((came_from.x, came_from.y, came_from.yaw), p, ARRIVE_OUTSIDE)
             if not space:
-                space.append(centre_space(areas, away, cfg)[0])
+                room, fp = centre_space(areas, away, cfg)
+                anywhere = fp.turning.anywhere if fp is not None else room
+                space.append(room if anywhere.is_empty else anywhere)
             froms: List[tuple] = []
             far = ARRIVE_FROM
             while not froms and far >= ARRIVE_NEAREST - 1e-9:
