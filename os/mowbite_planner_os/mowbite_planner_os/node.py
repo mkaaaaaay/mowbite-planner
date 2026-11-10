@@ -31,10 +31,11 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
     through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see
     mowbite_planner.starts): the first from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is
-    small, the others from where the section before ends, as mowbite_logic drives there. A section ends where the
-    robot gets away again driving forwards (to the next one, or to the closest place the body turns whatever way,
-    facing any way there), earlier where it ends in a dead end, left out where nothing of it does (back_out: backing up
-    out of it).
+    small, the others from where the section before ends, as mowbite_logic drives there (every active mowing and
+    navigation area, ARRIVE_OUTSIDE outside at the ends; a goal outside: that stretch checked with the body in the
+    plan's body space). A section ends where the robot gets away again driving forwards (to the next one, or to the
+    closest place the body turns whatever way, facing any way there), earlier where it ends in a dead end, left out
+    where nothing of it does (back_out: backing up out of it).
     With a ~/plan_coverage request's start (use_start_pose: where mowbite_logic undocks to) the first section from
     there the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE); none got to from there: refused with
     START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
@@ -75,8 +76,10 @@ from mowbite_msgs.srv import ReplaceMap
 from mowbite_planner import core
 from mowbite_planner import node as base
 from mowbite_planner.config import INTERNAL, RETIRED, PlannerConfig, PlanningError
+from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import polygons
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
+from mowbite_planner.space import build_space, margins_of
 from mowbite_planner.starts import _Spent
 from mowbite_planner_os_interfaces.srv import PlanTransit
 
@@ -97,7 +100,7 @@ DATUM_STATES = ('UNKNOWN', 'EMPTY', 'MATCH', 'MISMATCH', 'UNBOUND')
 CALIB_TIMEOUT = 120.0
 # arrives: m from a plan's first section's start the ways to it start (behind it, beside it, ahead of it; where none is
 # that far in the lawn, halved till ARRIVE_NEAREST), at least half that far from it and ARRIVE_APART m from each other;
-# m the ways from where the section before ends may start and end outside (mowbite_logic's transit_max_outside); ways
+# m the ways to every section may start and end outside (mowbite_logic's transit_max_outside); ways
 # planned at most for a plan (a number, not a time: the same plan on any computer), the sections after that left out
 # (untried)
 ARRIVE_FROM = 2.0
@@ -391,22 +394,37 @@ class OsNode(base.MowbitePlannerNode):
 
     # how it gets to a plan's sections: ~/plan_transit
 
-    def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
+    def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, reach_over=(), unmowed=(),
+                margins=()):
         """Whether ~/plan_transit gets to a pose facing its heading (yaw None: there facing any way, the way out of
-        where a section ends), through the area and the drivable areas but the obstacles and the areas to keep out of,
-        as ~/plan_transit. From came_from (where the section before ends) the way mowbite_logic
-        asks for (max_outside ARRIVE_OUTSIDE), none where the room the centre has on a way parts the two (nothing
-        planned then); the first section's (came_from None) the body checked up to the pose (none of it outside): from
+        where a section ends) as mowbite_logic asks for it (masterplan 3.4): through every active mowing and navigation
+        area of the map (the area, drivable, reach_over, unmowed) but the obstacles and the areas to keep out of, the
+        ends max_outside ARRIVE_OUTSIDE; where the goal lies outside, its straight stretch checked with the body in the
+        plan's body space (as the plan's poses). From came_from (where the section before ends), none where the room
+        the centre has on a way parts the two (nothing planned then); the first section's (came_from None) from
         ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where
         the lawn is too small for those. A pose none of them gets to isn't got to: no start it can't get to (the Tron's
         case of 30.10.). None without the body: nothing to check."""
         if not cfg.body:
             return None
-        areas, away = [list(boundary)] + [list(d) for d in drivable], [list(o) for o in obstacles] + \
-            [list(k) for k in keep_out]
+        areas = [list(boundary)] + [list(d) for d in list(drivable) + list(reach_over) + list(unmowed)]
+        away = [list(o) for o in obstacles] + [list(k) for k in keep_out]
         space = []  # (worked out once a plan, when it's first asked)
         parts = []  # (the parts of the room a way may take)
+        body = []  # (the plan's body space's Footprint, when a goal first lies outside)
         ways = [0]
+
+        def fits(t) -> bool:  # (the goal's straight stretch outside, the pose before it too)
+            if t.goal_outside <= 0.0 or not t.poses:
+                return True
+            if not body:
+                over = list(reach_over) + list(unmowed)
+                margin_of = margins_of(boundary, obstacles, drivable, keep_out, over, margins, cfg)
+                got, _ = build_space(boundary, obstacles, drivable, keep_out, over, margin_of, cfg, False, unmowed)
+                body.append(Footprint(got.body_space, cfg.body_outline, cfg.spin_margin))
+            end = t.poses[-1]
+            k = next(i for i, q in enumerate(t.poses) if math.hypot(q.x - end.x, q.y - end.y) <= t.goal_outside + 1e-6)
+            return not [i for i in body[0].bad_poses(t.poses[max(0, k - 1):]) if i or not k]
 
         def way(start, p: Pose2D, max_outside: float) -> bool:
             if ways[0] >= ARRIVE_WAYS:
@@ -414,8 +432,7 @@ class OsNode(base.MowbitePlannerNode):
             ways[0] += 1
             goal = (p.x, p.y) if p.yaw is None else (p.x, p.y, p.yaw)
             try:
-                plan_transit(start, goal, areas, away, cfg, max_outside=max_outside)
-                return True
+                return fits(plan_transit(start, goal, areas, away, cfg, max_outside=max_outside))
             except PlanningError:
                 return False
 
@@ -443,7 +460,7 @@ class OsNode(base.MowbitePlannerNode):
                             all(math.hypot(q.x - a, q.y - b) >= ARRIVE_APART for a, b in froms):
                         froms.append((q.x, q.y))
                 far *= 0.5
-            return any(way((x, y, math.atan2(p.y - y, p.x - x)), p, 0.0) for x, y in froms)
+            return any(way((x, y, math.atan2(p.y - y, p.x - x)), p, ARRIVE_OUTSIDE) for x, y in froms)
         # (a plan kept with other code isn't taken)
         gets_to.key = {'os': os_code()}
         return gets_to

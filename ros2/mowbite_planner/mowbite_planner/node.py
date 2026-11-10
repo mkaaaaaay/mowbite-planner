@@ -478,8 +478,8 @@ class NodeCore(PlannerCore):
     def given(self):
         return self.node.given()
 
-    def arrives(self, boundary, obstacles, cfg, drivable, keep_out):
-        return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out)
+    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=()):
+        return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out, reach_over, unmowed, margins)
 
     def drive_ignored(self):
         return self.node.drive_ignored()
@@ -679,7 +679,8 @@ class MowbitePlannerNode(Node):
     def given(self) -> dict:
         return {}
 
-    def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out):
+    def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, reach_over=(), unmowed=(),
+                margins=()):
         return None
 
     def drive_ignored(self) -> str:

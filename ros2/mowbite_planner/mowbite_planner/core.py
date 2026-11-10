@@ -649,7 +649,7 @@ class PlannerCore:
     def plan_map(self, data):
         return data
 
-    def arrives(self, boundary, obstacles, cfg, drivable, keep_out):
+    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=()):
         """For a plan of these (plan_coverage's), arrives(pose, came_from): whether the robot gets to the pose facing its
         heading from came_from (planner.starts), None: it drives what it's given."""
         return None
@@ -1517,7 +1517,8 @@ class PlannerCore:
         them."""
         cfg = self.bound(cfg)
         cfg, why = self.driven(cfg)
-        arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out)
+        arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out, kw.get('reach_over', ()),
+                               kw.get('unmowed', ()), margins)
         return self.told(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, *args,
                                        arrives=arrives, **kw), why)
 
@@ -1539,7 +1540,7 @@ class PlannerCore:
         margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
         args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
         reach_over, unmowed = canon(reach_over), canon(unmowed)
-        arrives = self.arrives(args[0], args[1], cfg, args[5], args[6])
+        arrives = self.arrives(args[0], args[1], cfg, args[5], args[6], reach_over, unmowed, args[7])
         form = request_json(args, reach_over, unmowed)
         if arrives is not None:
             form = dict(form, arrives=getattr(arrives, 'key', True))

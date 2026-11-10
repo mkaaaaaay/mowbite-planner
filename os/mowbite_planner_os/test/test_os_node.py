@@ -453,6 +453,32 @@ def test_arrives(make, planned, monkeypatch):
 
 
 @fake_only
+def test_arrives_as_mowbite_logic_asks(make, monkeypatch):
+    """Every way, the first section's too, as mowbite_logic asks ~/plan_transit (masterplan 3.4): through every active
+    mowing and navigation area (drivable, reach_over, unmowed), ARRIVE_OUTSIDE at the ends; where the goal lies
+    outside, its straight stretch is checked with the body in the plan's body space (the nose over the edge there: not
+    got to)."""
+    from mowbite_planner_os.transit_route import Transit
+    node, cfg = make(), tron_cfg()
+    nav, other = [(8.0, 0.0), (10.0, 0.0), (10.0, 5.0), (8.0, 5.0)], [(0.0, 5.0), (8.0, 5.0), (8.0, 7.0), (0.0, 7.0)]
+    asked = []
+    end = []  # (the goal's stretch outside: these poses, the last the goal's)
+
+    def spy(start, goal, areas, away, cfg, max_outside):
+        asked.append((len(areas), max_outside))
+        poses = end or [Pose2D(start[0], start[1], start[2]), Pose2D(goal[0], goal[1], goal[2])]
+        return Transit(poses, 1.0, [], 0.0, 0.2 if end else 0.0, [])
+    monkeypatch.setattr(os_module, 'plan_transit', spy)
+    gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [], [nav], [other])
+    assert gets_to(Pose2D(2.0, 2.5, 0.0)) and gets_to(Pose2D(4.0, 1.0, 0.0), Pose2D(2.0, 2.5, 0.0))
+    assert set(asked) == {(3, os_module.ARRIVE_OUTSIDE)}
+    # (straight on to a goal by the eastern edge: the body fits where the navigation area lies beyond it, else not)
+    end.extend(Pose2D(7.7 + 0.05 * k, 2.5, 0.0) for k in range(5))
+    assert gets_to(Pose2D(7.9, 2.5, 0.0))
+    assert not node.core.arrives(GARDEN, [BED], cfg, [], [], [], [other])(Pose2D(7.9, 2.5, 0.0))
+
+
+@fake_only
 def test_transit_by_its_margins(make, monkeypatch):
     """~/plan_transit and arrives plan every way with the margins as they are, no second try (mkay 10.11.); the plans
     got to so kept by the code alone (arrives' key)."""
@@ -478,7 +504,8 @@ HEDGE = [(4.0, -1.0), (6.0, -1.0), (6.0, 7.0), (4.0, 7.0)]
 @fake_only
 def test_arrives_from_where_the_section_before_ends(make, monkeypatch):
     """A section's start after the first: got to from where the section before ends, the way mowbite_logic asks for
-    (max_outside 0.3); not where the room the centre has parts the two, nothing planned then."""
+    (max_outside 0.3, the first section's too); not where the room the centre has parts the two, nothing planned
+    then."""
     node = make()
     cfg = tron_cfg()
     asked = []
@@ -494,7 +521,7 @@ def test_arrives_from_where_the_section_before_ends(make, monkeypatch):
     assert asked == [((1.0, 1.0, 0.0), (2.5, 4.0, 0.5 * math.pi), 0.3)]
     asked.clear()
     assert not gets_to(Pose2D(8.0, 3.0, 0.0), end) and not asked
-    assert gets_to(Pose2D(8.0, 3.0, 0.0)) and asked and all(a[2] == 0.0 for a in asked)
+    assert gets_to(Pose2D(8.0, 3.0, 0.0)) and asked and all(a[2] == os_module.ARRIVE_OUTSIDE for a in asked)
 
 
 @fake_only
@@ -542,7 +569,9 @@ def test_back_up_with_plan(make, planned):
 def test_home_facing_any_way(make, monkeypatch):
     """Home from where a section ends (starts.py asks with no heading): a way there arriving facing any way."""
     asked = []
-    monkeypatch.setattr(os_module, 'plan_transit', lambda start, goal, *args, **kw: asked.append((start, goal)))
+    from mowbite_planner_os.transit_route import Transit
+    monkeypatch.setattr(os_module, 'plan_transit', lambda start, goal, *args, **kw: asked.append((start, goal)) or
+                        Transit([], 0.0, [], 0.0, 0.0, []))
     node = make()
     cfg = tron_cfg()
     gets_to = node.core.arrives(GARDEN, [BED], cfg, [], [])
