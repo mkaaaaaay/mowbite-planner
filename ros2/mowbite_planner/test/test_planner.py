@@ -1696,7 +1696,7 @@ def test_plan_starts_where_the_mower_gets_on(monkeypatch):
     FIT_START after it, the path would start later, after the corner, mower_logic driving there and turning on the spot
     unchecked), but where a way in fits from where the mower turns whatever way it faces (rings.START_CLEAR): the plan
     starts there, the way getting onto the loop where it starts (nothing left out at the start), the corner driven
-    another way like any other. Hardly more left unmowed than starting later there."""
+    another way like any other, none in the loop's first metre. Hardly more left unmowed than starting later there."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     check_invariants(plan, cfg, [TREE, BED])
@@ -1705,7 +1705,9 @@ def test_plan_starts_where_the_mower_gets_on(monkeypatch):
     assert (way.kind, way.maneuver) in ((TRANSIT, 'body'), (PERIMETER, 'lead')) and fit['unchecked'] == []
     assert plan.segments[1].kind == PERIMETER and plan.segments[1].start == way.end
     start = plan.poses[way.end]
-    assert min(math.hypot(start.x - x, start.y - y) for x, y in GARDEN) > 1.0  # (away from the corner)
+    first = plan.poses[way.end:plan.segments[1].end + 1]
+    ahead = [q for q in first if math.hypot(q.x - start.x, q.y - start.y) < 1.0]  # (no corner right after the start)
+    assert len(ahead) > 10 and max(angle_diff(q.yaw, start.yaw) for q in ahead) < math.radians(30)
     monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
     later = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     assert later.poses[later.segments[0].end] != start
@@ -1713,10 +1715,10 @@ def test_plan_starts_where_the_mower_gets_on(monkeypatch):
 
 
 def test_lead_onto_the_first_loop(monkeypatch):
-    """The outermost loop driven as recorded keeps no room for the body turned leadin.START_SWING either way (OpenMower
-    takes a path on up to 20 deg off its first pose's heading): the plan starts with a way onto it (lead.way_onto) from
-    where the body turns whatever way it faces, along the loop on its mowable side and easing onto it, the body turned
-    START_SWING fitting its first START_SWUNG, turning LEAD_TURN a step at most; nothing more left unmowed for it."""
+    """The outermost loop keeps no room for the body turned leadin.START_SWING either way (OpenMower takes a path on up
+    to 20 deg off its first pose's heading): the plan starts with a way onto it (lead.way_onto) from where the body
+    turns whatever way it faces, along the loop on its mowable side and easing onto it, the body turned START_SWING
+    fitting its first START_SWUNG, turning LEAD_TURN a step at most; nothing more left unmowed for it."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     plan = plan_coverage(rect(0, 0, 10, 6), [], cfg, start=(5, 1, 0.0), end=(5, 1))
     check_invariants(plan, cfg)
@@ -2984,12 +2986,13 @@ def test_loops_turn_round_in_dead_ends():
     """The winding path with three loops along the edges: they fill it (no lanes), each turning round at its ends where
     the body can't follow it round: in along one side as deep as it turns on the spot, round there, out along the other
     (trace.HAIR_TURN; mkay 31.10.), not left to the safety net (it left 4 and 9 m of the loops out at the ends): it
-    does next to nothing, all but the tips mowed. Not at a bend of a wider part (test_loop_further_in_round_a_bend)."""
+    does next to nothing (1.2 m of the outermost loop keeping the margins like the others, mkay 10.11.), all but the
+    tips mowed. Not at a bend of a wider part (test_loop_further_in_round_a_bend)."""
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=math.pi / 2, perimeter_passes=3, spin_margin=0.0))
     plan = plan_coverage(WINDING, [], cfg)
     check_invariants(plan, cfg)
     assert plan.stats['lanes'] == 0 and check_plan(plan)['body_out'] == []
-    assert plan.stats['body_fit']['origins']['rings']['m'] < 1.0 and coverage(plan, cfg) > 0.92
+    assert plan.stats['body_fit']['origins']['rings']['m'] < 1.5 and coverage(plan, cfg) > 0.92
     spins = [plan.poses[i] for i in range(1, len(plan.poses)) if i not in plan.section_starts and
              angle_diff(plan.poses[i].yaw, plan.poses[i - 1].yaw) > footprint.SPIN]
     assert any(p.y < 1.5 for p in spins) and any(p.y > 10.5 for p in spins)
