@@ -1743,7 +1743,7 @@ def test_path_cuts_where_openmower_gets_on_well(monkeypatch):
     pose: where the plan changes between loops and the rest within a section, the cut between its paths goes where the
     way is straight PIECE_STRAIGHT either side and the body turned PIECE_SWING either way fits from PIECE_STRAIGHT
     before it to PIECE_AFTER after it, within PIECE_REACH of the change (export._move_cuts). The poses the same."""
-    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.3))
     plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(1, 1, 0.0), end=(1, 1))
     pieces = plan_pieces(plan)
     monkeypatch.setattr(export, '_move_cuts', lambda plan, runs: None)
@@ -1961,7 +1961,8 @@ def test_turn_radius_zero():
 
 def test_loop_round_tight_tip(monkeypatch):
     """A tip too tight for a long front: the loop is driven anew there where the body fits (trace.py), hardly anything
-    left, loop_round's arcs or not."""
+    left with loop_round's arcs (0.3 m2 without them, the outermost loop keeping edge_margin at the tip, mkay
+    10.11.)."""
     nose = [(0.6, 0.06), (0.55, 0.16), (0.35, 0.23), (0.0, 0.26), (-0.12, 0.23), (-0.21, 0.1), (-0.21, -0.1),
             (-0.12, -0.23), (0.0, -0.26), (0.35, -0.23), (0.55, -0.16), (0.6, -0.06)]
     # a neck going up from the lawn, its east edge meeting the curve over its top at a sharp tip
@@ -1974,7 +1975,7 @@ def test_loop_round_tight_tip(monkeypatch):
     without = plan_coverage(neck, [], cfg, start=(0.5, 0.5, 0.0))
     report, before = check_plan(plan), check_plan(without)
     assert report['body_out'] == [] and before['body_out'] == []
-    assert report['left_m2'] < 0.05 and before['left_m2'] < 0.05
+    assert report['left_m2'] < 0.05 and before['left_m2'] < 0.35
 
 
 def test_loop_round_where_beds_meet_the_edge(monkeypatch):
@@ -1982,7 +1983,8 @@ def test_loop_round_where_beds_meet_the_edge(monkeypatch):
     anew where the body fits (trace.py), little of it left out and unmowed, however many arcs loop_round tries (the
     wedges between a bed and the edge where the further loops' levels are rounded near the islands, levels.RING_TIP,
     stay the completion stage's: 0.9 m2 here without it, 0.85 with it; 1.0 since the safety net keeps spin_margin
-    where the way turns as a turn does, stage 8)."""
+    where the way turns as a turn does, stage 8; 1.34 since the outermost loop keeps the margins like the others, mkay
+    10.11.)."""
     lawn = [(1.96, 6.72), (1.99, 7.14), (2.06, 7.57), (2.16, 8.03), (2.3, 8.48), (2.47, 8.88), (2.69, 9.23),
             (2.94, 9.54), (3.23, 9.81), (3.56, 10.02), (3.93, 10.19), (4.34, 10.32), (4.79, 10.4), (5.27, 10.44),
             (6.63, 10.44), (7.69, 10.4), (8.24, 10.34), (8.46, 10.3), (8.65, 10.26), (8.81, 10.19), (8.95, 10.09),
@@ -2005,11 +2007,13 @@ def test_loop_round_where_beds_meet_the_edge(monkeypatch):
     for slots in (False, True):
         plan = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2], edge_slots=slots)
         report = check_plan(plan)
-        assert (plan.stats['edge_slots'] > 0) == slots and plan.stats['body_fit']['skipped_m'] < 5.0
-        assert report['body_out'] == [] and report['left_m2'] < 1.05
+        # (the slots closed in free: the outermost loop keeping edge_margin round them, 15 m of it to the safety net)
+        most = 16.0 if slots else 5.0
+        assert (plan.stats['edge_slots'] > 0) == slots and plan.stats['body_fit']['skipped_m'] < most
+        assert report['body_out'] == [] and report['left_m2'] < 1.4
     monkeypatch.setattr('mowbite_planner.loopfit.LOOP_ROUND_TRIES', LOOP_ROUND_TRIES // 4)
     fewer = _plan_coverage(lawn, beds, cfg, start=dock, end=dock[:2], edge_slots=True)
-    assert fewer.stats['body_fit']['skipped_m'] < 5.0
+    assert fewer.stats['body_fit']['skipped_m'] < 16.0
 
 
 def test_loop_on_past_its_start():
