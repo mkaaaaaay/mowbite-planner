@@ -1,15 +1,18 @@
 """A drive of its own from one pose to another through the drivable areas (the node's ~/plan_transit), for a robot that
 drives the plans itself: from where it is to a plan's first pose, between its sections and areas, to the dock.
 
-The way goes like a coverage plan's drives between its lanes and areas (mowbite_planner.drive's Drive: the shortest way
+The way goes like a coverage plan's drives between its lanes and areas (mowbite_planner.drive's Drive: a short way
 through the free space, leaving and arriving on arcs, the bends rounded, turning on the spot only where no arc fits or
-with turn_on_spot), the body checked all along as on a plan (mowbite_planner.space's body space and Footprint). A start
-or goal by the edge (the dock) may lie a little outside: the stretch from there straight to where the body fits isn't
-checked, there's no turning on the spot on it.
+with turn_on_spot), the body checked all along as on a plan (mowbite_planner.space's body space and Footprint). It
+keeps a drive's distance from the edges where a way does, and is never one along the very edge (TransitPlanner's
+off_edge: the body touches the edge there); into a stretch the body just fits it's lined up with the stretch before it
+(plan_transit's lined_up). A start or goal by the edge (the dock) may lie a little outside: the stretch from there
+straight to where the body fits isn't checked, there's no turning on the spot on it.
 """
 
 import dataclasses
 import math
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import Point
@@ -19,7 +22,8 @@ from mowbite_planner.config import XY, PlannerConfig, PlanningError
 from mowbite_planner.drive import Drive
 from mowbite_planner.footprint import SPIN, Footprint
 from mowbite_planner.geometry import QUAD_SEGS, clean_polygon, inset, polygonal, union
-from mowbite_planner.maneuvers import dubins, join, path_length, same_position, sample_arc, sample_straight
+from mowbite_planner.maneuvers import (closest_on_polyline, dubins, join, path_length, same_position, sample_arc,
+                                       sample_straight)
 from mowbite_planner.mathutil import Pose2D, angle_diff, normalize_angle
 from mowbite_planner.planner import _turning
 from mowbite_planner.space import _body_space, _check_coordinates
@@ -33,10 +37,20 @@ MERGES = ((0.3, math.radians(25.0)), (0.3, math.radians(15.0)), (0.5, math.radia
 # where no arc gets to the goal or away from the start: arriving or leaving facing this many other ways at most,
 # turning on the spot there
 SPIN_TRIES = 4
+# m, a way through where none keeps a drive's distance from the edge (a strip the body just fits) keeps this far off it:
+# on the very edge the body touches it, and is out of it or not as the numbers come out
+TIGHT = 0.01
+# places a way is led by at most, lined up before a bend the body sticks out at (see plan_transit's lined_up)
+VIAS = 6
+# the last request's areas, obstacles and settings with their space, body and planners: this thread's next one with the
+# same takes them (a plan's sections, the ways home: the same map again and again)
+_ROOM = threading.local()
 
 
 # (m straight on, ((radius, turn), ...) arcs): a way onto the goal or off the start, see plan_transit's drive
 Bend = Tuple[float, Tuple[Tuple[float, float], ...]]
+# a place on the way and the way it faces there
+Via = Tuple[XY, float]
 
 
 @dataclasses.dataclass
@@ -71,6 +85,22 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
     return space, footprint
 
 
+def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
+          cfg: PlannerConfig) -> Tuple[Any, Optional[Footprint], Dict[tuple, TransitPlanner]]:
+    """centre_space() and the planners made in that space so far ({what it's made with: one}, their graphs as far as
+    they got, the ways they kept forgotten), the last request's where this one's areas, obstacles and settings are the
+    same (_ROOM)."""
+    key = ([[(float(p[0]), float(p[1])) for p in ring] for ring in drivable],
+           [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg)
+    last = getattr(_ROOM, 'last', None)
+    if last is None or last[0] != key:
+        space, footprint = centre_space(drivable, obstacles, cfg)
+        last = _ROOM.last = ((key[0], key[1], dataclasses.replace(cfg)), space, footprint, {})
+    for tp in last[3].values():
+        tp.forget()
+    return last[1], last[2], last[3]
+
+
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
                  goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
@@ -83,10 +113,11 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     body sticking out), it drives straight from there to where it fits, max_outside m at most: straight ahead from the
     start (where that doesn't get there and the body fits turning at the start, towards the closest point of the
     areas), on the goal's heading to the goal (without one, from the closest point). The same request gives the same
-    poses. An empty way where it's at the goal already (closer than waypoint_spacing, facing its way; with turn_on_spot
-    whatever way it faces, turning there is up to whoever drives it). Raises PlanningError where there's no way (a
-    goal by the edge no arc of turn_radius gets to facing its heading, where the body sticks out turning into it there
-    too, says so), or the input is out of range."""
+    poses, after the same number of ways tried (see search below: no time in it). An empty way where it's at the goal
+    already (closer than waypoint_spacing, facing its way; with turn_on_spot whatever way it faces, turning there is
+    up to whoever drives it). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets
+    to facing its heading, where the body sticks out turning into it there too, says so), or the input is out of
+    range."""
     cfg = config or PlannerConfig()
     cfg.validate()
     cfg = _turning(cfg)  # (as in plan_coverage)
@@ -109,10 +140,16 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     step = cfg.waypoint_spacing
     if not step > 0:
         raise PlanningError('a transit needs waypoint_spacing > 0')
-    space, footprint = centre_space(drivable, obstacles, cfg)
+    space, footprint, planners = _room(drivable, obstacles, cfg)
     warnings: List[str] = [] if footprint is not None else [cfg.no_body or '']
-    transit = TransitPlanner(space, cfg.transit_clearance, edge_distance=cfg.transit_edge_distance,
-                             edge_cost=cfg.transit_edge_cost)
+
+    def planner(clearance: float, edge: float = 0.0, cost: float = 0.0, off_edge: float = 0.0) -> TransitPlanner:
+        made = (clearance, edge, cost, off_edge)
+        if made not in planners:
+            planners[made] = TransitPlanner(space, clearance, edge_distance=edge, edge_cost=cost, off_edge=off_edge)
+        return planners[made]
+
+    transit = planner(cfg.transit_clearance, cfg.transit_edge_distance, cfg.transit_edge_cost)
 
     def clear(p: XY, yaw: float) -> bool:
         return transit.is_free([p]) and (footprint is None or footprint.fits_pose(p[0], p[1], yaw))
@@ -185,14 +222,15 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         return sum(angle_diff(a, b) > SPIN for a, b in zip(yaws, yaws[1:]))
 
     def drive(tp: TransitPlanner, c: PlannerConfig, arrive: Optional[float], lead: Optional[Bend] = None,
-              leave: Optional[Bend] = None, into: Optional[float] = None,
-              away: Optional[float] = None) -> Optional[Tuple[List[Pose2D], list]]:
+              leave: Optional[Bend] = None, into: Optional[float] = None, away: Optional[float] = None,
+              via: Sequence[Via] = ()) -> Optional[Tuple[List[Pose2D], list]]:
         # the way from entry to before through tp's space, arriving facing arrive, and the poses of it where the body
         # sticks out (from the pose before: turning on the spot at the first, from the start's heading or the way
         # in's). lead (m, arcs): arriving that much further back, straight on from there, before that on the arcs
         # ((radius, turn), ... in the order it drives them); leave (m, arcs): leaving straight ahead that far, then on
         # the arcs; into: arriving facing that way, turning on the spot there into arrive; away: turning on the spot at
-        # entry first, leaving facing that way. None where there's no way
+        # entry first, leaving facing that way; via: by way of these places, facing their way there. None where
+        # there's no way
         to, to_yaw, on = before, arrive if into is None else into, approach
         if lead is not None:
             back = straight + lead[0]
@@ -215,9 +253,16 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
             if not tp.is_free([(p.x, p.y) for p in out]) or footprint is not None and not footprint.all_fit(out):
                 return None
             frm, frm_yaw = (out[-1].x, out[-1].y), out[-1].yaw
-        far = math.hypot(to[0] - frm[0], to[1] - frm[1]) > 1e-6
-        way = Drive(tp, footprint, c).way(frm, frm_yaw, to, to_yaw) if far else []
-        if not c.turn_on_spot and to_yaw is not None and c.turn_radius > 1e-3 and \
+        way: Optional[List[Pose2D]] = []
+        stops = [(frm, frm_yaw), *via, (to, to_yaw)]
+        for (a, a_yaw), (b, b_yaw) in zip(stops, stops[1:]):
+            far = math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6
+            leg = Drive(tp, footprint, c).way(a, a_yaw, b, b_yaw) if far else []
+            if leg is None:
+                way = None
+                break
+            way = join(way, leg)
+        if not via and not c.turn_on_spot and to_yaw is not None and c.turn_radius > 1e-3 and \
                 (way is None or turns_in(way, frm_yaw, to_yaw)):
             # turning on the spot where Dubins' way straight there (the shortest first) fits: that one (a short way,
             # round once where it ends up next to where it started)
@@ -238,21 +283,54 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         bad = [] if footprint is None else [way[i - 1] for i in footprint.bad_poses([before_first] + way) if i > 0]
         return way, bad
 
-    # where the body sticks out on the way: keeping off the edges where it can (room to turn the nose round on the spot
-    # there, see TransitPlanner.careful_path), with turn_on_spot on arcs; then arriving straight on, 2 turn_radius
-    # (alongside the edge where the goal lies by one), to a goal without a heading facing a way the body fits there
-    # (the closest to the way it arrived first); then arriving and leaving on arcs (see drive)
-    tries: List[Tuple[TransitPlanner, PlannerConfig, Optional[float], Dict[str, Any]]] = [(transit, cfg, out_yaw, {})]
+    # every way tried, and its poses where the body sticks out
+    tried: List[Tuple[List[Pose2D], List[Pose2D]]] = []
     r = cfg.turn_radius
-    lead: Bend = (2.0 * r, ())
-    if footprint is not None:
-        wide = TransitPlanner(space, cfg.transit_clearance, edge_distance=max(cfg.transit_edge_distance,
-                                                                              footprint.reach - footprint.half),
-                              edge_cost=max(cfg.transit_edge_cost, 2.0))
-        tries.append((wide, cfg, out_yaw, {}))
-        if cfg.turn_on_spot:
-            arcs = dataclasses.replace(cfg, turn_on_spot=False)
-            tries += [(transit, arcs, out_yaw, {}), (wide, arcs, out_yaw, {})]
+
+    def outside(tp: TransitPlanner, c: PlannerConfig, arrive: Optional[float],
+                **more: Any) -> Optional[List[Pose2D]]:
+        # the poses of that way where the body sticks out (none: it fits), None where there's no way
+        got = drive(tp, c, arrive, **more)
+        if got is not None:
+            tried.append(got)
+        return None if got is None else got[1]
+
+    def legs(tp: TransitPlanner, via: Sequence[Via]) -> List[List[XY]]:
+        # tp's ways from entry to before by way of via, a stretch each (none where two of them are the same place)
+        stops = [entry, *(p for p, _ in via), before]
+        return [tp.careful_path(a, b) or [] if not same_position(a, b) else [] for a, b in zip(stops, stops[1:])]
+
+    def held(bad: List[Pose2D]) -> Optional[Pose2D]:
+        # the first of bad nothing at the way's ends changes: further from both than the ways tried there reach (the
+        # longest S of MERGES, 5 turn_radius round where it starts)
+        reach = max(off / math.tan(0.5 * a) for off, a in MERGES) + 5.0 * r
+        return next((q for q in bad if min(math.hypot(q.x - entry[0], q.y - entry[1]),
+                                           math.hypot(q.x - before[0], q.y - before[1])) > reach), None)
+
+    def lined_up(tp: TransitPlanner, via: Sequence[Via], q: Pose2D) -> Optional[List[Via]]:
+        # via and a place more for the bend of tp's way the body sticks out at (q, within its reach and turn_radius
+        # of it): on the line of the stretch after the bend, the body's front and turn_radius before it (the front
+        # alone where that's not free), facing along it: lined up with that stretch before the nose gets to the bend
+        # (it swings out over the far side turning there). None where there's no such place, or it's one of via
+        ways = legs(tp, via)
+        j = min(range(len(ways)), key=lambda i: closest_on_polyline(ways[i], (q.x, q.y))[2] if len(ways[i]) > 1
+                else math.inf)
+        pts = ways[j]
+        if len(pts) < 3:
+            return None
+        k = min(range(1, len(pts) - 1), key=lambda i: math.hypot(pts[i][0] - q.x, pts[i][1] - q.y))
+        if math.hypot(pts[k][0] - q.x, pts[k][1] - q.y) > footprint.reach + r:
+            return None
+        while k < len(pts) - 2 and math.hypot(pts[k + 1][0] - pts[k][0], pts[k + 1][1] - pts[k][1]) < 2.0 * step:
+            k += 1  # (a bend of a few corners: the stretch after the last)
+        yaw = math.atan2(pts[k + 1][1] - pts[k][1], pts[k + 1][0] - pts[k][0])
+        for back in (footprint.front + r, footprint.front):
+            p = (pts[k][0] - back * math.cos(yaw), pts[k][1] - back * math.sin(yaw))
+            if any(same_position(p, o) for o, _ in via):
+                return None
+            if transit.is_free([p, pts[k]]) and footprint.all_fit(sample_straight(p[0], p[1], *pts[k], yaw, step)):
+                return [*via[:j], (p, yaw), *via[j:]]
+        return None
 
     def turned(p: XY, yaw: float, into: bool) -> List[float]:
         # headings 22.5 deg apart the body fits turning on the spot at p from into yaw (into) or from yaw into,
@@ -270,50 +348,95 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         yaws = [h for h in yaws if footprint.fits_turn(p[0], p[1], *((h, yaw) if into else (yaw, h)))]
         return sorted(yaws, key=lambda h: (-room(h), angle_diff(h, yaw)))[:SPIN_TRIES]
 
-    first_bad = None
-    for k, (tp, c, arrive, more) in enumerate(tries):
-        got = drive(tp, c, arrive, **more)
-        if got is None:
-            if k == 0:
-                raise PlanningError(f'no way from ({s[0]:.2f}, {s[1]:.2f}) to ({g[0]:.2f}, {g[1]:.2f}) through the '
-                                    'drivable areas')
-            continue
-        checked, bad = got
-        if not bad:
-            break
-        if first_bad is None:
-            first_bad = bad
+    def ends() -> List[Tuple[Optional[float], Dict[str, Any]]]:
+        # the ways tried at the ends (the heading it arrives with, what of drive's): arriving straight on, 2
+        # turn_radius (alongside the edge where the goal lies by one), to a goal without a heading facing a way the
+        # body fits there (the closest to the way it arrived first)
+        if out_yaw is not None:
+            yaws = [out_yaw]
+        else:
+            came = tried[0][0][-1].yaw
+            yaws = sorted((normalize_angle(came + i * math.pi / 8) for i in range(16)),
+                          key=lambda h: angle_diff(h, came))
+            yaws = [h for h in yaws if footprint.fits_pose(g[0], g[1], h)][:3]
+        lead: Bend = (2.0 * r, ())
+        more: List[Tuple[Optional[float], Dict[str, Any]]] = [
+            (h, {'lead': m}) for h in yaws for m in ((lead,) if out_yaw is not None else (None, lead))]
+        if r > 1e-3:
+            # then arriving on an arc of turn_radius, straight on before the goal for a shorter way or none, and
+            # leaving straight on or on such an arc; then onto the line through the goal (off it) from beside it
+            # (alongside an edge, a gentle S, where an arc of turn_radius would swing the nose out over it); then
+            # arriving another way and turning on the spot at the goal into its heading, turning on the spot at
+            # the start and leaving another way (where that fits there, see turned): as a plan arrives at and
+            # leaves its poses
+            bends = [(m, ((r, side * a),)) for a in (0.25 * math.pi, 0.5 * math.pi) for side in (1.0, -1.0)
+                     for m in (0.0, r)]
+            merges = [(0.0, ((radius, side * a), (radius, -side * a))) for off, a in MERGES
+                      for radius in (0.5 * off / (1.0 - math.cos(a)),) if radius >= r for side in (1.0, -1.0)]
+            more += [(h, {'lead': m}) for h in yaws for m in [(r, ()), (0.5 * r, ())] + bends]
+            more += [(out_yaw, {'leave': m}) for m in [(r, ()), (2.0 * r, ())] + bends]
+            more += [(h, {'lead': m}) for h in yaws for m in merges]
+            more += [(out_yaw, {'leave': m}) for m in merges]
             if out_yaw is not None:
-                yaws = [out_yaw]
-            else:
-                came = checked[-1].yaw
-                yaws = sorted((normalize_angle(came + i * math.pi / 8) for i in range(16)),
-                              key=lambda h: angle_diff(h, came))
-                yaws = [h for h in yaws if footprint.fits_pose(g[0], g[1], h)][:3]
-            tries += [(t, cfg, h, {'lead': m}) for h in yaws for m in ((lead,) if out_yaw is not None else (None, lead))
-                      for t in (transit, wide)]
-            if r > 1e-3:
-                # then arriving on an arc of turn_radius, straight on before the goal for a shorter way or none, and
-                # leaving straight on or on such an arc; then onto the line through the goal (off it) from beside it
-                # (alongside an edge, a gentle S, where an arc of turn_radius would swing the nose out over it); then
-                # arriving another way and turning on the spot at the goal into its heading, turning on the spot at
-                # the start and leaving another way (where that fits there, see turned): as a plan arrives at and
-                # leaves its poses
-                bends = [(m, ((r, side * a),)) for a in (0.25 * math.pi, 0.5 * math.pi) for side in (1.0, -1.0)
-                         for m in (0.0, r)]
-                merges = [(0.0, ((radius, side * a), (radius, -side * a))) for off, a in MERGES
-                          for radius in (0.5 * off / (1.0 - math.cos(a)),) if radius >= r for side in (1.0, -1.0)]
-                tries += [(t, cfg, h, {'lead': m}) for h in yaws for m in [(r, ()), (0.5 * r, ())] + bends
-                          for t in (transit, wide)]
-                tries += [(t, cfg, out_yaw, {'leave': m}) for m in [(r, ()), (2.0 * r, ())] + bends
-                          for t in (transit, wide)]
-                tries += [(t, cfg, h, {'lead': m}) for h in yaws for m in merges for t in (transit, wide)]
-                tries += [(t, cfg, out_yaw, {'leave': m}) for m in merges for t in (transit, wide)]
-                if out_yaw is not None:
-                    tries += [(t, cfg, out_yaw, {'into': h}) for h in turned(before, out_yaw, True)
-                              for t in (transit, wide)]
-                tries += [(t, cfg, out_yaw, {'away': h}) for h in turned(entry, in_yaw, False) for t in (transit, wide)]
-    else:
+                more += [(out_yaw, {'into': h}) for h in turned(before, out_yaw, True)]
+            more += [(out_yaw, {'away': h}) for h in turned(entry, in_yaw, False)]
+        return more
+
+    def led(tp: TransitPlanner, c: PlannerConfig, via: List[Via], bad: List[Pose2D],
+            anywhere: bool) -> Tuple[List[Via], List[Pose2D]]:
+        # tp's way by way of via, the body sticking out on it at bad: lined up before the bends it does at (lined_up;
+        # those nothing at the ends changes, anywhere: all of them), a place more as long as it then does at fewer
+        # poses. The places and where it still sticks out
+        while bad and len(via) < VIAS:
+            longer = next((v for v in (lined_up(tp, via, q) for q in (bad if anywhere else [held(bad)])
+                                       if q is not None) if v is not None), None)
+            fewer = outside(tp, c, out_yaw, via=longer) if longer is not None else None
+            if fewer is None or len(fewer) >= len(bad):
+                break
+            via, bad = longer, fewer
+        return via, bad
+
+    def search() -> bool:
+        # whether a way fits (the last one tried). The way through: keeping transit_clearance or NARROW_CLEARANCE off
+        # the edge as a plan's drives do, and off the edges where it can (room to turn the nose round on the spot
+        # there, see TransitPlanner.careful_path), with turn_on_spot on arcs too; never along the very edge (TIGHT).
+        # Where the body sticks out at a bend nothing at the ends changes (held), lined up before it (led). Then with
+        # those where it sticks out by the ends alone, the ends' ways (ends). Where none of them fits, lined up before
+        # the bends by the ends too
+        if footprint is None:  # (nothing to stick out: the shortest way)
+            return outside(transit, cfg, out_yaw) is not None
+        edge, cost = cfg.transit_edge_distance, cfg.transit_edge_cost
+        ways = [planner(cfg.transit_clearance, edge, cost, TIGHT),
+                planner(cfg.transit_clearance, max(edge, footprint.reach - footprint.half), max(cost, 2.0), TIGHT)]
+        configs = [cfg] + ([dataclasses.replace(cfg, turn_on_spot=False)] if cfg.turn_on_spot else [])
+        got: Dict[Tuple[int, int], Tuple[List[Via], List[Pose2D]]] = {}
+        by: List[Optional[List[Via]]] = [None] * len(ways)
+        for n, c in enumerate(configs):
+            for i, tp in enumerate(ways):
+                bad = outside(tp, c, out_yaw)
+                if bad is None:
+                    if not tried:  # (no way at all)
+                        return False
+                    continue
+                got[n, i] = via, bad = led(tp, c, [], bad, False)
+                if not bad:
+                    return True
+                plain.append(bad)
+                if by[i] is None and held(bad) is None:
+                    by[i] = via
+        if any(via is not None for via in by) and any(
+                outside(tp, cfg, arrive, via=via, **end) == [] for arrive, end in ends()
+                for tp, via in zip(ways, by) if via is not None):
+            return True
+        return any(not led(ways[i], configs[n], via, bad, True)[1] for (n, i), (via, bad) in got.items())
+
+    plain: List[List[Pose2D]] = []  # (where the body sticks out on each way tried before the ends')
+    if not search():
+        if not tried:
+            raise PlanningError(f'no way from ({s[0]:.2f}, {s[1]:.2f}) to ({g[0]:.2f}, {g[1]:.2f}) through the '
+                                'drivable areas')
+        # (told of the way through that got the furthest: where the body sticks out the least often)
+        first_bad = min(plain, key=len)
         if all(same_position((p.x, p.y), exit_) for p in first_bad):
             raise PlanningError(f'no way arrives at the goal ({g[0]:.2f}, {g[1]:.2f})' +
                                 (' facing its heading' if heading is not None else '') +
@@ -324,6 +447,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
                                 'turn_radius gets away, turning on the spot there sticks out')
         where = ', '.join(f'({p.x:.2f}, {p.y:.2f})' for p in first_bad[:3])
         raise PlanningError(f'the body sticks out on the way at {len(first_bad)} poses: {where}')
+    checked = tried[-1][0]
     poses = join(head, checked, tail)
     if len(poses) < 2:  # (there, facing another way, with no room to go round)
         raise PlanningError(f'at the goal already, {math.degrees(angle_diff(out_yaw, s_yaw)):.0f} deg off its heading, '

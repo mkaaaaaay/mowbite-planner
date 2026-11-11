@@ -5,7 +5,7 @@ import os
 import sys
 
 import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +16,7 @@ from mowbite_planner.footprint import SPIN, Footprint  # noqa: E402
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import plan_coverage  # noqa: E402
 from mowbite_planner.space import _body_space  # noqa: E402
+from mowbite_planner_os import transit_route  # noqa: E402
 from mowbite_planner_os.transit_route import plan_transit  # noqa: E402
 
 # Airseekers Tron (mowerBody.ts, not measured yet): its nose swings ~56 cm out turning on the spot
@@ -164,6 +165,108 @@ def test_no_way():
     # the lawns without the navigation area between them
     with pytest.raises(PlanningError, match='no way from'):
         transit((2.0, 3.0, 0.0), (17.0, 5.0), areas=[LAWN, BACK])
+
+
+# two lawns joined by a passage (its middle line: out of the one, round, into the other)
+FRONT = [(0.0, 2.0), (5.0, 2.0), (5.0, 7.0), (0.0, 7.0)]
+REAR = [(0.0, -7.0), (5.0, -7.0), (5.0, -2.0), (0.0, -2.0)]
+ROUND = [(4.5, 4.0), (7.0, 4.0)] + [(7.0 + 4.0 * math.sin(math.pi * i / 32), 4.0 * math.cos(math.pi * i / 32))
+                                    for i in range(1, 32)] + [(7.0, -4.0), (4.5, -4.0)]
+SQUARE = [(4.5, 4.0), (11.0, 4.0), (11.0, -4.0), (4.5, -4.0)]
+
+
+def passage(width, line, join=1):
+    return list(LineString(line).buffer(0.5 * width, cap_style=2, join_style=join).exterior.coords)[:-1]
+
+
+@pytest.fixture
+def ways(monkeypatch):
+    """How many ways plan_transit asked for so far (Drive.way)."""
+    count = [0]
+
+    class Counted(transit_route.Drive):
+        def way(self, *args):
+            count[0] += 1
+            return super().way(*args)
+
+    monkeypatch.setattr(transit_route, 'Drive', Counted)
+    return lambda: count[0]
+
+
+def test_through_a_winding_passage(ways):
+    # the shortest way through bends round every corner of the passage's inner edge, the body touching the edge
+    # there: the way that keeps off it, the first one tried
+    for width, line, join in ((0.45, ROUND, 1), (0.3, ROUND, 1), (0.5, SQUARE, 2)):
+        areas = [FRONT, passage(width, line, join), REAR]
+        for start, goal in (((2.0, 4.0, 0.0), (2.0, -4.0)), ((2.0, -4.0, 0.0), (2.0, 4.5, math.pi))):
+            before = ways()
+            t = transit(start, goal, areas=areas, obstacles=())
+            check(t, start, goal, areas=areas, obstacles=())
+            assert t.spins == [] and t.warnings == [] and ways() == before + 1
+            assert t.length < LineString(line).length + 6.0
+
+
+def test_lined_up_before_a_gap(ways):
+    # a gap between two beds the body just fits through: come at from the side the nose swings out over the far bed
+    # turning into it. Lined up with the gap before it, by the start or the goal too
+    lawn = [(0.0, 0.0), (12.0, 0.0), (12.0, 6.0), (0.0, 6.0)]
+    beds = [[(5.0, 3.15), (8.0, 3.15), (8.0, 6.5), (5.0, 6.5)], [(5.0, -0.5), (8.0, -0.5), (8.0, 2.85), (5.0, 2.85)]]
+    for start, goal, few in (((1.0, 0.8, 0.0), (11.0, 3.0), True), ((11.0, 5.2, math.pi), (1.0, 3.0), True),
+                             ((1.0, 3.0, 0.0), (11.0, 3.0), True), ((3.0, 1.9, 0.0), (11.0, 3.0), False),
+                             ((1.0, 0.8, 0.0), (8.6, 3.0, 0.0), False)):
+        before = ways()
+        t = transit(start, goal, areas=[lawn], obstacles=beds)
+        check(t, start, goal, areas=[lawn], obstacles=beds)
+        assert t.spins == []
+        through = [p for p in t.poses if 5.0 <= p.x <= 8.0]
+        assert through and all(abs(p.y - 3.0) < 0.05 for p in through)
+        # (far from both ends: lined up at once, the ends' ways not tried)
+        assert not few or ways() <= before + 4
+    # a gap the body doesn't fit through: no way
+    beds = [[(5.0, 3.05), (8.0, 3.05), (8.0, 6.5), (5.0, 6.5)], [(5.0, -0.5), (8.0, -0.5), (8.0, 2.95), (5.0, 2.95)]]
+    with pytest.raises(PlanningError, match='^no way from'):
+        transit((1.0, 0.8, 0.0), (11.0, 3.0), areas=[lawn], obstacles=beds)
+
+
+def test_refused_after_a_few_ways(ways):
+    # a passage with square corners the body just fits along: it doesn't get round them, and can't line up before them
+    # (the passage's wall). Nothing at the ends changes that: refused without their ways, after the same few ways on
+    # any computer
+    areas = [FRONT, passage(0.25, SQUARE, 2), REAR]
+    with pytest.raises(PlanningError, match=r'^the body sticks out on the way at \d+ poses: \(10\.'):
+        transit((2.0, 4.0, 0.0), (2.0, -4.0), areas=areas, obstacles=())
+    assert ways() == 2
+    # a goal by the edge the body doesn't get to facing along it: the ends' ways tried, a number of them too
+    lawn = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
+    with pytest.raises(PlanningError, match=r'^the body sticks out on the way at \d+ poses: \(9\.'):
+        transit((3.0, 3.0, 0.0), (9.95, 3.0, math.pi / 2), areas=[lawn], obstacles=(), max_outside=0.0)
+    assert 10 < ways() - 2 < 100
+
+
+def test_the_same_answers_from_a_kept_room():
+    # the space and the planners kept from one request to the next (the same areas, obstacles and settings): the same
+    # answers as made anew for each
+    areas = [FRONT, passage(0.45, ROUND), REAR]
+    asks = [((2.0, 4.0, 0.0), (2.0, -4.0)), ((2.0, -4.0, 0.0), (2.0, 4.5, math.pi)), ((1.0, 6.0, 1.0), (4.0, 2.2, 0.0)),
+            ((2.0, 4.0, 0.0), (4.9, 6.9, 0.0)), ((2.0, 4.0, 0.0), (2.0, -4.0))]
+
+    def answer(start, goal):
+        try:
+            return transit(start, goal, areas=areas, obstacles=()).poses
+        except PlanningError as e:
+            return str(e)
+
+    kept = [answer(*ask) for ask in asks]
+    assert kept[0] == kept[-1] and transit_route._ROOM.last[1] is transit_route._room(
+        areas, [], transit_route._turning(PlannerConfig(**TRON)))[0]
+    anew = []
+    for ask in reversed(asks):
+        transit_route._ROOM.__dict__.clear()
+        anew.append(answer(*ask))
+    assert kept == anew[::-1]
+    # other settings, another room
+    transit(asks[0][0], asks[0][1], {'edge_margin': 0.03}, areas=areas, obstacles=())
+    assert transit_route._ROOM.last[0][2].edge_margin == 0.03
 
 
 def test_at_the_goal():

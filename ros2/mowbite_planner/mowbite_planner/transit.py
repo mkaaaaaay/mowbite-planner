@@ -114,13 +114,18 @@ class TransitPlanner:
 
     careful_path() also weighs how much of a way runs along the edge: every metre closer than edge_distance
     counts 1 + edge_cost times, a way through the space shrunk by edge_distance wins where it's cheaper so.
+
+    off_edge (m): no way along the very edge, where a body as wide as the space allows touches it: in place of the
+    unshrunk corners those of the space shrunk that much, their way only where none that keeps its distance is about as
+    short (a winding way's a lot longer than straight there, the one along the edge bends round every corner).
     """
 
     def __init__(self, space, clearance: float = 0.05, tolerance: float = 1e-3, edge_distance: float = 0.0,
-                 edge_cost: float = 0.0):
+                 edge_cost: float = 0.0, off_edge: float = 0.0):
         self._space = space
         self._tolerance = tolerance
         self._edge_distance, self._edge_cost = edge_distance, edge_cost
+        self._off_edge = off_edge
         self._inner: Optional['TransitPlanner'] = None  # the space shrunk by edge_distance, made when needed
         self._band = None  # what's closer to the edge than that
         # a hair wider, so a drive exactly along the edge (the outer perimeter loop) still counts as inside
@@ -186,7 +191,7 @@ class TransitPlanner:
         """A planner like this one for its space but geom (the strips round it, along which the way that keeps its
         distance from the edge is taken where there is one)."""
         out = TransitPlanner(polygonal(self._space.difference(geom)), self._clearance, self._tolerance,
-                             self._edge_distance, self._edge_cost)
+                             self._edge_distance, self._edge_cost, self._off_edge)
         out._strips = True
         return out
 
@@ -213,6 +218,12 @@ class TransitPlanner:
             nodes = [n for n in reflex_nodes(shrunk, MIN_REFLEX) if self.is_free([n[0]])]
             if nodes:
                 graphs.append(_Graph(nodes, prep(shrunk), clearance))
+        if self._off_edge > 0:
+            # every corner of the space shrunk by off_edge (simplified: still inside)
+            shrunk = self._space.buffer(-self._off_edge, 4, join_style=JOIN_MITRE, mitre_limit=3.0)
+            shrunk = shrunk.simplify(0.5 * self._off_edge, preserve_topology=True)
+            graphs.append(_Graph([n for n in reflex_nodes(shrunk) if self.is_free([n[0]])], prep(shrunk)))
+            return graphs
         # every corner of the space itself: exact, a way along the edge bends at each of them
         graphs.append(_Graph([n for n in reflex_nodes(self._space) if self.is_free([n[0]])]))
         return graphs
@@ -233,6 +244,12 @@ class TransitPlanner:
             self._ways[key] = got
         return None if got is None else list(got)
 
+    def forget(self) -> None:
+        """The ways kept so far forgotten (kept; the graphs stay)."""
+        self._ways.clear()
+        if self._inner is not None:
+            self._inner.forget()
+
     def path(self, a: XY, b: XY, wide: bool = False) -> Optional[List[XY]]:
         """Shortest polyline from a to b inside the space, None if there's no way (or a or b lie outside). wide: one
         keeping the clearance off the edge first."""
@@ -249,13 +266,25 @@ class TransitPlanner:
         if self._graphs is None:
             self._graphs = self._build_graphs()
         best = None
+        off: List[Tuple[float, List[XY]]] = []  # (how far off the edge, the way) of the graphs that keep a distance
         straight = math.hypot(b[0] - a[0], b[1] - a[1])
         for gi, graph in enumerate(self._graphs):
             if graph.clearance > NARROW_CLEARANCE and not wide:
                 continue
             found = self._astar(gi, graph, a, b)
-            if found is not None and (best is None or _length(found) < _length(best)):
-                best = found
+            if self._off_edge > 0 and not graph.clearance:
+                # (off_edge: the corners that far in only where no way that keeps a distance is about as short: no
+                # longer than what going round its bends that far out adds, twice that, half a turn more)
+                if found is not None:
+                    turned = sum(abs(math.remainder(math.atan2(r[1] - q[1], r[0] - q[0]) - math.atan2(
+                        q[1] - p[1], q[0] - p[0]), 2.0 * math.pi)) for p, q, r in zip(found, found[1:], found[2:]))
+                    best = next((w for c, w in off if _length(w) <= _length(found) + 2.0 * c * (turned + math.pi)),
+                                found)
+                break
+            if found is not None:
+                off.append((graph.clearance, found))
+                if best is None or _length(found) < _length(best):
+                    best = found
             # keep the way that keeps its distance from the edge unless hugging it is a lot shorter
             if best is not None and (self._strips or _length(best) <= 1.2 * straight + 0.5):
                 break
@@ -284,7 +313,7 @@ class TransitPlanner:
             inner = self._space.buffer(-self._edge_distance, 4)
             if inner.is_empty:
                 return best
-            self._inner = TransitPlanner(inner, self._clearance, self._tolerance)
+            self._inner = TransitPlanner(inner, self._clearance, self._tolerance, off_edge=self._off_edge)
             # (not its edge, ways through the shrunk space may run along that)
             self._band = self._space.difference(inner.buffer(self._tolerance, 4))
         inner = self._inner

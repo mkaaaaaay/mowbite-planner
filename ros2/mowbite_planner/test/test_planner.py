@@ -3525,6 +3525,47 @@ def test_careful_path_keeps_off_the_edge():
     assert narrow.careful_path((1.0, 3.0), (11.0, 3.0)) == narrow.path((1.0, 3.0), (11.0, 3.0))
 
 
+def test_off_edge_no_way_along_the_edge():
+    # two lawns joined by a passage round a half circle: the shortest way bends at every corner of its inner edge
+    def space(width):
+        line = [(4.5, 4.0), (7.0, 4.0)] + [(7.0 + 4.0 * math.sin(math.pi * i / 32), 4.0 * math.cos(math.pi * i / 32))
+                                           for i in range(1, 32)] + [(7.0, -4.0), (4.5, -4.0)]
+        return unary_union([Polygon(rect(0, 2, 5, 7)), Polygon(rect(0, -7, 5, -2)),
+                            LineString(line).buffer(0.5 * width, cap_style=2, join_style=1)])
+
+    def off(way, room):  # (m the way's bends keep off the edge)
+        return min(room.boundary.distance(LineString(leg)) for leg in zip(way[1:-2], way[2:-1]))
+
+    a, b = (2.0, 4.0), (2.0, -4.0)
+    room = space(0.5)
+    plain, kept = TransitPlanner(room, 0.15), TransitPlanner(room, 0.15, off_edge=0.005)
+    along, way = plain.careful_path(a, b), kept.careful_path(a, b)
+    assert off(along, room) < 1e-9  # (as ever: a winding way's a lot longer than straight there, the shortest one)
+    # off_edge: a way of the corners that keep a distance, no longer than what going round the bends that far out adds
+    assert off(way, room) > 0.02 and LineString(way).length < 1.03 * LineString(along).length
+    assert prep(room.buffer(1e-6)).covers(LineString(way))
+    # the same where the way that keeps its distance isn't much longer than straight there
+    assert kept.careful_path(a, (3.0, 6.0)) == plain.careful_path(a, (3.0, 6.0))
+    assert kept.careful_path((4.0, 4.0), (8.0, 3.9)) == plain.careful_path((4.0, 4.0), (8.0, 3.9))
+    # a way that keeps a distance but is a lot longer (round the other side of a bed, the short one by its edge): not
+    # taken, the one of the corners off_edge in
+    bed = Polygon(rect(0, 0, 12, 6)).difference(Polygon(rect(3, 0.35, 9, 5.0)))
+    short = TransitPlanner(bed, 0.15, off_edge=0.005).careful_path((2.0, 0.2), (10.0, 0.2))
+    assert LineString(short).length < 9.0 and all(y < 0.4 for _, y in short)
+    # a passage too narrow for a distance: the corners off_edge in, no way along the very edge
+    room = space(0.08)
+    tight = TransitPlanner(room, 0.15, off_edge=0.005).careful_path(a, b)
+    assert off(tight, room) == pytest.approx(0.005, abs=1e-3)
+    assert prep(room.buffer(1e-6)).covers(LineString(tight))
+    # the planner it makes for edge_distance takes it along
+    wide = TransitPlanner(space(0.5), 0.15, edge_distance=0.4, edge_cost=2.0, off_edge=0.005)
+    wide.careful_path(a, b)
+    assert wide._inner._off_edge == 0.005
+    # forget(): the ways kept gone, the same ones again
+    kept.forget()
+    assert not kept._ways and kept.careful_path(a, b) == way
+
+
 def test_transits_keep_off_the_edges():
     """transit_edge_distance: the drives keep off the edges between where they start and end (those at lanes' ends by
     the edge themselves)."""
