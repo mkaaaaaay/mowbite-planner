@@ -47,7 +47,8 @@ The same input always gives exactly the same poses (on the same shapely and GEOS
 - **`~/plan_coverage`** (`PlanCoverage`): `boundary`, `obstacles`, `drivable_areas` (other lawns for drives
   between parts), `overrides` (any parameter, this request only), optional fixed `angle`, `start_pose` (the path
   starts on the loop next to it) and `end_point` (ends close to it). Answers the path, `section_start`, the angle,
-  lane spacing, length, a SHA-256 `fingerprint` and the segments (loop, lane, turn, transit).
+  lane spacing, length, a SHA-256 `fingerprint` and the segments (loop, lane, turn, transit); without a plan
+  `code` says why as a word (`NO_PLAN`, `BAD_REQUEST`, ... see the `.srv`), `message` is to show.
 - **`~/plan_from_parameters`** (`Trigger`): plans `boundary_polygon` and `obstacles` from the parameters, for trying
   things out.
 - **`~/coverage_path`** (`nav_msgs/Path`, transient local): every plan.

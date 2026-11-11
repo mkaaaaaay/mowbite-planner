@@ -1,10 +1,13 @@
 """Tests of the ROS 2 node: with a sourced ROS 2 workspace (colcon test) against the real rclpy and the
 built interfaces, otherwise against the stand-ins in fake_ros.py."""
 
+import glob
 import hashlib
 import json
 import math
 import os
+import pickle
+import re
 import signal
 import sys
 import time
@@ -35,7 +38,7 @@ from std_srvs.srv import Trigger  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
 from mowbite_planner import node as node_module  # noqa: E402
-from mowbite_planner.config import PlanningError  # noqa: E402
+from mowbite_planner.config import COVERAGE_CODES, NothingLeft, PlanningError  # noqa: E402
 from mowbite_planner.mathutil import angle_diff, quaternion_to_yaw  # noqa: E402
 from mowbite_planner.node import MowbitePlannerNode, float32_warnings, pairs, parse_polygon  # noqa: E402
 from stubplan import Spy  # noqa: E402
@@ -46,6 +49,8 @@ TREE = [(5 + 0.9 * math.cos(a * math.pi / 8), 6 + 0.9 * math.sin(a * math.pi / 8
 # a bed across the whole lawn splits it in two
 LAWN = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
 HEDGE = [(4.0, -1.0), (6.0, -1.0), (6.0, 7.0), (4.0, 7.0)]
+# the services as written
+SRV = os.path.join(HERE, '..', '..', 'mowbite_planner_interfaces', 'srv')
 
 
 def polygon(points):
@@ -169,6 +174,38 @@ def test_plan_coverage_bad_input(node):
     assert not res.success and res.message
     res = call_plan_coverage(node, overlap=1.5)
     assert not res.success and 'overlap' in res.message
+
+
+def srv_words(path):
+    """The words a .srv tells of for its code, in its order."""
+    with open(path) as f:
+        return re.findall(r'^#   ([A-Z_]+) ', f.read(), re.M)
+
+
+def test_plan_coverage_code(node, monkeypatch):
+    """code: empty with a plan, else why not as a word (COVERAGE_CODES, the ones the .srv tells of): a PlanningError's
+    own, NO_PLAN for one without, INTERNAL for any other error."""
+    assert srv_words(os.path.join(SRV, 'PlanCoverage.srv')) == list(COVERAGE_CODES)
+    res = call_plan_coverage(node)
+    assert res.success and res.code == ''
+    res = call_plan_coverage(node, overrides=[override('blade_height', 0.05)])
+    assert not res.success and res.code == 'BAD_REQUEST'
+    res = call_plan_coverage(node, boundary=[(0.0, 0.0), (1.0, 1.0)], obstacles=[])
+    assert not res.success and res.code == 'NO_PLAN'
+    for error, code in ((PlanningError('no'), 'NO_PLAN'), (PlanningError('no', word='START_UNREACHABLE'),
+                                                            'START_UNREACHABLE'),
+                        (NothingLeft('no'), 'NO_PLAN'), (PlanningError('no', word='SOMETHING'), 'NO_PLAN'),
+                        (RuntimeError('broken'), 'INTERNAL')):
+        def failing(*args, error=error, **kw):
+            raise error
+        monkeypatch.setattr(node_module, 'plan_coverage', failing)
+        res = call_plan_coverage(node)
+        assert not res.success and res.code == code and res.code in COVERAGE_CODES, (error, res.code)
+    assert node_module.code_of(PlanningError('no', word='GOAL_OUTSIDE'), ('GOAL_OUTSIDE', 'NO_WAY'), 'NO_WAY') == \
+        'GOAL_OUTSIDE'
+    # (a word outlives pickling: the pool's processes hand their errors on so)
+    again = pickle.loads(pickle.dumps(PlanningError('no', word='BODY_OUT')))
+    assert (str(again), again.word, PlanningError('no').word) == ('no', 'BODY_OUT', '')
 
 
 
@@ -422,15 +459,19 @@ def send_map(node, data):
 
 
 def rpc(node, method, params=None, rid='r1', wait=60.0):
-    """(result, None) or (None, (code, message)) of a request on ~/rpc/request."""
+    """(result, None) or (None, (code, message)) of a request on ~/rpc/request; (code, message, data) where the error
+    has data."""
     give(node, '~/rpc/request', json.dumps({'method': method, 'params': params, 'id': rid}))
     end = time.time() + wait
     while time.time() < end:
         for msg in node.publishers['~/rpc/response'].published:
             got = json.loads(msg.data)
             if got['id'] == rid:
-                return (got['result'], None) if 'result' in got else (None, (got['error']['code'],
-                                                                             got['error']['message']))
+                if 'result' in got:
+                    return got['result'], None
+                assert set(got['error']) <= {'code', 'message', 'data'}
+                return None, (got['error']['code'], got['error']['message']) + (
+                    (got['error']['data'],) if 'data' in got['error'] else ())
         time.sleep(0.01)
     raise AssertionError(f'no answer to {method} ({rid})')
 
@@ -614,13 +655,102 @@ def test_a_robots_own_node(make):
     assert got['settings']['perimeter_passes']['value'] == 2 and 'from' not in got['settings']['perimeter_passes']
     send_map(node, the_map())
     node.unusable = 'the map is being moved'
-    assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')[1] == (-32602, 'the map is being moved')
+    assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')[1] == (-32602, 'the map is being moved',
+                                                                     {'code': 'NOT_READY'})
     res = plan_area(node)
     assert not res.success and res.message == 'area a: the map is being moved'
     node.core.plan_ahead()
     assert not node.core.plans
     node.unusable = ''
     assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r3')[1] is None
+
+
+class Picky(Robot):
+    """A robot with a last check of its own: the plans it saw, refusing them all once it's told to."""
+
+    refuses = ''
+
+    def checked(self, plan):
+        self.seen = getattr(self, 'seen', []) + [plan]
+        if self.refuses:
+            raise PlanningError(self.refuses, word='BODY_OUT')
+        return plan
+
+
+@fake_only
+def test_a_robots_last_check(make, planned, tmp_path):
+    """A robot's checked: every plan just planned goes through it before it's kept and handed out (~/plan_coverage
+    with the map and without, planner.plan, what a mow left), one kept not again. A plan it doesn't take: refused
+    with its word as the code, nothing published, not kept as a plan; the no is kept (asked again: at once, with its
+    word). Without one of its own every plan as it is."""
+    from shapely.geometry import box
+    plain = make()
+    send_map(plain, the_map())
+    assert plan_area(plain).success and plain.checked('any') == 'any'
+    node = make(Picky)
+    send_map(node, the_map())
+    first = plan_area(node)
+    assert first.success and first.code == '' and len(node.seen) == 1
+    assert plan_area(node).message.startswith('area a, kept from before: ') and len(node.seen) == 1
+    cfg = node.core.current.base.with_overrides({'mower_width': 0.22})
+    left = node.core.left_plan(MAP_GARDEN, [], cfg, None, None, [], [], mowed=box(0.0, 0.0, 8.0, 4.0))
+    assert node.seen[-1].poses == left.poses and len(node.seen) == 2
+    node.refuses = 'not this one'
+    with pytest.raises(PlanningError, match='^not this one$') as e:
+        node.core.left_plan(MAP_GARDEN, [], cfg, None, None, [], [], mowed=box(0.0, 0.0, 8.0, 4.0))
+    assert e.value.word == 'BODY_OUT'
+    plans = sorted(glob.glob(str(tmp_path / 'planner' / 'plans' / '*.pkl')))
+    kept, calls, sent = dict(node.core.plans), len(planned.calls), len(node.publishers['~/coverage_path'].published)
+    for again in range(2):  # (the second time the no kept)
+        res = plan_area(node, perimeter_passes=1)
+        assert not res.success and res.code == 'BODY_OUT' and res.message == 'area a: not this one'
+        assert res.path.poses == [] and res.fingerprint == ''
+    assert len(planned.calls) == calls + 1 and len(node.seen) == 4
+    # (planner.plan: the same no, its word as the error's data)
+    assert rpc(node, 'planner.plan', {'area_id': 'a', 'outline_count': 1})[1] == (-32602, 'not this one',
+                                                                                 {'code': 'BODY_OUT'})
+    assert len(planned.calls) == calls + 1
+    assert node.core.plans == kept and sorted(glob.glob(str(tmp_path / 'planner' / 'plans' / '*.pkl'))) == plans
+    assert len(node.publishers['~/coverage_path'].published) == sent
+    assert plan_area(node).message.startswith('area a, kept from before: ')  # (one it took before stays)
+    # (without the map: the request's own)
+    bare = make(Picky)
+    assert plan_area(bare).success and len(bare.seen) == 1 and len(bare.publishers['~/coverage_path'].published) == 1
+    bare.refuses = 'nor this'
+    res = plan_area(bare)
+    assert not res.success and (res.code, res.message) == ('BODY_OUT', 'nor this')
+    assert len(bare.publishers['~/coverage_path'].published) == 1
+
+
+@fake_only
+def test_plan_coverage_code_with_the_map(make, planned, monkeypatch):
+    """~/plan_coverage of an area of the map: NOT_READY where the map can't be planned now, the planner's no with its
+    word (kept with it), NO_PLAN without one, INTERNAL for any other error."""
+    node = make(Robot)
+    send_map(node, the_map())
+    node.unusable = 'the map is being moved'
+    res = plan_area(node)
+    assert not res.success and res.code == 'NOT_READY'
+    node.unusable = ''
+    assert plan_area(node, overrides=[override('blade_height', 0.05)]).code == 'BAD_REQUEST'
+
+    def failing(error):
+        def fails(*args, **kw):
+            raise error
+        monkeypatch.setattr(core_module, 'plan_coverage', fails)
+    failing(PlanningError('start unreachable: no way', word='START_UNREACHABLE'))
+    for again in range(2):
+        res = plan_area(node)
+        assert not res.success and (res.code, res.message) == ('START_UNREACHABLE',
+                                                               'area a: start unreachable: no way')
+    failing(RuntimeError('broken'))
+    res = plan_area(node, perimeter_passes=1)
+    assert not res.success and res.code == 'INTERNAL' and 'RuntimeError: broken' in res.message
+    failing(PlanningError('too small'))
+    assert plan_area(node, perimeter_passes=1).code == 'NO_PLAN'
+    monkeypatch.setattr(core_module, 'plan_coverage', planned)
+    res = plan_area(node, perimeter_passes=3)
+    assert res.success and res.code == ''
 
 
 @fake_only

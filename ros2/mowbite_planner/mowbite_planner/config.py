@@ -139,8 +139,21 @@ _KEPT_LOCK = threading.Lock()
 _BODY_SPACE = threading.local()
 
 
+# what ~/plan_coverage's code says where it gives no plan: a PlanningError's word, NO_PLAN for one without, INTERNAL for
+# any other error
+COVERAGE_CODES = ('NOT_READY', 'BAD_REQUEST', 'NO_PLAN', 'START_UNREACHABLE', 'BODY_OUT', 'INTERNAL')
+
+
 class PlanningError(ValueError):
-    """The request can't be planned (bad parameters, no area left to mow)."""
+    """The request can't be planned (bad parameters, no area left to mow). word: what a service's code says of it
+    (COVERAGE_CODES, MowBite OS' ~/plan_transit: its own), given where it's raised; '': the service's plain no."""
+
+    word = ''
+
+    def __init__(self, *args, word: str = ''):
+        super().__init__(*args)
+        if word:
+            self.word = word
 
 
 class NothingLeft(PlanningError):

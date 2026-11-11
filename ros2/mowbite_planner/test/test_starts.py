@@ -104,6 +104,7 @@ def test_the_first_section_from_the_start():
     with pytest.raises(PlanningError) as e:
         reached_starts(p, arrives)
     assert str(e.value).startswith(START_UNREACHABLE + 'no way from the start (12.50, 3.00) gets to any section')
+    assert e.value.word == 'START_UNREACHABLE'  # (~/plan_coverage's code)
     # (the asks running out before one is: the same)
     arrives, asked = asking(lambda pose, came: came.x != 12.5)
 
@@ -115,9 +116,11 @@ def test_the_first_section_from_the_start():
     with pytest.raises(PlanningError) as e:
         reached_starts(p, spent)
     assert str(e.value).startswith(START_UNREACHABLE) and str(e.value).endswith('ran out before the last ones)')
+    assert e.value.word == 'START_UNREACHABLE'
     # without a start as ever
-    with pytest.raises(PlanningError, match='^no way gets to any section'):
+    with pytest.raises(PlanningError, match='^no way gets to any section') as e:
         reached_starts(p, lambda pose, came: False)
+    assert e.value.word == ''
 
 
 def test_a_section_starts_later_where_it_gets_to():

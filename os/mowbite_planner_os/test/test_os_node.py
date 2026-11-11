@@ -1,11 +1,14 @@
 """Tests of the node on MowBite OS (OsNode): with a sourced ROS 2 workspace (colcon test) against the real rclpy,
 mowbite_msgs and interfaces, otherwise against the stand-ins (osfake.py)."""
 
+import dataclasses
+import glob
 import gzip
 import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
 
@@ -28,15 +31,20 @@ import calibsim  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import calibread, progress  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
-from test_contract import test_requires_met  # noqa: E402,F401  (on MowBite OS' Jazzy too)
+# (on MowBite OS' Jazzy too, contract.json as installed there)
+from test_contract import test_in_the_package_and_in_share, test_requires_met  # noqa: E402,F401
 from mowbite_planner import node as node_module  # noqa: E402
 from mowbite_planner.calib import evaluate  # noqa: E402
 from mowbite_planner.config import PlannerConfig, PlanningError  # noqa: E402
+from mowbite_planner.geometry import inset  # noqa: E402
+from mowbite_planner.planner import plan_coverage as real_plan_coverage  # noqa: E402
+from mowbite_planner.report import rules  # noqa: E402
 from mowbite_planner.starts import _Spent  # noqa: E402
 from mowbite_planner.mathutil import Pose2D, yaw_to_quaternion  # noqa: E402
 from mowbite_planner_os import node as os_module  # noqa: E402
+from mowbite_planner_os import transit_route  # noqa: E402
 from mowbite_planner_os.node import OsNode  # noqa: E402
-from stubplan import Spy  # noqa: E402
+from stubplan import Spy, stub_plan_coverage  # noqa: E402
 
 fake_only = pytest.mark.skipif(REAL_ROS, reason='looks at the stand-ins\' topics')
 
@@ -54,6 +62,9 @@ TRON_GEOMETRY = dict(TRON_BODY, antenna_x=0.0, antenna_y=0.0, track=0.395, wheel
                      ticks_per_m=1000.0, imu_roll=0.0, imu_pitch=0.0, version=0, stored=[])
 # the Tron's case of 30.10. (mowbite-os 8a66cdb): the first section of a plan started where no way got to it
 TRON_CASE = os.path.join(HERE, 'transit-case-8a66cdb.json')
+# OsNode's last check of every plan (the stand-in's plans go without it, see planned), ~/plan_transit as written
+CHECKED = OsNode.checked
+TRANSIT_SRV = os.path.join(HERE, '..', '..', 'mowbite_planner_os_interfaces', 'srv', 'PlanTransit.srv')
 
 
 def ring(points):
@@ -80,12 +91,14 @@ def pose(x, y, yaw):
 
 @pytest.fixture(autouse=True)
 def planned(request, monkeypatch):
-    """The node plans with the stand-in (mowbite_planner's stubplan.py), with the mark real_planner with
-    plan_coverage itself."""
+    """The node plans with the stand-in (mowbite_planner's stubplan.py), its plans handed out as they are (it doesn't
+    fit the body: no last check, see CHECKED); with the mark real_planner with plan_coverage itself, every plan
+    checked."""
     spy = Spy()
     if 'real_planner' not in request.keywords:
         monkeypatch.setattr(node_module, 'plan_coverage', spy)
         monkeypatch.setattr(core_module, 'plan_coverage', spy)
+        monkeypatch.setattr(OsNode, 'checked', lambda self, plan: plan)
     return spy
 
 
@@ -142,7 +155,8 @@ def send_map(node, data, status=MapStatus.DATUM_MATCH):
 
 
 def rpc(node, method, params=None, rid='r1', wait=60.0):
-    """(result, None) or (None, (code, message)) of a request on bridge/rpc/request."""
+    """(result, None) or (None, (code, message)) of a request on bridge/rpc/request; (code, message, data) where the
+    error has data."""
     give(node, 'bridge/rpc/request', RpcRequest(method=method, params=json.dumps(params) if params is not None else '',
                                                 id=rid))
     return answer(node, rid, wait)
@@ -157,8 +171,7 @@ def answer(node, rid, wait=60.0):
                 return json.loads(msg.result), None
         for msg in node.publishers['bridge/rpc/error'].published:
             if msg.id == rid:
-                assert msg.data == ''
-                return None, (msg.code, msg.message)
+                return None, (msg.code, msg.message) + ((json.loads(msg.data),) if msg.data else ())
         time.sleep(0.01)
     raise AssertionError(f'no answer to {rid}')
 
@@ -223,10 +236,10 @@ def test_map_and_its_status(make, monkeypatch):
     monkeypatch.setattr(node.core, 'plan_ahead_later', lambda: ahead.append(1))
     give(node, 'map/json', String(data=json.dumps(the_map())))
     assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] == (
-        -32602, 'no map status from mowbite_map yet (map/status)')
+        -32602, 'no map status from mowbite_map yet (map/status)', {'code': 'NOT_READY'})
     give(node, 'map/status', MapStatus(datum_state=MapStatus.DATUM_MISMATCH, reason='another datum'))
     assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')[1] == (
-        -32602, 'the map can\'t be planned now (map/status MISMATCH): another datum')
+        -32602, 'the map can\'t be planned now (map/status MISMATCH): another datum', {'code': 'NOT_READY'})
     res = plan_area(node)
     assert not res.success and 'map/status MISMATCH' in res.message
     ahead.clear()
@@ -358,7 +371,7 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
     node = make(calib_root=str(root))
     assert list(node.publishers['bridge/rpc/methods'].published[0].methods) == sorted(
         CORE_METHODS + ['planner.calib.evaluate'])
-    with open(os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner', 'contract.json')) as f:
+    with open(os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner', 'mowbite_planner', 'contract.json')) as f:
         assert json.load(f)['methods']['mowbite-os'] == sorted(CORE_METHODS + ['planner.calib.evaluate'])
     mower = calibsim.program(0)
     path = mower.recording(str(root / 'recordings' / 'calib-20261104T010203Z.jsonl.gz'))
@@ -417,6 +430,89 @@ def test_plan_transit_service(make):
     assert not bad.success and bad.message.startswith('bad override')
     out = transit(node, (30.0, 1.0, 0.0), (6.5, 4.0, 0.0))
     assert not out.success and 'the start (30.00, 1.00) lies' in out.message
+
+
+@fake_only
+def test_plan_transit_code(make, monkeypatch):
+    """~/plan_transit's code: empty with a way, else why not as a word (transit_route.CODES, the ones the .srv tells
+    of), each from where it arises; NO_WAY for a no without a word, INTERNAL for any other error."""
+    with open(TRANSIT_SRV) as f:
+        assert re.findall(r'^#   ([A-Z_]+) ', f.read(), re.M) == list(transit_route.CODES)
+    assert transit(make(None), (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).code == 'NOT_READY'
+    node = make()
+    res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+    assert res.success and res.code == ''
+    far = [(20.0, 0.0), (28.0, 0.0), (28.0, 5.0), (20.0, 5.0)]
+    for code, start, goal, fields in (
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'overrides': [override('nothing', 1.0)]}),
+            # (one that doesn't go with the settings)
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'overrides': [override('angle_min_deg', 10.0)]}),
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'goal_straight_length': -1.0}),
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'drivable_areas': []}),
+            ('BAD_REQUEST', (math.nan, 1.0, 0.0), (6.5, 4.0, 0.0), {}),
+            ('START_OUTSIDE', (30.0, 1.0, 0.0), (6.5, 4.0, 0.0), {}),
+            ('START_OUTSIDE', (7.9, 2.5, 0.0), (2.0, 2.0, 0.0), {'max_outside': 0.0}),  # (the nose over the edge)
+            ('GOAL_OUTSIDE', (1.0, 1.0, 0.0), (5.5, 2.5, 0.0), {}),  # (in the bed)
+            ('NO_WAY', (1.0, 1.0, 0.0), (24.0, 2.5, 0.0), {'drivable_areas': [polygon(GARDEN), polygon(far)]}),
+            ('NO_WAY', (1.0, 1.0, 0.0), (7.9, 2.5, 0.5 * math.pi), {'max_outside': 0.0})):
+        res = transit(node, start, goal, **fields)
+        assert not res.success and res.code == code and res.message and not res.path.poses, (code, res.message)
+    for error, code in ((RuntimeError('broken'), 'INTERNAL'), (PlanningError('no'), 'NO_WAY'),
+                        (PlanningError('no', word='BODY_OUT'), 'NO_WAY')):
+        def failing(*args, error=error, **kw):
+            raise error
+        monkeypatch.setattr(os_module, 'plan_transit', failing)
+        res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0))
+        assert not res.success and res.code == code and res.code in transit_route.CODES
+
+
+@fake_only
+def test_transit_search_limit(make, monkeypatch):
+    """transit_search_limit (6.0 s, 0: none): ~/plan_transit's search ends once that long has passed since it took the
+    request, its code SEARCH_LIMIT; the next request answered as if it hadn't (what it kept of the map still good).
+    The ways of a ~/plan_coverage's arrives have no limit."""
+    assert make().search_limit() == os_module.SEARCH_LIMIT == 6.0
+    assert make(transit_search_limit=0.0).search_limit() == 0.0
+    for bad in (-1.0, math.inf, math.nan):
+        with pytest.raises(ValueError, match='transit_search_limit must be a number of s >= 0'):
+            make(transit_search_limit=bad)
+    ask = ((1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
+
+    def way(res):
+        return [(ps.pose.position.x, ps.pose.position.y, ps.pose.orientation.z, ps.pose.orientation.w)
+                for ps in res.path.poses]
+    want = transit(make(), *ask)
+    assert want.success
+    for role in ({}, {'role': 'transit', 'node_name': 'mowbite_planner_transit'}):
+        node = make(transit_search_limit=1e-9, **role)
+        res = transit(node, *ask)
+        assert not res.success and res.code == 'SEARCH_LIMIT' and not res.path.poses
+        assert res.message == 'planning the transit failed: no way found in 1e-09 s (transit_search_limit)'
+        # (not where there's nothing to look for)
+        assert transit(node, (30.0, 1.0, 0.0), ask[1]).code == 'START_OUTSIDE'
+        node._search_limit = 0.0
+        got = transit(node, *ask)
+        assert got.success and way(got) == way(want)
+    # (its clock from when it took the request, looked at in the search: a search that takes long ends)
+    node = make(transit_search_limit=0.3)
+    real = os_module.plan_transit
+    checks = []
+
+    def slow(*args, **kw):
+        for _ in range(200):
+            time.sleep(0.01)
+            progress.check()
+            checks.append(1)
+        return real(*args, **kw)
+    monkeypatch.setattr(os_module, 'plan_transit', slow)
+    t0 = time.monotonic()
+    res = transit(node, *ask)
+    assert res.code == 'SEARCH_LIMIT' and time.monotonic() - t0 >= 0.3 and len(checks) < 100
+    assert 'no way found in 0.3 s' in res.message
+    # (arrives: no limit)
+    monkeypatch.setattr(os_module, 'plan_transit', real)
+    node = make(transit_search_limit=1e-9)
+    assert node.core.arrives(GARDEN, [BED], tron_cfg(), [], [])(Pose2D(2.0, 2.5, 0.0))
 
 
 @fake_only
@@ -640,7 +736,7 @@ def test_tron_case_starts_where_a_way_gets_to(make, body):
 
 @fake_only
 @pytest.mark.real_planner
-def test_the_first_section_from_the_start(make):
+def test_the_first_section_from_the_start(make, monkeypatch):
     """With the request's start (use_start_pose, where mowbite_logic undocks to) the first section starts where
     mowbite_logic's way from there gets to it (max_outside 0.3), the others from where the section before ends."""
     node = make(**TRON)
@@ -656,6 +752,95 @@ def test_the_first_section_from_the_start(make):
     for frm, i in zip([start] + [poses[i - 1] for i in res.section_start[1:]], res.section_start):
         got = transit(node, frm, poses[i], max_outside=0.3)
         assert got.success, (i, got.message)
+    # (no way from the start to any section: refused, the code START_UNREACHABLE, kept with the no)
+
+    def nowhere(start, goal, *args, **kw):
+        raise PlanningError(f'no way arrives at the goal ({goal[0]:.2f}, {goal[1]:.2f})')
+    monkeypatch.setattr(os_module, 'plan_transit', nowhere)
+    request.start_pose = pose(6.0, 0.6, math.pi)
+    for again in range(2):
+        res = node._on_plan_coverage(request, PlanCoverage.Response())
+        assert not res.success and res.code == 'START_UNREACHABLE' and not res.path.poses
+        assert res.message.startswith('area a: start unreachable: no way from the start (6.00, 0.60) gets to any')
+
+
+@fake_only
+def test_plan_coverage_code(make, planned):
+    """~/plan_coverage's code on MowBite OS: NOT_READY without the body or while the map can't be planned (with the
+    map and without), the others as mowbite_planner's node gives them."""
+    bare = make(None)
+    send_map(bare, the_map())
+    res = plan_area(bare)
+    assert not res.success and res.code == 'NOT_READY' and 'no dimensions of the mower yet' in res.message
+    bare.core.map = None
+    res = plan_area(bare)
+    assert not res.success and res.code == 'NOT_READY' and 'no dimensions of the mower yet' in res.message
+    node = make()
+    send_map(node, the_map(), MapStatus.DATUM_MISMATCH)
+    res = plan_area(node)
+    assert not res.success and res.code == 'NOT_READY' and 'map/status MISMATCH' in res.message
+    give(node, 'map/status', MapStatus(datum_state=MapStatus.DATUM_MATCH))
+    res = plan_area(node)
+    assert res.success and res.code == ''
+    request = PlanCoverage.Request(boundary=polygon(GARDEN), overrides=[override('robot_width', 0.3)])
+    assert node._on_plan_coverage(request, PlanCoverage.Response()).code == 'BAD_REQUEST'
+    for again in range(2):
+        res = plan_area(node, [(0.0, 0.0), (1.0, 1.0)])
+        assert not res.success and res.code == 'NO_PLAN', res.message
+
+
+@fake_only
+def test_every_plan_checked_once_more(make, planned, monkeypatch, tmp_path):
+    """Every plan checked once more before it's kept or given out (the body's check of the tests, report.rules'):
+    one the body sticks out on (the stand-in's, it doesn't fit the body) is refused with the code BODY_OUT, telling
+    where; nothing published, not kept as a plan, the no kept (planner.plan the same, the word as its error's data,
+    nothing planned again); the planner's own plans pass as they are. mowbite_planner's own nodes don't check."""
+    monkeypatch.setattr(OsNode, 'checked', CHECKED)
+    node = make()
+    send_map(node, the_map())
+    res = plan_area(node)
+    args, kw = planned.calls[-1]
+    plan = stub_plan_coverage(*args, **{k: v for k, v in kw.items() if k != 'progress'})
+    out = rules(plan)['body_out']
+    assert out and not res.success and res.code == 'BODY_OUT' and not res.path.poses and res.fingerprint == ''
+    places = []  # (a pose of every place: BODY_OUT_APART m apart)
+    for o in out:
+        if all(math.hypot(o['x'] - p['x'], o['y'] - p['y']) >= os_module.BODY_OUT_APART for p in places):
+            places.append(o)
+    assert len(out) > len(places) > os_module.BODY_OUT_SHOWN and {o['kind'] for o in out} <= set(
+        os_module.BODY_OUT_KINDS)
+    no = f'the plan is not given out, the body would stick out past the edges at {len(out)} poses: at ' + ', '.join(
+        f'({o["x"]:.2f}, {o["y"]:.2f}) {os_module.BODY_OUT_KINDS[o["kind"]]}'
+        for o in places[:os_module.BODY_OUT_SHOWN]) + f' and {len(places) - os_module.BODY_OUT_SHOWN} more places'
+    assert res.message == 'area a: ' + no
+    assert ('error', 'MowBite Planner: ' + no) in node.get_logger().lines
+    assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] == (-32602, no, {'code': 'BODY_OUT'})
+    assert plan_area(node).code == 'BODY_OUT' and len(planned.calls) == 1
+    assert not node.core.plans and len(node.core.refused) == 1
+    assert not glob.glob(str(tmp_path / 'data' / 'planner' / 'plans' / '*.pkl'))
+    assert not node.publishers['~/coverage_path'].published
+    shown = [json.loads(m.payload) for m in node.publishers['bridge/publish'].published
+             if m.topic == 'mowbite/planner/progress']
+    assert shown[-1]['error'] == no and not shown[-1]['running']
+    # (without the map, and what a mow left)
+    node.core.map = None
+    res = plan_area(node)
+    assert not res.success and res.code == 'BODY_OUT' and res.message.startswith('the plan is not given out, ')
+    assert not node.publishers['~/coverage_path'].published
+    with pytest.raises(PlanningError, match='^the plan is not given out') as e:
+        node.core.left_plan(args[0], args[1], args[2], None, None, [], [], mowed=inset(plan.free_space, 0.5))
+    assert e.value.word == 'BODY_OUT'
+    # (the planner's own plan: as it is; made to stick out: refused; no check without MowBite OS)
+    cfg = tron_cfg()
+    good = real_plan_coverage(GARDEN, [BED], cfg, arrives=node.core.arrives(GARDEN, [BED], cfg, [], []))
+    assert rules(good)['body_out'] == [] and node.checked(good) is good
+    bad = dataclasses.replace(good, body_space=inset(good.body_space, 0.2))
+    with pytest.raises(PlanningError, match=r'would stick out past the edges at %d poses: at \(' % len(
+            rules(bad)['body_out'])) as e:
+        node.checked(bad)
+    assert e.value.word == 'BODY_OUT' and len(rules(bad)['body_out']) > 0
+    assert node_module.MowbitePlannerNode.checked(node, bad) is bad
+    assert core_module.PlannerCore.checked(node.core, bad) is bad
 
 
 @fake_only
@@ -671,11 +856,11 @@ def test_body_from_robot_geometry(make, planned, tmp_path):
         'robot_rear, blade_ahead' in [m for _, m in node.get_logger().lines]
     send_map(node, the_map())
     none = 'no dimensions of the mower yet (robot.geometry (/mowbite_geometry) on bridge/params)'
-    assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] == (-32602, none)
+    assert rpc(node, 'planner.plan', {'area_id': 'a'})[1] == (-32602, none, {'code': 'NOT_READY'})
     assert plan_area(node).message == 'area a: ' + none
     assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, 0.0)).message == 'planning the transit failed: ' + none
     plain = PlanCoverage.Request(boundary=polygon(GARDEN))
-    assert node.plan(GARDEN, [], node.values(), {})[2] == none
+    assert node.plan(GARDEN, [], node.values(), {})[2:] == (none, 'NOT_READY')
     assert not planned.calls and node.core.current.base.robot_width is None and plain
     got, _ = rpc(node, 'planner.settings', None, 'r2')
     for name in os_module.GEOMETRY_KEYS:
@@ -774,14 +959,31 @@ def test_margins_as_set(make, planned, tmp_path):
 
 
 @fake_only
-def test_plan_transit_in_a_group_of_its_own(make):
+def test_plan_transit_in_a_group_of_its_own(make, monkeypatch):
     """~/plan_transit in a callback group of its own (answered while ~/plan_coverage waits for its plan, see
-    test_plan_transit_while_a_plan_is_held), the other callbacks in the node's own; the executor runs both."""
+    test_plan_transit_while_a_plan_is_held), the other callbacks in the node's own; the executor runs both. Planned in
+    the node's transit thread whichever thread takes the request: what it keeps of the map is made once."""
     node = make()
     group = node.service_groups['~/plan_transit']
     assert isinstance(group, os_module.MutuallyExclusiveCallbackGroup)
     assert all(g is None for name, g in node.service_groups.items() if name != '~/plan_transit')
     assert os_module.THREADS >= 2
+    real, where, rooms = os_module.plan_transit, [], []
+
+    def spy(*args, **kw):
+        where.append(threading.current_thread())
+        try:
+            return real(*args, **kw)
+        finally:
+            rooms.append(transit_route._ROOM.last[1])
+    monkeypatch.setattr(os_module, 'plan_transit', spy)
+    answers = [transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))]
+    other = threading.Thread(target=lambda: answers.append(transit(node, (6.5, 4.0, 0.0), (1.0, 1.0, math.pi))))
+    other.start()
+    other.join(60.0)
+    assert [a.success for a in answers] == [True, True]
+    assert where == [node._transit.thread] * 2 and where[0].name == 'planner transit' and where[0].daemon
+    assert rooms[0] is rooms[1] and node._transit.thread is not node.core.worker.thread
 
 
 @pytest.mark.skipif(not REAL_ROS, reason='a real executor')

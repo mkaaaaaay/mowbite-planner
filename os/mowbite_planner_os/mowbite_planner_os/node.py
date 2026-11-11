@@ -4,8 +4,9 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
   - rpc and use_map on by default. The planner.* methods over mowbite_bridge: registered on bridge/rpc/methods
     (RpcMethods, node_id mowbite_planner, reliable and transient local, depth 50; an empty list when the node ends),
     asked on bridge/rpc/request (RpcRequest, params JSON text), answered on bridge/rpc/response (RpcResponse, result
-    JSON text) or bridge/rpc/error (RpcError); reliable, volatile, depth 100. A method of no node here is another
-    node's: not answered (the bridge answers it).
+    JSON text) or bridge/rpc/error (RpcError; its data {"code": the word} where the planner's no has one, as
+    ~/plan_coverage's code says it: BODY_OUT, NOT_READY, START_UNREACHABLE); reliable, volatile, depth 100. A method of
+    no node here is another node's: not answered (the bridge answers it).
   - the map of mowbite_map: map/json (OpenMower's JSON, latched). planner.plan, ~/plan_coverage with the map and
     planning ahead only while map/status says MATCH (the map fits the GNSS datum), else an error with its reason; on
     MATCH again the areas are planned ahead. planner.area.set writes the map with map/replace, expected_sha256 the
@@ -40,8 +41,20 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     there the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE); none got to from there: refused with
     START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
     ~/plan_transit in a callback group of its own on a MultiThreadedExecutor: answered while a ~/plan_coverage waits for
-    its plan (the other callbacks one after another as before). It plans in the executor's thread, on geometries of
-    its own (space._body_space: the kept ones as WKB, each thread its own; mowbite_planner's GEOS rule).
+    its plan (the other callbacks one after another as before). It plans in a thread of its own, the node's one for
+    all its requests whichever of the executor's takes them (what a transit keeps of the map for the next one,
+    transit_route._ROOM, is its thread's: made once for a map), on geometries of its own (space._body_space: the kept
+    ones as WKB, each thread its own; mowbite_planner's GEOS rule).
+    Without a way its code says why as a word (transit_route.CODES, see the .srv; the message is to show): NOT_READY
+    without the body, BAD_REQUEST, START_OUTSIDE, GOAL_OUTSIDE, NO_WAY, INTERNAL, and SEARCH_LIMIT once
+    transit_search_limit s (6.0; 0: none) have passed since it took the request: looked at in the search itself, at
+    every check of the body, never from outside. The ways arrives plans for a ~/plan_coverage have no such limit (the
+    same plan on any computer).
+  - every plan checked once more before it's kept or given out (checked: ~/plan_coverage with and without the map,
+    planner.plan, what a mow left): the body's check of the tests (report.rules: sweep.body_out with the plan's
+    Footprint, the blade aside). Where the body sticks out the plan is refused, ~/plan_coverage's code BODY_OUT, the
+    message telling where (a pose of every place, what it's part of); never given out, not kept as a plan (the no
+    is, as any other).
   - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
     at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
     whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read (one without its end
@@ -61,6 +74,7 @@ import json
 import math
 import os
 import threading
+import time
 from typing import List, Optional
 
 from rcl_interfaces.msg import ParameterDescriptor
@@ -75,15 +89,17 @@ from mowbite_msgs.msg import MapStatus, MqttPublish, RpcError, RpcMethods, RpcRe
 from mowbite_msgs.srv import ReplaceMap
 from mowbite_planner import core
 from mowbite_planner import node as base
-from mowbite_planner.config import INTERNAL, RETIRED, PlannerConfig, PlanningError
+from mowbite_planner.config import INTERNAL, RETIRED, CoveragePlan, PlannerConfig, PlanningError
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import polygons
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
+from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
 from mowbite_planner.starts import _Spent
+from mowbite_planner.sweep import body_out, plan_footprint
 from mowbite_planner_os_interfaces.srv import PlanTransit
 
-from .transit_route import MAX_OUTSIDE, centre_space, plan_transit
+from .transit_route import CODES, MAX_OUTSIDE, centre_space, plan_transit
 
 # the node's name at mowbite_bridge, s the empty list of methods may take to be delivered as the node ends,
 # mowbite_logic's events
@@ -121,6 +137,14 @@ THREADS = 2
 ROLES = ('planner', 'transit')
 TRANSIT = 'transit'
 SETTINGS_FILE = os.path.join('planner', 'mowbite_planner_settings.json')
+# s ~/plan_transit looks for a way at most by default (transit_search_limit; mowbite_logic waits 10 s for its answer)
+SEARCH_LIMIT = 6.0
+# a plan refused for the body sticking out (checked) tells of this many places at most, poses this many m apart, each
+# with what the pose is part of (sweep.body_out's kind)
+BODY_OUT_SHOWN = 5
+BODY_OUT_APART = 1.0
+BODY_OUT_KINDS = {'spin': 'turning on the spot', 'turn': 'on a turn', 'lane_end': 'at a lane\'s end',
+                  'loop': 'on a loop', 'transit': 'on a drive'}
 
 
 class OsNode(base.MowbitePlannerNode):
@@ -149,9 +173,14 @@ class OsNode(base.MowbitePlannerNode):
         self.geometry = None
         self.geometry_why = ''
         self._role = None
+        self._search_limit = None
         super().__init__(node_name, **kwargs)
         self.calib_root()  # (declared with the methods where the core is)
         self.backs_up()
+        self.search_limit()
+        # ~/plan_transit's thread (see the top)
+        self._transit = core.Worker()
+        self._transit.thread.name = 'planner transit'
         self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit,
                             callback_group=MutuallyExclusiveCallbackGroup())
         if self.role() == TRANSIT:
@@ -205,6 +234,16 @@ class OsNode(base.MowbitePlannerNode):
                             'back_out planned; false: not (drive slope and reverse stay forwards either way)')).value)
         return self._backs_up
 
+    def search_limit(self) -> float:
+        if self._search_limit is None:
+            limit = self.declare_parameter('transit_search_limit', SEARCH_LIMIT, ParameterDescriptor(
+                description='s ~/plan_transit looks for a way at most from when it takes a request, then its code is '
+                            'SEARCH_LIMIT; 0: as long as it takes')).value
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not 0.0 <= limit < math.inf:
+                raise ValueError(f'transit_search_limit must be a number of s >= 0, got {limit!r}')
+            self._search_limit = float(limit)
+        return self._search_limit
+
     # the body: robot.geometry's (given)
 
     def values(self, overrides=()) -> dict:
@@ -225,7 +264,7 @@ class OsNode(base.MowbitePlannerNode):
         why = self.no_body()
         if why:
             self.get_logger().warning(f'planning failed: {why}')
-            return None, None, why
+            return None, None, why, 'NOT_READY'
         return self.core.worker.run(core.MOWER, lambda: base.MowbitePlannerNode.plan(
             self, boundary, obstacles, values, overrides, *args, **kwargs), job='mower')
 
@@ -244,11 +283,12 @@ class OsNode(base.MowbitePlannerNode):
                                  lambda msg: self.on_request(msg.method, msg.params, msg.id), 100)
         self._methods_pub.publish(RpcMethods(node_id=NODE_ID, methods=sorted(self.core.methods)))
 
-    def answer(self, rid: str, result: Optional[str], error):
+    def answer(self, rid: str, result: Optional[str], error, data: Optional[dict] = None):
         if error is None:
             self._response_pub.publish(RpcResponse(result=result, id=rid))
         else:
-            self._error_pub.publish(RpcError(code=error[0], message=error[1], id=rid, data=''))
+            self._error_pub.publish(RpcError(code=error[0], message=error[1], id=rid,
+                                             data=json.dumps(data) if data else ''))
 
     def rpc_end(self):
         # (mowbite_bridge forgets the methods; delivered before the node goes, END_ACK s at most)
@@ -386,6 +426,25 @@ class OsNode(base.MowbitePlannerNode):
         with self.maps:
             self.maps.wait_for(lambda: self.map_count != count, MAP_SETTLE)
 
+    def checked(self, plan: CoveragePlan) -> CoveragePlan:
+        """plan where the body's check of the tests finds nothing (see the top), else PlanningError with the word
+        BODY_OUT, telling where."""
+        footprint = plan_footprint(plan, blade=False)
+        out = body_out(plan.poses, plan.segments, plan.section_starts, footprint) if footprint is not None else []
+        if not out:
+            return plan
+        places: List[dict] = []
+        for o in out:
+            if all(math.hypot(o['x'] - p['x'], o['y'] - p['y']) >= BODY_OUT_APART for p in places):
+                places.append(o)
+        where = ', '.join(f'({o["x"]:.2f}, {o["y"]:.2f}) {BODY_OUT_KINDS.get(o["kind"], o["kind"])}'
+                          for o in places[:BODY_OUT_SHOWN])
+        more = f' and {len(places) - BODY_OUT_SHOWN} more places' if len(places) > BODY_OUT_SHOWN else ''
+        message = f'the plan is not given out, the body would stick out past the edges at {len(out)} poses: at ' \
+            f'{where}{more}'
+        self.core.logerr('MowBite Planner: %s', message)
+        raise PlanningError(message, word='BODY_OUT')
+
     def drive_ignored(self) -> str:
         return 'MowBite OS: drives forwards only for now (M8)'
 
@@ -466,21 +525,29 @@ class OsNode(base.MowbitePlannerNode):
         return gets_to
 
     def _on_plan_transit(self, request, response):
+        return self._transit.run(core.MOWER, self._plan_transit, request, response, time.monotonic())
+
+    def _plan_transit(self, request, response, began: float):
+        """~/plan_transit's answer, began: when the request was taken (transit_search_limit counts from there)."""
         if isinstance(self.core, TransitCore):
             self.core.follow()
+
+        def no(code: str, why: str, log=self.get_logger().warning):
+            response.success, response.code, response.message = False, code, why
+            log(why)
+            return response
+
         try:
             values = self.values(request.overrides)
         except ValueError as e:
-            response.success = False
-            response.message = f'bad override: {e}'
-            self.get_logger().warning(response.message)
-            return response
+            return no('BAD_REQUEST', f'bad override: {e}')
         why = self.no_body()
         if why:
-            response.success = False
-            response.message = f'planning the transit failed: {why}'
-            self.get_logger().warning(response.message)
-            return response
+            return no('NOT_READY', f'planning the transit failed: {why}')
+        try:
+            cfg = self.transit_config(values)
+        except ValueError as e:  # (PlanningError too: the overrides don't go with the settings)
+            return no('BAD_REQUEST', f'bad override: {e}')
         q = request.start.orientation
         start = (float(request.start.position.x), float(request.start.position.y),
                  quaternion_to_yaw(q.x, q.y, q.z, q.w))
@@ -493,19 +560,21 @@ class OsNode(base.MowbitePlannerNode):
         for w in warnings:
             self.get_logger().warning(w)
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
+        limit = self.search_limit()
         try:
-            transit = plan_transit(start, goal, drivable, obstacles, self.transit_config(values),
-                                   float(request.goal_straight_length), max_outside)
+            # (the limit looked at where the search checks the body, progress.check: it ends there with Stopped)
+            with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
+                transit = plan_transit(start, goal, drivable, obstacles, cfg, float(request.goal_straight_length),
+                                       max_outside)
+        except Stopped:
+            return no('SEARCH_LIMIT', base.with_warnings(
+                f'planning the transit failed: no way found in {limit:g} s (transit_search_limit)', warnings))
         except PlanningError as e:
-            response.success = False
-            response.message = base.with_warnings(f'planning the transit failed: {e}', warnings)
-            self.get_logger().warning(response.message)
-            return response
+            return no(base.code_of(e, CODES, 'NO_WAY'),
+                      base.with_warnings(f'planning the transit failed: {e}', warnings))
         except Exception as e:  # noqa: BLE001 - a broken geometry must not take the node down
-            response.success = False
-            response.message = base.with_warnings(f'planning the transit failed: {type(e).__name__}: {e}', warnings)
-            self.get_logger().error(response.message)
-            return response
+            return no(base.code_of(e), base.with_warnings(
+                f'planning the transit failed: {type(e).__name__}: {e}', warnings), self.get_logger().error)
         response.success = True
         response.message = base.with_warnings(f'transit {len(transit.poses)} poses, {transit.length:.2f} m, '
                                               f'{len(transit.spins)} turns on the spot',

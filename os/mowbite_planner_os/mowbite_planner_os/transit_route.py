@@ -45,6 +45,10 @@ VIAS = 6
 # the last request's areas, obstacles and settings with their space, body and planners: this thread's next one with the
 # same takes them (a plan's sections, the ways home: the same map again and again)
 _ROOM = threading.local()
+# what ~/plan_transit's code says where it gives no way: a PlanningError's word (plan_transit's: BAD_REQUEST,
+# START_OUTSIDE, GOAL_OUTSIDE), NO_WAY for one without, INTERNAL for any other error; NOT_READY and SEARCH_LIMIT are
+# the node's
+CODES = ('NOT_READY', 'NO_WAY', 'START_OUTSIDE', 'GOAL_OUTSIDE', 'BAD_REQUEST', 'SEARCH_LIMIT', 'INTERNAL')
 
 
 # (m straight on, ((radius, turn), ...) arcs): a way onto the goal or off the start, see plan_transit's drive
@@ -70,7 +74,7 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
     obstacles (and None). Raises PlanningError where that's nowhere."""
     areas = union(clean_polygon(d) for d in drivable)
     if areas.is_empty:
-        raise PlanningError('no drivable areas')
+        raise PlanningError('no drivable areas', word='BAD_REQUEST')
     footprint: Optional[Footprint] = None
     if cfg.body:
         body_space, footprint = _body_space(list(drivable), list(obstacles), [cfg.obstacle_margin] * len(obstacles),
@@ -101,26 +105,12 @@ def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Seq
     return last[1], last[2], last[3]
 
 
-def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
-                 obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
-                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
-    """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
-    areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
-    centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
-    (robot_width, robot_front and robot_rear, or robot_outline) it keeps edge_margin off the areas' real edges,
-    obstacle_margin off the obstacles and spin_margin more turning on the spot (see space._body_space), without it the
-    centre keeps half the mower_width off the obstacles. Where the start or the goal lies outside (the centre, or the
-    body sticking out), it drives straight from there to where it fits, max_outside m at most: straight ahead from the
-    start (where that doesn't get there and the body fits turning at the start, towards the closest point of the
-    areas), on the goal's heading to the goal (without one, from the closest point). The same request gives the same
-    poses, after the same number of ways tried (see search below: no time in it). An empty way where it's at the goal
-    already (closer than waypoint_spacing, facing its way; with turn_on_spot whatever way it faces, turning there is
-    up to whoever drives it). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets
-    to facing its heading, where the body sticks out turning into it there too, says so), or the input is out of
-    range."""
-    cfg = config or PlannerConfig()
+def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
+           obstacles: Sequence[Sequence[Sequence[float]]], cfg: PlannerConfig, goal_straight: float,
+           max_outside: float) -> Optional[float]:
+    """The goal's heading (None: any) of a request that can be planned, else PlanningError (plan_transit's: the
+    request's own mistake)."""
     cfg.validate()
-    cfg = _turning(cfg)  # (as in plan_coverage)
     if len(start) < 3 or len(goal) < 2:
         raise PlanningError('the start needs x, y and yaw, the goal x and y')
     _check_coordinates('the start or goal', [start, goal])
@@ -137,9 +127,36 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         _check_coordinates('a drivable area', d)
     for o in obstacles:
         _check_coordinates('an obstacle', o)
-    step = cfg.waypoint_spacing
-    if not step > 0:
+    if not cfg.waypoint_spacing > 0:
         raise PlanningError('a transit needs waypoint_spacing > 0')
+    return heading
+
+
+def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
+                 obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
+                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
+    """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
+    areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
+    centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
+    (robot_width, robot_front and robot_rear, or robot_outline) it keeps edge_margin off the areas' real edges,
+    obstacle_margin off the obstacles and spin_margin more turning on the spot (see space._body_space), without it the
+    centre keeps half the mower_width off the obstacles. Where the start or the goal lies outside (the centre, or the
+    body sticking out), it drives straight from there to where it fits, max_outside m at most: straight ahead from the
+    start (where that doesn't get there and the body fits turning at the start, towards the closest point of the
+    areas), on the goal's heading to the goal (without one, from the closest point). The same request gives the same
+    poses, after the same number of ways tried (see search below: no time in it). An empty way where it's at the goal
+    already (closer than waypoint_spacing, facing its way; with turn_on_spot whatever way it faces, turning there is
+    up to whoever drives it). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets
+    to facing its heading, where the body sticks out turning into it there too, says so), or the input is out of
+    range; its word what ~/plan_transit's code says (CODES)."""
+    cfg = config or PlannerConfig()
+    try:
+        heading = _asked(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
+    except PlanningError as e:
+        e.word = 'BAD_REQUEST'
+        raise
+    cfg = _turning(cfg)  # (as in plan_coverage)
+    step = cfg.waypoint_spacing
     space, footprint, planners = _room(drivable, obstacles, cfg)
     warnings: List[str] = [] if footprint is not None else [cfg.no_body or '']
 
@@ -178,7 +195,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         if way_in is None:
             where = f'{far:.2f} m outside the drivable areas' if far > 0 else \
                 'where the body sticks out of the drivable areas, straight ahead too'
-            raise PlanningError(f'the start ({s[0]:.2f}, {s[1]:.2f}) lies {where} (max_outside {max_outside} m)')
+            raise PlanningError(f'the start ({s[0]:.2f}, {s[1]:.2f}) lies {where} (max_outside {max_outside} m)',
+                                word='START_OUTSIDE')
     entry = (s[0] + way_in * math.cos(in_yaw), s[1] + way_in * math.sin(in_yaw))
 
     # the goal: arriving straight on its heading (from the closest point without one), goal_straight at least
@@ -195,7 +213,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         far, _ = closest(g)
         where = f'{far:.2f} m outside the drivable areas' if far > 0 else \
             'where the body sticks out of the drivable areas, on its heading before it too'
-        raise PlanningError(f'the goal ({g[0]:.2f}, {g[1]:.2f}) lies {where} (max_outside {max_outside} m)')
+        raise PlanningError(f'the goal ({g[0]:.2f}, {g[1]:.2f}) lies {where} (max_outside {max_outside} m)',
+                            word='GOAL_OUTSIDE')
     exit_ = (g[0] - way_out * math.cos(out_yaw), g[1] - way_out * math.sin(out_yaw)) if way_out > 0 else g
     straight = max(goal_straight, way_out)
     before = (g[0] - straight * math.cos(out_yaw), g[1] - straight * math.sin(out_yaw)) if straight > 0 else g

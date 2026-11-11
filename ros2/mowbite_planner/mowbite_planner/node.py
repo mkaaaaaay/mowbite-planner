@@ -4,7 +4,8 @@ Services
   ~/plan_coverage (mowbite_planner_interfaces/srv/PlanCoverage)
       boundary + obstacles as geometry_msgs/Polygon in, the route as nav_msgs/Path out (plus where its
       perimeter loops, lanes, turns and transits are). Any of the node's parameters can be overridden per
-      request (overrides).
+      request (overrides). Without a plan its code says why as a word (config.COVERAGE_CODES, see the .srv), the
+      message is to show.
   ~/plan_from_parameters (std_srvs/srv/Trigger)
       plans the area in the parameters boundary_polygon and obstacles, the result goes out on the topic.
 
@@ -20,8 +21,9 @@ With the parameters rpc or use_map the node is also mowbite_planner.core's Plann
 logic: the planner.* settings and RPC methods, the plans kept and planned ahead, what follows a mow):
   - rpc: the planner.* methods (planner.settings, .settings.set, .angle.reset, .log, .area.set, .plan, .leftovers,
     .drive; what each answers: see the ROS 1 node's top) as JSON {method, params, id} on ~/rpc/request, the answer
-    {id, result} or {id, error: {code, message}} on ~/rpc/response (JSON-RPC's codes). planner.area.set, .plan,
-    .leftovers and .drive on a thread of their own each, the others one after another on one.
+    {id, result} or {id, error: {code, message}} on ~/rpc/response (JSON-RPC's codes; the planner's no with a word
+    of its own, as ~/plan_coverage's code says it, has it as the error's data: {code: BODY_OUT}). planner.area.set,
+    .plan, .leftovers and .drive on a thread of their own each, the others one after another on one.
   - the map: ~/map (std_msgs/String, transient local), OpenMower's JSON. Every value a plan goes by has one place: for
     all areas the planner.* settings (the node's parameters their defaults), the lane spacing, the loops and the angle
     too (no mower_logic here); for an area its properties in the map, OpenMower's where OpenMower has one (angle,
@@ -52,8 +54,8 @@ A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, t
 methods, whether it plans coverage at all (plans_coverage), its transport (rpc_input, answer, rpc_end, map_input,
 events_input, send_out), its parameters (robot_param), writing the map (replace_map), when the map can't be planned
 (map_unusable), the settings it gives itself (given_by, given), how it gets to a plan's sections (arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it
-can't drive (back_out_ignored, by default as drive); main(node_class=it, executor_class=its executor). SIGINT and
-SIGTERM end it with destroy_node first (see main).
+can't drive (back_out_ignored, by default as drive), its own last check of every plan (checked);
+main(node_class=it, executor_class=its executor). SIGINT and SIGTERM end it with destroy_node first (see main).
 """
 
 import glob
@@ -90,9 +92,9 @@ from .core import call as core_call
 from .export import ANSWER_TOO_BIG, fingerprint, too_big
 from .mapfile import AreaJob, _number, area_job, margins_for, match_area
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
-from .config import (ANGLE_STRATEGIES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS, MAX_PASSES,
-                     NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS, TRANSIT, TURN,
-                     TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
+from .config import (ANGLE_STRATEGIES, COVERAGE_CODES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS,
+                     MAX_PASSES, NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS,
+                     TRANSIT, TURN, TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
 from .mqtt_service import _float32
 from .planner import plan_coverage
 
@@ -330,6 +332,14 @@ def with_warnings(message: str, warnings: Sequence[str]) -> str:
     return message + '. Warnings: ' + '; '.join(warnings) if warnings else message
 
 
+def code_of(error: BaseException, codes: Sequence[str] = COVERAGE_CODES, plain: str = 'NO_PLAN') -> str:
+    """What a service's code says of error: a PlanningError's word where it's one of codes, plain for one without,
+    INTERNAL for any other error."""
+    if not isinstance(error, PlanningError):
+        return 'INTERNAL'
+    return error.word if error.word in codes else plain
+
+
 def summary(plan: CoveragePlan) -> str:
     """What a plan is like, in a line."""
     st = plan.stats
@@ -487,6 +497,9 @@ class NodeCore(PlannerCore):
     def back_out_ignored(self):
         return self.node.back_out_ignored()
 
+    def checked(self, plan):
+        return self.node.checked(plan)
+
     def mower_ready(self):
         return self.node.mower_ready()
 
@@ -610,12 +623,13 @@ class MowbitePlannerNode(Node):
         except ValueError:
             got = []  # (an error: by name)
         REQUEST.id = rid
-        result, error = core_call(self.core.methods, method, got, self.core.loginfo, self.core.logerr)
+        data = {}
+        result, error = core_call(self.core.methods, method, got, self.core.loginfo, self.core.logerr, data)
         if error is None and too_big(result):  # (over MQTT: the broker would drop it without a word)
             error = (ANSWER_TOO_BIG, too_big(result))
             self.core.logwarn('MowBite Planner: %s: %s', method, error[1])
         if rid:
-            self.answer(rid, result, error)
+            self.answer(rid, result, error, data)
 
     # what the node does on a robot (a robot's own node: its own)
 
@@ -642,11 +656,12 @@ class MowbitePlannerNode(Node):
             return
         self.on_request(str(method), params, rid)
 
-    def answer(self, rid: str, result: Optional[str], error: Optional[Tuple[int, str]]):
+    def answer(self, rid: str, result: Optional[str], error: Optional[Tuple[int, str]], data: Optional[dict] = None):
         """The answer to the request rid: result (JSON text) or error (code, message): JSON {id, result} or {id, error:
-        {code, message}} on ~/rpc/response."""
+        {code, message}} on ~/rpc/response; data (not empty: {'code': the planner's word for its no, as
+        ~/plan_coverage's code says it}) as the error's data."""
         out = '{"id": %s, "result": %s}' % (json.dumps(rid), result) if error is None else json.dumps(
-            {'id': rid, 'error': {'code': error[0], 'message': error[1]}})
+            {'id': rid, 'error': dict({'code': error[0], 'message': error[1]}, **({'data': data} if data else {}))})
         self._response_pub.publish(String(data=out))
 
     def rpc_end(self):
@@ -688,6 +703,10 @@ class MowbitePlannerNode(Node):
 
     def back_out_ignored(self) -> str:
         return self.drive_ignored()
+
+    def checked(self, plan: CoveragePlan) -> CoveragePlan:
+        """PlannerCore's checked, and of a plan without the map: the robot's own last check (none here)."""
+        return plan
 
     def mower_ready(self) -> bool:
         return False
@@ -758,6 +777,7 @@ class MowbitePlannerNode(Node):
             values = self.values(request.overrides)
         except ValueError as e:
             response.success = False
+            response.code = 'BAD_REQUEST'
             response.message = f'bad override: {e}'
             self.get_logger().warning(response.message)
             return response
@@ -782,10 +802,10 @@ class MowbitePlannerNode(Node):
         end = (float(request.end_point.x), float(request.end_point.y)) if request.use_end_point else None
         boundary, obstacles = xy(request.boundary), [xy(poly) for poly in request.obstacles]
         drivable = [xy(poly) for poly in request.drivable_areas]
-        plan, path, message = self.plan(boundary, obstacles, values, overrides, start, end, drivable,
-                                        float32_warnings([boundary, *obstacles, *drivable]))
+        plan, path, message, code = self.plan(boundary, obstacles, values, overrides, start, end, drivable,
+                                              float32_warnings([boundary, *obstacles, *drivable]))
         response.success = plan is not None
-        response.message = message
+        response.message, response.code = message, code
         if plan is None:
             return response
         return self._coverage_response(response, plan, path)
@@ -829,7 +849,7 @@ class MowbitePlannerNode(Node):
                 where = f'area {job.area_id}'
             reason = core.map_unusable()
             if reason:
-                raise PlanningError(reason)
+                raise PlanningError(reason, word='NOT_READY')
             armed, plan = core.armed_plan(job) if index is not None else (False, None)
             kept = False
             if armed and plan is None:  # (a plan without paths: the job goes on with the next area)
@@ -858,11 +878,13 @@ class MowbitePlannerNode(Node):
                                             job.unmowed, from_start=bool(request.use_start_pose))
         except PlanningError as e:
             response.success = False
+            response.code = code_of(e)
             response.message = f'{where}: {e}'
             self.get_logger().warning(response.message)
             return response
         except Exception as e:  # noqa: BLE001 - a broken area must not take the node down
             response.success = False
+            response.code = code_of(e)
             response.message = f'{where}: planning failed: {type(e).__name__}: {e}'
             self.get_logger().error(response.message)
             return response
@@ -923,28 +945,30 @@ class MowbitePlannerNode(Node):
             response.success = False
             response.message = f'bad boundary_polygon or obstacles parameter: {e}'
             return response
-        plan, _, message = self.plan(boundary, obstacles, self.values(), {}, want_path=False)
+        plan, _, message, _ = self.plan(boundary, obstacles, self.values(), {}, want_path=False)
         response.success = plan is not None
         response.message = message
         return response
 
     def plan(self, boundary: List[XY], obstacles: List[List[XY]], values: dict, overrides: dict, start=None,
              end=None, drivable=(), warnings: Sequence[str] = (),
-             want_path: bool = True) -> Tuple[Optional[CoveragePlan], Optional[Path], str]:
+             want_path: bool = True) -> Tuple[Optional[CoveragePlan], Optional[Path], str, str]:
         """Plans and publishes the path with parameter values and PlannerConfig overrides (see config()):
-        (the plan, it as nav_msgs/Path, what to tell the caller), the first two None if it failed, the path
-        also if it's neither wanted nor published. warnings: about the request, told with the plan's."""
+        (the plan, it as nav_msgs/Path, what to tell the caller, ~/plan_coverage's code: '' with a plan), the first
+        two None if it failed, the path also if it's neither wanted nor published. warnings: about the request, told
+        with the plan's."""
         for w in warnings:
             self.get_logger().warning(w)
         try:
-            plan = plan_coverage(boundary, obstacles, self.config(values, **overrides), start, end, drivable)
+            plan = self.checked(plan_coverage(boundary, obstacles, self.config(values, **overrides), start, end,
+                                              drivable))
         except PlanningError as e:
             self.get_logger().warning(f'planning failed: {e}')
-            return None, None, with_warnings(str(e), warnings)
+            return None, None, with_warnings(str(e), warnings), code_of(e)
         except Exception as e:  # noqa: BLE001 - a broken geometry must not take the node down
             message = f'planning failed: {type(e).__name__}: {e}'
             self.get_logger().error(message)
-            return None, None, with_warnings(message, warnings)
+            return None, None, with_warnings(message, warnings), code_of(e)
 
         path = None
         if want_path or values['publish_path']:
@@ -955,7 +979,7 @@ class MowbitePlannerNode(Node):
             self.get_logger().warning(w)
         if values['publish_path']:
             self._path_pub.publish(path)
-        return plan, path, message
+        return plan, path, message, ''
 
 
 def main(args=None, node_class=MowbitePlannerNode, executor_class=None):

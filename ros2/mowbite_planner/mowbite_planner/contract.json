@@ -7,10 +7,10 @@
     "SUPERSEDED": -32003
   },
   "files_version": 1,
-  "interface": 1,
+  "interface": 2,
   "interfaces": {
-    "mowbite_planner_interfaces/srv/PlanCoverage": "3fec1d0a444f011807794a7bc8d6eb89c9ebb046e51e291c6c535252d098c6a5",
-    "mowbite_planner_os_interfaces/srv/PlanTransit": "a39b716657c3eb75d4a9ff79bc6fac60e3c7fbc5e6186ee580dc5b508712f102"
+    "mowbite_planner_interfaces/srv/PlanCoverage": "0bbf84236b6af324eaab8b8f100ca02d839f1e0666ebe8b05ee154ab97b70b2f",
+    "mowbite_planner_os_interfaces/srv/PlanTransit": "29440d8b6e3e01fde70c41ccb1cdf7fe8776293a66c613421cb5c9ffa86d3ab6"
   },
   "methods": {
     "mowbite-os": [
@@ -49,6 +49,25 @@
     "shapely": "2.0.3"
   },
   "schema": 1,
+  "service_codes": {
+    "mowbite_planner_interfaces/srv/PlanCoverage": [
+      "BAD_REQUEST",
+      "BODY_OUT",
+      "INTERNAL",
+      "NOT_READY",
+      "NO_PLAN",
+      "START_UNREACHABLE"
+    ],
+    "mowbite_planner_os_interfaces/srv/PlanTransit": [
+      "BAD_REQUEST",
+      "GOAL_OUTSIDE",
+      "INTERNAL",
+      "NOT_READY",
+      "NO_WAY",
+      "SEARCH_LIMIT",
+      "START_OUTSIDE"
+    ]
+  },
   "settings": {
     "angle": {
       "nullable": true,

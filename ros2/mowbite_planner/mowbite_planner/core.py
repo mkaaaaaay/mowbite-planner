@@ -8,7 +8,7 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
   transport     it hands the RPC requests to call(self.methods, method, params, ...) (methods: name -> callback, its
                 own added) and sends the answer or the error back; asked_id() is set from REQUEST.id for the worker's
                 waiting jobs. Codes: INVALID_PARAMS (a PlanningError: the caller's mistake; its code where it has one),
-                INTERNAL, SUPERSEDED, METHOD_NOT_FOUND
+                INTERNAL, SUPERSEDED, METHOD_NOT_FOUND; call's data: a PlanningError's word for the error's data
   publish       publish(topic, payload, retain): the progress (PROGRESS_TOPIC) out to whoever shows it
   map           set_map(text) with every map (OpenMower's JSON), replace_map(data) writes one back
                 (planner.area.set), map_unusable(): why the map can't be planned now ('' when it can), plan_map(data):
@@ -30,7 +30,9 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
                 back_out_ignored(): why back_out is off ('' where it isn't: the robot backs up where a plan does;
                 by default drive_ignored's),
                 classic_plan (planner slic3r), remote_plan (remote_planning), remote_state, mower_ready, held and
-                start_mowing (leftovers_auto)
+                start_mowing (leftovers_auto),
+                checked(plan): the robot's own last check of a plan just planned, a PlanningError where it doesn't
+                take it (not kept as a plan then, the no kept like any other)
   logs          loginfo, logwarn, logerr, logwarn_throttle: to the robot's log, the lines go to LOG (planner.log)
 """
 
@@ -497,9 +499,10 @@ def same_request(params):
     return json.dumps({k: v for k, v in params.items() if k not in ('ahead', 'slot')}, sort_keys=True)
 
 
-def call(methods, method, params, loginfo=log.info, logerr=log.error):
+def call(methods, method, params, loginfo=log.info, logerr=log.error, data=None):
     """An RPC method of methods with params (None: none): (its result as JSON, None) or (None, (code, message)), a
-    PlanningError the caller's mistake; loginfo, logerr: the adapter's."""
+    PlanningError the caller's mistake; loginfo, logerr: the adapter's. data: a dict for the error's data, it gets
+    'code' where a PlanningError has a word (as a service's code says it: BODY_OUT, NOT_READY...)."""
     try:
         if params is None:  # none given, or null
             params = {}
@@ -508,6 +511,8 @@ def call(methods, method, params, loginfo=log.info, logerr=log.error):
         return json.dumps(methods[method](params), allow_nan=False), None
     except PlanningError as e:  # (with a code of its own, another node's: that one)
         loginfo('MowBite Planner: %s: %s', method, e)
+        if data is not None and e.word:
+            data['code'] = e.word
         return None, (getattr(e, 'code', None) or INVALID_PARAMS, str(e))
     except Superseded as e:
         loginfo('MowBite Planner: %s: %s', method, e)
@@ -666,6 +671,11 @@ class PlannerCore:
     def drive_ignored(self):
         """Why drive slope and reverse are planned forwards here ('' where they aren't)."""
         return ''
+
+    def checked(self, plan):
+        """plan as it's kept and handed out: the robot's own last check of one just planned (MowBite OS: the body's),
+        a PlanningError where it doesn't take it. Here as it is."""
+        return plan
 
     def back_out_ignored(self):
         """Why back_out is off here ('' where it isn't): where the robot doesn't back up, as for drive."""
@@ -1095,7 +1105,7 @@ class PlannerCore:
         (not kept: it's that one mow's). PlanningError where the map can't be planned now (map_unusable)."""
         reason = self.map_unusable()
         if reason:
-            raise PlanningError(reason)
+            raise PlanningError(reason, word='NOT_READY')
         current = self.current
         with self.lock:
             data = self.map
@@ -1519,8 +1529,8 @@ class PlannerCore:
         cfg, why = self.driven(cfg)
         arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out, kw.get('reach_over', ()),
                                kw.get('unmowed', ()), margins)
-        return self.told(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, *args,
-                                       arrives=arrives, **kw), why)
+        return self.told(self.checked(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins,
+                                                    *args, arrives=arrives, **kw)), why)
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
                   reach_over=(), unmowed=(), from_start=False):
@@ -1553,8 +1563,8 @@ class PlannerCore:
             if got is not None:
                 self.plans.move_to_end(key)
             elif key in self.refused:
-                kind, message = self.refused[key]
-                raise kind(message)
+                kind, message, word = self.refused[key]
+                raise kind(message, word=word)
             else:
                 busy = self.planning.setdefault(key, threading.Lock())
         if got is not None:
@@ -1577,6 +1587,7 @@ class PlannerCore:
                         got = (plan, 'house') if plan is not None else (plan_coverage(
                             *args, reach_over=reach_over, unmowed=unmowed, arrives=arrives,
                             progress=self.progress.step), 'mower')
+                        got = (self.checked(got[0]), got[1])
                     except Stopped:
                         self.progress.end(stopped=True)
                         raise
@@ -1584,7 +1595,7 @@ class PlannerCore:
                         self.progress.end(str(e))
                         if isinstance(e, PlanningError):  # (a no from the request alone, never a crash)
                             with self.plans_lock:
-                                self.refused[key] = (type(e), str(e))
+                                self.refused[key] = (type(e), str(e), e.word)
                                 while len(self.refused) > REFUSED:
                                     self.refused.popitem(last=False)
                         raise

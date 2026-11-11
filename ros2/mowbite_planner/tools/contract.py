@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""The planner's contract.json (installed to share/mowbite_planner), made from the code: what a robot and its apps may
-rely on. interface (only with os/, MowBite OS' update reads it) counts up with every change of the services the OS
-builds (the .srv beside this package and os/'s, comments not counted); requires: the least Python and packages it runs
-with.
+"""The planner's contract.json (in the package, mowbite_planner/contract.json, and installed to share/mowbite_planner
+from there), made from the code: what a robot and its apps may rely on. interface (only with os/, MowBite OS' update
+reads it) counts up with every change of the services the OS builds (the .srv beside this package and os/'s,
+comments not counted) or of the words their code says (service_codes); requires: the least Python and packages it
+runs with.
 
   contract.py           the contract as the code has it now
   contract.py --write   into contract.json, interface one up where the services changed
@@ -17,11 +18,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, '..')
 ROOT = os.path.join(PKG, '..', '..')
-FILE = os.path.join(PKG, 'contract.json')
+FILE = os.path.join(PKG, 'mowbite_planner', 'contract.json')
 sys.path.insert(0, PKG)
 SCHEMA = 1
 OS = 'os/mowbite_planner_os_interfaces'
 INTERFACES = ('ros2/mowbite_planner_interfaces', OS)
+# os/'s Python package (its ~/plan_transit's words: transit_route.CODES)
+OS_PACKAGE = 'os/mowbite_planner_os'
 # the robots' nodes: the planner.* methods they add to the core's
 ROBOTS = {'openmower': 'ros1/mowbite_planner_ros1/nodes/mowbite_planner_node',
           'mowbite-os': 'os/mowbite_planner_os/mowbite_planner_os/node.py'}
@@ -44,6 +47,17 @@ def digests() -> dict:
     return out
 
 
+def service_codes() -> dict:
+    """{package/srv/Name: the words its code says where it fails} as the code has them."""
+    from mowbite_planner import config
+    where = os.path.abspath(os.path.join(ROOT, OS_PACKAGE))
+    if where not in sys.path:
+        sys.path.insert(0, where)
+    from mowbite_planner_os import transit_route
+    return {'mowbite_planner_interfaces/srv/PlanCoverage': sorted(config.COVERAGE_CODES),
+            'mowbite_planner_os_interfaces/srv/PlanTransit': sorted(transit_route.CODES)}
+
+
 def added(path: str) -> set:
     """The planner.* keys of the dicts in the robot's node at path."""
     with open(path) as f:
@@ -53,7 +67,7 @@ def added(path: str) -> set:
 
 
 def make(before=None) -> dict:
-    """The contract, interface from before's (one up where the services aren't its)."""
+    """The contract, interface from before's (one up where the services or their codes' words aren't its)."""
     import mowbite_planner
     from mowbite_planner import core, export
     planner = core.PlannerCore(0.18, {}, '', '', '')
@@ -68,9 +82,10 @@ def make(before=None) -> dict:
            'files_version': mowbite_planner.FILES_VERSION, 'methods': methods, 'codes': codes,
            'topics': [core.PROGRESS_TOPIC], 'settings': settings}
     if os.path.isdir(os.path.join(ROOT, OS)):
-        services = digests()
+        services, words = digests(), service_codes()
         interface = (before or {}).get('interface', 0)
-        out.update(interface=interface + (not before or before.get('interfaces') != services), interfaces=services)
+        changed = not before or before.get('interfaces') != services or before.get('service_codes') != words
+        out.update(interface=interface + changed, interfaces=services, service_codes=words)
     return out
 
 

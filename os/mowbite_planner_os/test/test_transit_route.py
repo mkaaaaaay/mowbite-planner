@@ -11,7 +11,7 @@ from shapely.ops import unary_union
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', '..', '..', 'ros2', 'mowbite_planner')]
 
-from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
+from mowbite_planner import PlannerConfig, PlanningError, progress  # noqa: E402
 from mowbite_planner.footprint import SPIN, Footprint  # noqa: E402
 from mowbite_planner.mathutil import angle_diff  # noqa: E402
 from mowbite_planner.planner import plan_coverage  # noqa: E402
@@ -149,22 +149,43 @@ def test_start_a_little_outside():
     assert 0.3 <= t.start_outside <= 0.5 + 1e-9
 
 
-@pytest.mark.parametrize('start, goal, why', [
-    ((25.0, 4.0, 0.0), (2.0, 2.0), 'the start (25.00, 4.00) lies 5.05 m outside'),
-    ((19.9, 4.0, 0.0), (2.0, 2.0), 'sticks out of the drivable areas, straight ahead too'),  # facing out of the lawn
-    ((2.0, 2.0, 0.0), (5.0, 3.0), 'the goal (5.00, 3.00) lies'),  # in the tree
-    ((2.0, 2.0, 0.0), (19.0, 4.0, 0.0), 'goal_straight needs a goal yaw'),
+@pytest.mark.parametrize('start, goal, why, word', [
+    ((25.0, 4.0, 0.0), (2.0, 2.0), 'the start (25.00, 4.00) lies 5.05 m outside', 'START_OUTSIDE'),
+    # facing out of the lawn
+    ((19.9, 4.0, 0.0), (2.0, 2.0), 'sticks out of the drivable areas, straight ahead too', 'START_OUTSIDE'),
+    ((2.0, 2.0, 0.0), (5.0, 3.0), 'the goal (5.00, 3.00) lies', 'GOAL_OUTSIDE'),  # in the tree
+    ((2.0, 2.0, 0.0), (19.0, 4.0, 0.0), 'goal_straight needs a goal yaw', 'BAD_REQUEST'),
+    ((2.0, 2.0), (19.0, 4.0, 0.0), 'the start needs x, y and yaw', 'BAD_REQUEST'),
+    ((2.0, 2.0, math.inf), (19.0, 4.0, 0.0), 'the start yaw must be a number', 'BAD_REQUEST'),
+    ((2.0, 2.0, 0.0), (1e9, 4.0, 0.0), 'the start or goal has a point that is no number or more than', 'BAD_REQUEST'),
 ])
-def test_refused(start, goal, why):
+def test_refused(start, goal, why, word):
+    # (word: what ~/plan_transit's code says of it)
     kw = {'goal_straight': 0.5} if 'goal_straight' in why else {}
-    with pytest.raises(PlanningError, match=why.replace('(', r'\(').replace(')', r'\)')):
+    with pytest.raises(PlanningError, match=why.replace('(', r'\(').replace(')', r'\)')) as e:
         transit(start, goal[:2] if kw else goal, **kw)
+    assert e.value.word == word and word in transit_route.CODES
+
+
+def test_bad_requests():
+    for kw, why in (({'cfg': {'waypoint_spacing': 0.0}}, 'waypoint_spacing'), ({'cfg': {'overlap': 2.0}}, 'overlap'),
+                    ({'areas': []}, 'no drivable areas'), ({'max_outside': -0.1}, 'must be >= 0'),
+                    ({'areas': [[(0.0, 0.0), (math.nan, 0.0), (1.0, 1.0)]]}, 'a drivable area has a point'),
+                    ({'obstacles': [[(0.0, 0.0), (1e9, 0.0), (1.0, 1.0)]]}, 'an obstacle has a point')):
+        with pytest.raises(PlanningError, match=why) as e:
+            transit((2.0, 3.0, 0.0), (8.0, 3.0, 0.0), **kw)
+        assert e.value.word == 'BAD_REQUEST', why
 
 
 def test_no_way():
-    # the lawns without the navigation area between them
-    with pytest.raises(PlanningError, match='no way from'):
+    # the lawns without the navigation area between them (no word of its own: ~/plan_transit's NO_WAY)
+    with pytest.raises(PlanningError, match='no way from') as e:
         transit((2.0, 3.0, 0.0), (17.0, 5.0), areas=[LAWN, BACK])
+    assert e.value.word == ''
+    tiny = [(0.0, 0.0), (0.3, 0.0), (0.3, 0.3), (0.0, 0.3)]
+    with pytest.raises(PlanningError, match='the body fits nowhere in the drivable areas') as e:
+        transit((0.1, 0.1, 0.0), (0.2, 0.2), {'edges': 'hard'}, areas=[tiny], obstacles=())
+    assert e.value.word == ''
 
 
 # two lawns joined by a passage (its middle line: out of the one, round, into the other)
@@ -267,6 +288,48 @@ def test_the_same_answers_from_a_kept_room():
     # other settings, another room
     transit(asks[0][0], asks[0][1], {'edge_margin': 0.03}, areas=areas, obstacles=())
     assert transit_route._ROOM.last[0][2].edge_margin == 0.03
+
+
+def test_stopped_anywhere_the_room_stays_good():
+    # a search stopped from outside (the node's transit_search_limit) at any of its checks of the body: what's kept of
+    # the map is as good as new, the same request and another answered as made anew
+    lawn = [(0.0, 0.0), (12.0, 0.0), (12.0, 6.0), (0.0, 6.0)]
+    beds = [[(5.0, 3.15), (8.0, 3.15), (8.0, 6.5), (5.0, 6.5)], [(5.0, -0.5), (8.0, -0.5), (8.0, 2.85), (5.0, 2.85)]]
+    through = ((2.0, 4.0, 0.0), (2.0, -4.0))
+    for areas, obstacles, asks in (
+            ([lawn], beds, [((3.0, 1.9, 0.0), (11.0, 3.0)), ((1.0, 0.8, 0.0), (8.6, 3.0, 0.0))]),
+            ([FRONT, passage(0.45, ROUND), REAR], [], [through, ((1.0, 6.0, 1.0), (4.0, 2.2, 0.0))]),
+            ([FRONT, passage(0.25, SQUARE, 2), REAR], [], [through, ((2.0, 4.0, 0.0), (4.0, 6.0))])):
+
+        def answer(start, goal, stop=None):
+            try:
+                with progress.stoppable(stop or (lambda: False)):
+                    return transit(start, goal, areas=areas, obstacles=obstacles).poses
+            except PlanningError as e:
+                return str(e)
+
+        want = []
+        for ask in asks:
+            transit_route._ROOM.__dict__.clear()
+            want.append(answer(*ask))
+        checks = [0]
+
+        def counted():
+            checks[0] += 1
+            return False
+        transit_route._ROOM.__dict__.clear()
+        assert answer(*asks[0], stop=counted) == want[0] and checks[0] > 3
+        n = checks[0]
+        for at in sorted({1, 2, 3, n // 4, n // 2, n - 1, n}):
+            seen = [0]
+
+            def stop():
+                seen[0] += 1
+                return seen[0] >= at
+            transit_route._ROOM.__dict__.clear()
+            with pytest.raises(progress.Stopped):
+                answer(*asks[0], stop=stop)
+            assert [answer(*ask) for ask in asks] == want, at
 
 
 def test_at_the_goal():

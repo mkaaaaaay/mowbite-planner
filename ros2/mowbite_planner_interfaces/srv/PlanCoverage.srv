@@ -38,8 +38,17 @@ uint8 SEGMENT_TURN=2
 uint8 SEGMENT_TRANSIT=3
 
 bool success
-# why planning failed, or a summary and any warnings
+# why planning failed, or a summary and any warnings: to show, not to go by
 string message
+# empty with success, else why not, to go by:
+#   NOT_READY          nothing is planned now (the robot's map or body not there yet or not usable): ask again later
+#   BAD_REQUEST        an override the node doesn't take (no such parameter, another type, out of range)
+#   NO_PLAN            the planner can't plan this area as asked
+#   START_UNREACHABLE  no section of the plan is got to from start_pose (a robot that drives to them itself)
+#   BODY_OUT           the body would stick out past the edges on the plan, it's not given out (a robot that checks
+#                      every plan once more)
+#   INTERNAL           an error of the planner's own
+string code
 # The whole route. Each pose faces the way the mower faces, which is the way it drives except on the
 # segments marked reverse. Consecutive poses never share a position.
 nav_msgs/Path path

@@ -40,7 +40,7 @@ ARRIVE_STEP = 0.3
 ARRIVE_TRIES = 12
 ARRIVE_ASKS = 400
 # how a PlanningError begins where no section is got to from arrives.start (none asked about past the asks counted
-# either), as mowbite_logic tells it from the others
+# either), to show; mowbite_logic tells it from the others by its word (~/plan_coverage's code START_UNREACHABLE)
 START_UNREACHABLE = 'start unreachable: '
 # m of path a section backs up out of a dead end at most (back_out; further: it ends earlier)
 BACK_OUT_MAX = 30.0
@@ -282,7 +282,8 @@ class _Walk:
             raise PlanningError(f'{START_UNREACHABLE}no way from the start ({self.start.x:.2f}, {self.start.y:.2f}) '
                                 'gets to any section of the plan facing its heading: at ' +
                                 ', '.join(f'({x:.2f}, {y:.2f})' for x, y in got['dropped'] + got['untried']) +
-                                (' (the ways asked about ran out before the last ones)' if got['untried'] else ''))
+                                (' (the ways asked about ran out before the last ones)' if got['untried'] else ''),
+                                word='START_UNREACHABLE')
         if not out.poses:
             raise PlanningError('no way gets to any section of the plan facing its heading' +
                                 (' and away from it again driving forwards' if got['trapped'] else '') + ': at ' +

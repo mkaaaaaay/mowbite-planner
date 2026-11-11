@@ -9,9 +9,11 @@ setup(
     name=package_name,
     version='0.5.0',
     packages=find_packages(exclude=['test']),
+    # (contract.json: in the package, MowBite OS reads it there, and in share/ as before)
+    package_data={package_name: ['contract.json']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml', 'contract.json']),
+        ('share/' + package_name, ['package.xml', package_name + '/contract.json']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         (os.path.join('share', package_name, 'tools'), glob('tools/*.py')),

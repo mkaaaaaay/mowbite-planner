@@ -22,8 +22,17 @@ float64 max_outside -1.0
 rcl_interfaces/Parameter[] overrides
 ---
 bool success
-# why planning failed, or a summary and any warnings
+# why planning failed, or a summary and any warnings: to show, not to go by
 string message
+# empty with success, else why not, to go by:
+#   NOT_READY      nothing is planned now (the mower's dimensions not there yet or not usable): ask again later
+#   NO_WAY         no way from the start to the goal with the body in
+#   START_OUTSIDE  the start lies further outside of where the body fits than max_outside
+#   GOAL_OUTSIDE   the goal does
+#   BAD_REQUEST    an override the node doesn't take, a value out of range, no drivable area
+#   SEARCH_LIMIT   no way found in the node's transit_search_limit s (there may be one)
+#   INTERNAL       an error of the planner's own
+string code
 # The way: each pose faces the next one, the last one the way it arrives, waypoint_spacing apart, at least 3, no two on
 # the same position. A pose whose heading jumps from the one before (by more than 15 deg) turns on the spot there.
 # Empty where the start is at the goal already: closer than waypoint_spacing, facing its way within 15 deg (with
