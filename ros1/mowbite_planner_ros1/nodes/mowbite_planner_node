@@ -22,6 +22,9 @@ with it the one that's active and mowable):
   - the docking station: plans start on the loop next to it and end close to it.
   - an obstacle's (or an area's to keep out of) own "margin" property (m): the body keeps that far off it in place of
     obstacle_margin. The obstacles mower_logic sends are found in the map by their outline.
+  - an area's "recorded_body" property ({robot_width, robot_front, robot_rear, robot_outline}, the body it was
+    recorded with): where the body was while recording is worked out with that one (planner.plan's body_hints: larger
+    where this body is, unreadable where it's no body).
 The plan never depends on where the mower is, so the same map gives the same plan (mower_logic compares a
 digest of it to resume an interrupted mow).
 
@@ -119,7 +122,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         plan was there already (planned ahead or asked for before). duration: {min, model_min, factor,
                         runs}, how long mowing it takes, see TIMING_RUNS. ahead: true, it waits behind what's asked
                         for and the checks after a mow (with the node's own planning ahead: the app's preview of the
-                        areas not looked at). planned_on: mower or house (remote_planning). The same request (but ahead and slot) waiting or planned meanwhile is
+                        areas not looked at). planned_on: mower or house (remote_planning). body_hints: {area id:
+                        larger or unreadable} of the areas recorded with a smaller body than this one or an unreadable
+                        recorded_body (none: no such). The same request (but ahead and slot) waiting or planned meanwhile is
                         planned once, the same answer for each (kept: true for those that joined it), one without
                         ahead takes such a request planned ahead on before the others. slot (a string the app picks):
                         a request with that slot still waiting is answered with the error SUPERSEDED instead
@@ -212,7 +217,7 @@ from mowbite_planner.core import (ASKED, EVENTS_TOPIC, FTC_PARAMS, LOG, METHOD_N
                                   PlannerCore, run_calib)
 from mowbite_planner.export import ANSWER_TOO_BIG, MAX_ANSWER, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.geometry import clean_polygon, polygonal, union
-from mowbite_planner.mapfile import area_job, margins_for, match_area
+from mowbite_planner.mapfile import area_job, bodies_for, margins_for, match_area
 from mowbite_planner.progress import check as stop_here
 from mowbite_planner.remote import (MAX_PACKED, PART, TOPIC, RemoteError, loads, plan_from, refused, stack,
                                     unpack)
@@ -1350,7 +1355,7 @@ class MowbitePlannerRos1(PlannerCore):
         return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished'],
                                    'skip_lanes': cfg.skip_lanes or bool(req.skip_fill)})
 
-    def remote_plan(self, key, form, args, reach_over, unmowed, area_id):
+    def remote_plan(self, key, form, args, reach_over, unmowed, area_id, bodies=()):
         """remote_planning: the plan from the house computer where it's asked and its plan taken (read with the
         geometry and config of here, nothing refused: remote.plan_from, refused), else None, why in the log (when it
         changed) and the progress. Waits REMOTE_TIMES what the area's last planning took (REMOTE_MIN_WAIT at least,
@@ -1365,7 +1370,7 @@ class MowbitePlannerRos1(PlannerCore):
                                         self.progress.step)
             if data is not None:
                 try:
-                    plan = plan_from(unpack(data), args, reach_over, unmowed)
+                    plan = plan_from(unpack(data), args, reach_over, unmowed, bodies)
                     why = refused(plan)
                     if not why:
                         self.remote_said = ''
@@ -1421,10 +1426,12 @@ class MowbitePlannerRos1(PlannerCore):
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
             # the map's obstacles (areas to keep out of) with a margin of their own, by their outline
             margins = margins_for(data, obstacles + keep_out)
+            # the body each one was recorded with, by its outline too
+            bodies = bodies_for(data, [boundary] + obstacles + drivable + keep_out + reach_over + unmowed)
             # (the end as planner.plan gives it, the heading doesn't count there: planned ahead it's this plan)
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
                                         drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over,
-                                        unmowed=unmowed)
+                                        unmowed=unmowed, bodies=bodies)
             self.pin(self.local.key)
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)

@@ -1340,6 +1340,32 @@ def test_body_where_it_was_while_recording():
     assert cw.body_space.contains(below) and not cw.body_space.contains(ahead)
 
 
+def test_recorded_body():
+    """bodies: a ring recorded with another body is swept with that one. The same body as the planning one plans the
+    same; the outline recorded with a narrower one leaves less room past it, the loops that much further in (half the
+    extra width), the body still in, the plan in one piece; an obstacle has its own; hard edges as without."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
+    lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
+    small = PlannerConfig(robot_width=0.3, robot_front=0.3, robot_rear=0.1).body_outline
+    plain = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0))
+    same = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), bodies=((lawn, BODY), (bed, BODY)))
+    assert same.poses == plain.poses and same.body_space.equals(plain.body_space)
+    narrow = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), bodies=((lawn, small),))
+    near_bed = Polygon(bed).buffer(0.6)
+    assert narrow.body_space.difference(near_bed).area < plain.body_space.difference(near_bed).area
+    assert narrow.body_space.intersection(near_bed).equals(plain.body_space.intersection(near_bed))
+    assert check_plan(narrow)['body_out'] == [] and len(narrow.section_starts) == 1
+    wall = 0.2 - 0.15
+    assert min(Polygon(lawn).exterior.distance(Point(p.x, p.y)) for p in narrow.poses) >= \
+        min(Polygon(lawn).exterior.distance(Point(p.x, p.y)) for p in plain.poses) + wall - 1e-6
+    by_bed = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), bodies=((bed, small),))
+    assert by_bed.body_space.intersection(near_bed).area < plain.body_space.intersection(near_bed).area
+    assert check_plan(by_bed)['body_out'] == []
+    hard = cfg.with_overrides({'edges': 'hard'})
+    assert plan_coverage(lawn, [bed], hard, start=(1, 1, 0.0), bodies=((lawn, small), (bed, small))).poses == \
+        plan_coverage(lawn, [bed], hard, start=(1, 1, 0.0)).poses
+
+
 def test_robot_outline_settings():
     """robot_outline: [[x, y], ...] (JSON) as tuples, the body checked without robot_width, robot_front and robot_rear
     (it beats them), counter-clockwise whichever way round it's given, a closing point once; None: the rectangle again.
@@ -1445,7 +1471,7 @@ def test_driven_sweeps_the_outline(corners, pieces):
     leftmost or rightmost)."""
     corners = PlannerConfig(robot_outline=corners).body_outline
     ring = [(0.0, 0.0), (1.0, 0.0), (1.4, 0.7), (0.2, 0.5)]
-    swept = space._driven([ring], corners)
+    swept = space._driven([ring], [corners])
     bodies = []
     for i, (a, b) in enumerate(zip(ring, ring[1:] + ring[:1])):
         h, n = math.atan2(b[1] - a[1], b[0] - a[0]), int(math.ceil(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.001))

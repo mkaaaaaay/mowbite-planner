@@ -549,6 +549,29 @@ def test_arrives(make, planned, monkeypatch):
 
 
 @fake_only
+def test_recorded_bodies(make, planned, monkeypatch):
+    """The ways (~/plan_transit, arrives) go by the body each ring of the map was recorded with (by its outline), as
+    the plans do; planner.plan's body_hints tells of the areas recorded without one too (missing)."""
+    node = make()
+    small = {'robot_width': 0.4, 'robot_front': 0.5, 'robot_rear': 0.1, 'robot_outline': [], 'by': 'os-1'}
+    corners = PlannerConfig(robot_width=0.4, robot_front=0.5, robot_rear=0.1).body_outline
+    send_map(node, the_map(recorded_body=small))
+    asked = []
+    real = os_module.plan_transit
+    monkeypatch.setattr(os_module, 'plan_transit', lambda *args, **kw: asked.append((args, kw)) or real(*args, **kw))
+    assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2)).success
+    bodies = asked[-1][1]['bodies']
+    assert [c for _, c in bodies] == [corners] and bodies[0][0][:4] == GARDEN
+    gets_to = node.core.arrives(GARDEN, [BED], tron_cfg(), [], [], (), (), (), bodies)
+    assert gets_to(Pose2D(2.0, 2.5, 0.0)) and asked[-1][1]['bodies'] == bodies
+    result, _ = rpc(node, 'planner.plan', {'area_id': 'a'})
+    assert result['body_hints'] == {'a': 'larger', 'b': 'missing'} and planned.calls[-1][1]['bodies']
+    send_map(node, the_map())
+    result, _ = rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')
+    assert result['body_hints'] == {'a': 'missing', 'b': 'missing'} and 'bodies' not in planned.calls[-1][1]
+
+
+@fake_only
 def test_arrives_as_mowbite_logic_asks(make, monkeypatch):
     """Every way, the first section's too, as mowbite_logic asks ~/plan_transit (masterplan 3.4): through every active
     mowing and navigation area (drivable, reach_over, unmowed), ARRIVE_OUTSIDE at the ends; where the goal lies

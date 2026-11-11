@@ -28,8 +28,8 @@ CFG = PlannerConfig(mower_width=0.18, perimeter_passes=3, robot_width=0.41, robo
 ARGS = (remote.canon(LAWN), [remote.canon(TREE)], CFG, None, None, (), (), (None,))
 
 
-def a_request(rid='a' * 32, args=ARGS, **change):
-    form = remote.request_json(args)
+def a_request(rid='a' * 32, args=ARGS, bodies=(), **change):
+    form = remote.request_json(args, (), (), bodies)
     request = dict(id=rid, key=remote.plan_key(remote.code_version(), form), code=remote.code_version(),
                    stack=remote.stack(), wait_s=60.0, form=form)
     return json.dumps(dict(request, **change)).encode()
@@ -59,6 +59,18 @@ def test_the_house_plans_what_the_mower_does():
     (topic, hello, retain), = hellos
     assert topic == remote.TOPIC + 'hello' and retain and hello['code'] == house.code and \
         hello['stack'] == remote.stack() and hello['busy'] is False
+
+
+def test_the_house_plans_with_the_bodies():
+    """The bodies the rings were recorded with are planned with there too (the mower reads the plan with them)."""
+    bodies = ((remote.canon(LAWN), remote.canon(PlannerConfig(robot_width=0.3, robot_front=0.43,
+                                                                robot_rear=0.18).body_outline)),)
+    _, got = served(a_request(bodies=bodies))
+    assert json.loads(got[0][1])['ok']
+    plan = remote.plan_from(remote.unpack(b''.join(d for _, d in got[1:])), ARGS, (), (), bodies)
+    own = plan_coverage(*ARGS, bodies=bodies)
+    assert fingerprint(plan) == fingerprint(own) != fingerprint(plan_coverage(*ARGS))
+    assert plan.body_space.equals(own.body_space) and remote.refused(plan) == ''
 
 
 @pytest.mark.parametrize('change, error', [

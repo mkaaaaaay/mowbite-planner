@@ -26,8 +26,8 @@ from typing import Any, Callable, Dict, List, Optional
 from .config import PlanningError
 from .export import MAX_ANSWER
 from .planner import plan_coverage, set_workers
-from .remote import (HELLO_EVERY, MAX_PACKED, PART, TOPIC, RemoteError, code_version, loads, pack, plan_json,
-                     plan_key, request_from, request_json, stack)
+from .remote import (HELLO_EVERY, MAX_PACKED, PART, TOPIC, RemoteError, bodies_from, code_version, loads, pack,
+                     plan_json, plan_key, request_from, request_json, stack)
 
 log = logging.getLogger('mowbite_planner.house')
 
@@ -123,9 +123,10 @@ class House:
             return say(False, error='the house computer plans on another stack')
         try:
             args, reach_over, unmowed = request_from(request.get('form'))
+            bodies = bodies_from(request.get('form'))
         except RemoteError as e:
             return say(False, error='request not read: %s' % e)
-        if plan_key(self.code, request_json(args, reach_over, unmowed)) != key:
+        if plan_key(self.code, request_json(args, reach_over, unmowed, bodies)) != key:
             return say(False, error='the key of what it read isn\'t the request\'s')
 
         def step(stage: str, done: int, of: int) -> None:
@@ -134,7 +135,7 @@ class House:
 
         t0 = time.perf_counter()
         try:
-            plan = plan_coverage(*args, reach_over=reach_over, unmowed=unmowed, progress=step)
+            plan = plan_coverage(*args, reach_over=reach_over, unmowed=unmowed, progress=step, bodies=bodies)
         except PlanningError as e:
             return say(False, error=str(e), refused=True)
         except Exception as e:  # noqa: BLE001 - the mower plans it itself then

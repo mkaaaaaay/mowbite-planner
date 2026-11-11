@@ -11,8 +11,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
 from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
-from mowbite_planner.mapfile import (area_job, area_settings, find_area, margins_for, match_area,  # noqa: E402
-                                     mow_areas, openmower_angle, openmower_settings, settings_for)
+from mowbite_planner.mapfile import (area_job, area_settings, bodies_for, body_hints, body_warnings,  # noqa: E402
+                                     find_area, margins_for, match_area, mow_areas, openmower_angle,
+                                     openmower_settings, recorded_body, settings_for)
 from stubplan import stub_plan_coverage  # noqa: E402
 
 
@@ -136,6 +137,53 @@ def test_margins_for():
     # the area's own in its planner object
     cfg = settings_for(PlannerConfig(), None, area_job(data, 'front'))
     assert (cfg.edge_margin, cfg.obstacle_margin, cfg.spin_margin) == (0.2, 0.0, 0.08)
+
+
+RECORDED = {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'robot_outline': [], 'by': 'os-1'}
+
+
+def test_recorded_body():
+    """An area's recorded_body as the body's corners (robot_outline beats the rectangle, by doesn't count), None
+    without one, ValueError where it's no body."""
+    assert recorded_body(area('a', 'mow', rect(0, 0, 1, 1))) is None
+    assert recorded_body(area('a', 'mow', rect(0, 0, 1, 1), recorded_body=RECORDED)) == \
+        PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14).body_outline
+    kite = [[0.5, 0], [0, 0.2], [-0.1, 0], [0, -0.2]]
+    assert recorded_body(area('a', 'mow', rect(0, 0, 1, 1), recorded_body=dict(RECORDED, robot_outline=kite))) == \
+        ((0.5, 0.0), (0.0, 0.2), (-0.1, 0.0), (0.0, -0.2))
+    for bad in ('nx60i', [0.4], {'robot_width': 0.4}, dict(RECORDED, robot_front='x'), dict(RECORDED, robot_width=-1),
+                dict(RECORDED, robot_outline=[[1, 1], [2, 2]]), dict(RECORDED, robot_outline=5),
+                dict(RECORDED, robot_outline=[[0.5, 0], [0, 'a'], [-0.1, 0]])):
+        with pytest.raises(ValueError, match='recorded_body'):
+            recorded_body(area('a', 'mow', rect(0, 0, 1, 1), recorded_body=bad))
+
+
+def test_bodies_for_and_body_hints():
+    """bodies_for: of the outlines (float32, closed) the ones of an area with a recorded_body, its corners; none
+    unreadable. body_hints: of the areas with one of the outlines, larger where the planning body sticks out of the
+    recorded one by more than 2 cm, unreadable, missing only where asked; none without a planning body."""
+    narrow = dict(RECORDED, robot_width=0.3)
+    data = {'areas': [area('front', 'mow', rect(0, 0, 10, 6), recorded_body=narrow),
+                      area('bed', 'obstacle', rect(4, 2, 5, 3), recorded_body=RECORDED),
+                      area('tree', 'obstacle', rect(6, 2, 7, 3)),
+                      area('pond', 'mow', rect(1, 1, 2, 2), recorded_body={'robot_width': 'wide'}),
+                      area('far', 'obstacle', rect(20, 2, 21, 3), recorded_body=narrow)]}
+    sent = [struct.unpack('<2f', struct.pack('<2f', x + 1e-7, y)) for x, y in rect(0, 0, 10, 6)]
+    outlines = [sent + sent[:1], rect(4, 2, 5, 3), rect(6, 2, 7, 3), rect(1, 1, 2, 2)]
+    got = bodies_for(data, outlines)
+    assert [o for o, _ in got] == outlines[:2]
+    assert got[1][1] == recorded_body(data['areas'][1]) and bodies_for(None, outlines) == ()
+    body = PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14).body_outline
+    assert body_hints(data, outlines, body) == {'front': 'larger', 'pond': 'unreadable'}
+    assert body_hints(data, outlines, body, missing=True) == {'front': 'larger', 'tree': 'missing',
+                                                              'pond': 'unreadable'}
+    near = PlannerConfig(robot_width=0.43, robot_front=0.44, robot_rear=0.15).body_outline
+    smaller = PlannerConfig(robot_width=0.25, robot_front=0.3, robot_rear=0.1).body_outline
+    assert body_hints(data, outlines[1:2], near) == body_hints(data, outlines[:1], smaller) == {}
+    assert body_hints(data, outlines, None, missing=True) == {}
+    assert body_warnings({'front': 'larger', 'bed': 'larger', 'tree': 'missing', 'pond': 'unreadable'}) == [
+        'areas bed, front: recorded with a smaller body than this one, record again for the exact edge',
+        'area pond: recorded_body unreadable, planned with this body']
 
 
 def test_area_job_without_dock_or_properties():

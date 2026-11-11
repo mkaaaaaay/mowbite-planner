@@ -201,7 +201,7 @@ def _canon(v: Any) -> Any:  # the node's canon()
 
 
 def _node_plan(boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-               reach_over=(), unmowed=()) -> CoveragePlan:
+               reach_over=(), unmowed=(), bodies=()) -> CoveragePlan:
     """plan_coverage with the arguments of the node's kept_plan(): obstacles sorted with their margins, finished_mows
     only for perimeter_direction random."""
     if cfg.perimeter_direction != 'random' and cfg.finished_mows:
@@ -211,7 +211,8 @@ def _node_plan(boundary, obstacles, cfg, start=None, end=None, drivable=(), keep
     obstacles = [o for o, _ in pairs]
     margins = tuple(m for _, m in pairs) + _canon(margins[len(obstacles):])
     return plan_coverage(_canon(boundary), obstacles, cfg, _canon(start), _canon(end), _canon(drivable),
-                         _canon(keep_out), margins, reach_over=_canon(reach_over), unmowed=_canon(unmowed))
+                         _canon(keep_out), margins, reach_over=_canon(reach_over), unmowed=_canon(unmowed),
+                         **({'bodies': tuple(sorted(_canon(bodies)))} if bodies else {}))
 
 
 def plan_area(garden: gardens.Garden, area_id: str, mower: gardens.Mower) -> CoveragePlan:

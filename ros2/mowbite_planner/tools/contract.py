@@ -3,7 +3,7 @@
 from there), made from the code: what a robot and its apps may rely on. interface (only with os/, MowBite OS' update
 reads it) counts up with every change of the services the OS builds (the .srv beside this package and os/'s,
 comments not counted) or of the words their code says (service_codes); requires: the least Python and packages it
-runs with.
+runs with; map_fields: the properties of a map's areas it reads that a robot or app writes (mapfile.MAP_FIELDS).
 
   contract.py           the contract as the code has it now
   contract.py --write   into contract.json, interface one up where the services changed
@@ -69,7 +69,7 @@ def added(path: str) -> set:
 def make(before=None) -> dict:
     """The contract, interface from before's (one up where the services or their codes' words aren't its)."""
     import mowbite_planner
-    from mowbite_planner import core, export
+    from mowbite_planner import core, export, mapfile
     planner = core.PlannerCore(0.18, {}, '', '', '')
     settings = {name: {k: entry[k] for k in SETTING_KEYS if k in entry}
                 for name, entry in sorted(planner.rpc_settings()['settings'].items())}
@@ -80,7 +80,7 @@ def make(before=None) -> dict:
              'SUPERSEDED': core.SUPERSEDED}
     out = {'schema': SCHEMA, 'owner': 'mowbite-planner', 'requires': dict(sorted(mowbite_planner.REQUIRES.items())),
            'files_version': mowbite_planner.FILES_VERSION, 'methods': methods, 'codes': codes,
-           'topics': [core.PROGRESS_TOPIC], 'settings': settings}
+           'topics': [core.PROGRESS_TOPIC], 'settings': settings, 'map_fields': list(mapfile.MAP_FIELDS)}
     if os.path.isdir(os.path.join(ROOT, OS)):
         services, words = digests(), service_codes()
         interface = (before or {}).get('interface', 0)

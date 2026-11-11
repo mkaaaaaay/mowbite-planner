@@ -90,7 +90,7 @@ from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER
                    PlannerCore)
 from .core import call as core_call
 from .export import ANSWER_TOO_BIG, fingerprint, too_big
-from .mapfile import AreaJob, _number, area_job, margins_for, match_area
+from .mapfile import AreaJob, _number, area_job, bodies_for, body_told, margins_for, match_area
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, COVERAGE_CODES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS,
                      MAX_PASSES, NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS,
@@ -488,8 +488,11 @@ class NodeCore(PlannerCore):
     def given(self):
         return self.node.given()
 
-    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=()):
-        return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out, reach_over, unmowed, margins)
+    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=(), bodies=()):
+        return self.node.arrives(boundary, obstacles, cfg, drivable, keep_out, reach_over, unmowed, margins, bodies)
+
+    def hints_missing(self):
+        return self.node.hints_missing()
 
     def drive_ignored(self):
         return self.node.drive_ignored()
@@ -695,8 +698,11 @@ class MowbitePlannerNode(Node):
         return {}
 
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, reach_over=(), unmowed=(),
-                margins=()):
+                margins=(), bodies=()):
         return None
+
+    def hints_missing(self) -> bool:
+        return False
 
     def drive_ignored(self) -> str:
         return ''
@@ -873,9 +879,12 @@ class MowbitePlannerNode(Node):
                              quaternion_to_yaw(q.x, q.y, q.z, q.w))
                 if request.use_end_point:
                     end = (float(request.end_point.x), float(request.end_point.y))
-                plan, kept = core.kept_plan(_float32(job.boundary), obstacles, cfg, start, end, job.drivable,
+                rings = [_float32(job.boundary)] + obstacles + job.drivable + job.keep_out + job.navigation + \
+                    job.unmowed
+                plan, kept = core.kept_plan(rings[0], obstacles, cfg, start, end, job.drivable,
                                             job.keep_out, margins_for(data, obstacles + job.keep_out), job.navigation,
-                                            job.unmowed, from_start=bool(request.use_start_pose))
+                                            job.unmowed, from_start=bool(request.use_start_pose),
+                                            bodies=bodies_for(data, rings))
         except PlanningError as e:
             response.success = False
             response.code = code_of(e)
@@ -896,8 +905,8 @@ class MowbitePlannerNode(Node):
         else:
             what = 'kept from before' if kept else 'planned'
         response.success = True
-        response.message = with_warnings(f'{where}, {what}: {summary(plan)}',
-                                         [*self.left_out(request, plan), *plan.warnings])
+        response.message = with_warnings(f'{where}, {what}: {summary(plan)}', [
+            *self.left_out(request, plan), *plan.warnings, *([] if armed else body_told(data, rings, plan.config))])
         self.get_logger().info(response.message)
         if values['publish_path']:
             self._path_pub.publish(path)
@@ -959,9 +968,13 @@ class MowbitePlannerNode(Node):
         with the plan's."""
         for w in warnings:
             self.get_logger().warning(w)
+        # (the body each one was recorded with where the map has it)
+        data = self.core.current_map() if self.core is not None else None
+        rings = [boundary, *obstacles, *drivable]
+        bodies = bodies_for(data, rings)
         try:
             plan = self.checked(plan_coverage(boundary, obstacles, self.config(values, **overrides), start, end,
-                                              drivable))
+                                              drivable, **({'bodies': bodies} if bodies else {})))
         except PlanningError as e:
             self.get_logger().warning(f'planning failed: {e}')
             return None, None, with_warnings(str(e), warnings), code_of(e)
@@ -973,7 +986,7 @@ class MowbitePlannerNode(Node):
         path = None
         if want_path or values['publish_path']:
             path = to_path_msg(plan.poses, values['frame_id'], self.get_clock().now().to_msg())
-        message = with_warnings(summary(plan), [*warnings, *plan.warnings])
+        message = with_warnings(summary(plan), [*warnings, *plan.warnings, *body_told(data, rings, plan.config)])
         self.get_logger().info(message)
         for w in plan.warnings:
             self.get_logger().warning(w)

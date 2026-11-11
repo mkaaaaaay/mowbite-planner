@@ -17,7 +17,9 @@ just use it. It runs in its own container next to OpenMower's.
   ```
 
   An obstacle's `margin` property (m) beats `obstacle_margin` for that one. A bad value there and the area gets no
-  plan, the log says why.
+  plan, the log says why. An area's `recorded_body` (`{"robot_width", "robot_front", "robot_rear", "robot_outline"}`,
+  the body it was recorded with) counts for where the body was while recording; a mower larger than that mows it as
+  far as it fits, `planner.plan` names the area in `body_hints`.
 - **Areas in areas.** A mowing area inside another is mowed round like an obstacle and gets its own plan.
 - **Narrow parts.** Where lanes would lie in a strip narrower than a U-turn, loops go on in there instead.
 - **Clean stripes** (`headland_turns`) and **turning on the spot** (`turn_on_spot`), for all areas or per area.

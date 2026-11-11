@@ -89,6 +89,22 @@ def test_the_request_read_back_has_its_key():
             remote.request_from(dict(form, **bad))
 
 
+def test_the_request_with_bodies():
+    """The bodies the rings were recorded with go in the request where there are (its key another), read back as
+    they were; none: the request as before."""
+    cfg = PlannerConfig(**BODY)
+    args = (remote.canon(LAWN), [remote.canon(TREE)], cfg, None, None, (), (), (None,))
+    bodies = ((remote.canon(LAWN), remote.canon(PlannerConfig(**dict(BODY, robot_width=0.3)).body_outline)),)
+    plain, form = remote.request_json(args), remote.request_json(args, (), (), bodies)
+    assert 'bodies' not in plain and remote.request_json(args, (), (), ()) == plain
+    assert remote.plan_key('c', form) != remote.plan_key('c', plain)
+    sent = json.loads(json.dumps(form))
+    assert remote.bodies_from(sent) == bodies and remote.bodies_from(json.loads(json.dumps(plain))) == ()
+    for bad in ([[LAWN]], [[LAWN, 'x']], 'x', [[LAWN, [[0, 'a']]]]):
+        with pytest.raises(RemoteError):
+            remote.bodies_from(dict(sent, bodies=bad))
+
+
 def test_the_reader_is_strict(monkeypatch):
     good = remote.plan_json(planned('radius0'), args_of('radius0')[2])
     for text in (b'{"a": NaN}', b'{"a": Infinity}', b'{"a": 1e999}', b'[' * 100 + b']' * 100, b'{"a": 1',

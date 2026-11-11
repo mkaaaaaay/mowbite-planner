@@ -38,7 +38,7 @@ from std_srvs.srv import Trigger  # noqa: E402
 import mowbite_planner  # noqa: E402
 from mowbite_planner import core as core_module  # noqa: E402
 from mowbite_planner import node as node_module  # noqa: E402
-from mowbite_planner.config import COVERAGE_CODES, NothingLeft, PlanningError  # noqa: E402
+from mowbite_planner.config import COVERAGE_CODES, NothingLeft, PlannerConfig, PlanningError  # noqa: E402
 from mowbite_planner.mathutil import angle_diff, quaternion_to_yaw  # noqa: E402
 from mowbite_planner.node import MowbitePlannerNode, float32_warnings, pairs, parse_polygon  # noqa: E402
 from stubplan import Spy  # noqa: E402
@@ -751,6 +751,30 @@ def test_plan_coverage_code_with_the_map(make, planned, monkeypatch):
     monkeypatch.setattr(core_module, 'plan_coverage', planned)
     res = plan_area(node, perimeter_passes=3)
     assert res.success and res.code == ''
+
+
+@fake_only
+def test_plan_coverage_with_the_recorded_bodies(make, planned):
+    """~/plan_coverage of an area of the map, and without it (use_map off, the map there): each ring the map has with
+    a recorded_body is planned with that body (bodies, by its outline), told where the body planning is larger; none:
+    no bodies (the plan's key as before)."""
+    node = make(Robot)
+    small = {'robot_width': 0.3, 'robot_front': 0.3, 'robot_rear': 0.1, 'robot_outline': []}
+    data = the_map(recorded_body=small)
+    data['areas'][1]['properties']['recorded_body'] = small
+    send_map(node, data)
+    assert rpc(node, 'planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14})[1] is None
+    corners = PlannerConfig(robot_width=0.3, robot_front=0.3, robot_rear=0.1).body_outline
+    res = plan_area(node)
+    assert res.success and sorted(r[:4] for r, _ in planned.calls[-1][1]['bodies']) == [
+        tuple(MAP_GARDEN), tuple(MAP_BED)] and all(c == corners for _, c in planned.calls[-1][1]['bodies'])
+    assert 'areas a, b: recorded with a smaller body than this one' in res.message
+    node.values = lambda overrides=(): dict(MowbitePlannerNode.values(node, overrides), use_map=False)
+    res = plan_area(node)
+    assert res.success and len(planned.calls[-1][1]['bodies']) == 2  # (the node's parameters there: no body)
+    send_map(node, the_map())
+    res = plan_area(node)
+    assert res.success and 'bodies' not in planned.calls[-1][1] and 'recorded with' not in res.message
 
 
 @fake_only

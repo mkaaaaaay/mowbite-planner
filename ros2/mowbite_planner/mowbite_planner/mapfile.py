@@ -8,14 +8,20 @@ and a "planner" object with any MowBite Planner setting), then whatever a reques
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from .geometry import clean_polygon
+from shapely.geometry import Polygon
+
+from .geometry import QUAD_SEGS, clean_polygon
 from .config import MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
 # a mowing area lies in another (is nested) with this share of it in there at least
 NESTED_SHARE = 0.9
+# what the planner reads of an area's properties that the robot or the app writes for it (contract.json)
+MAP_FIELDS = ('recorded_body',)
+# m, a body that sticks out of the one an area was recorded with by more than this is larger (body_hints, Master 10.11.)
+LARGER = 0.02
 
 
 @dataclass
@@ -144,6 +150,96 @@ def margins_for(data: Optional[Mapping[str, Any]], outlines: Any, tolerance: flo
         pts = _outline(outline, tolerance) if own else None
         out.append(next((m for a, m in own if _same(a, pts, tolerance)), None) if pts else None)
     return out
+
+
+def recorded_body(area: Mapping[str, Any]) -> Optional[Tuple[XY, ...]]:
+    """The corners of the body the area was recorded with (its properties' recorded_body: robot_width, robot_front,
+    robot_rear, robot_outline [] the rectangle, see PlannerConfig.body_outline), None where it has none. ValueError
+    where it's not one."""
+    got = _props(area).get('recorded_body')
+    if got is None:
+        return None
+    if not isinstance(got, Mapping):
+        raise ValueError('recorded_body is no object')
+    outline = got.get('robot_outline')
+    if outline is not None and not isinstance(outline, (list, tuple)):
+        raise ValueError(f'recorded_body: robot_outline must be [[x, y], ...], got {outline!r}')
+    if outline:
+        body = {'robot_outline': tuple(tuple(p) if isinstance(p, (list, tuple)) else p for p in outline)}
+    else:
+        body = {n: _number(got.get(n)) for n in ('robot_width', 'robot_front', 'robot_rear')}
+        if None in body.values():
+            raise ValueError('recorded_body: robot_width, robot_front and robot_rear must be numbers')
+    try:
+        cfg = PlannerConfig(**body)
+        cfg.validate()
+        return cfg.body_outline
+    except (PlanningError, TypeError, ValueError) as e:
+        raise ValueError(f'recorded_body: {e}') from None
+
+
+def bodies_for(data: Optional[Mapping[str, Any]], outlines: Any,
+               tolerance: float = 1e-3) -> Tuple[Tuple[Any, Tuple[XY, ...]], ...]:
+    """((outline, corners), ...): of these outlines (as OpenMower sends them to its planner, float32) those of an area
+    of the map that was recorded with a body (recorded_body), the corners of that body (plan_coverage's bodies). One
+    that's unreadable counts as none (body_hints tells of it)."""
+    own = []
+    for a in _areas(data):
+        try:
+            corners = recorded_body(a)
+        except ValueError:
+            continue
+        if corners is not None:
+            own.append((a, corners))
+    out = []
+    for outline in outlines if own else ():
+        pts = _outline(outline, tolerance)
+        corners = next((c for a, c in own if _same(a, pts, tolerance)), None) if pts else None
+        if corners is not None:
+            out.append((outline, corners))
+    return tuple(out)
+
+
+def body_hints(data: Optional[Mapping[str, Any]], outlines: Any, corners: Optional[Sequence[XY]],
+               missing: bool = False, tolerance: float = 1e-3) -> Dict[str, str]:
+    """{area id: why} of the map's areas with one of these outlines (a plan's) where the body planning (corners, None:
+    none checked) gets a hint: larger (its outline not in the one recorded with grown by LARGER), unreadable
+    (recorded_body no body), missing (none recorded, only where missing: MowBite OS)."""
+    if corners is None:
+        return {}
+    body = Polygon(corners)
+    shapes = [pts for pts in (_outline(o, tolerance) for o in outlines) if pts]
+    out = {}
+    for a in _areas(data):
+        if not any(_same(a, pts, tolerance) for pts in shapes):
+            continue
+        try:
+            recorded = recorded_body(a)
+        except ValueError:
+            out[str(a.get('id'))] = 'unreadable'
+            continue
+        if recorded is None:
+            if missing:
+                out[str(a.get('id'))] = 'missing'
+        elif not body.within(Polygon(recorded).buffer(LARGER, QUAD_SEGS)):
+            out[str(a.get('id'))] = 'larger'
+    return out
+
+
+def body_warnings(hints: Mapping[str, str]) -> List[str]:
+    """A plan's warnings of body_hints' larger and unreadable."""
+    out = []
+    for why, text in (('larger', 'recorded with a smaller body than this one, record again for the exact edge'),
+                      ('unreadable', 'recorded_body unreadable, planned with this body')):
+        ids = sorted(i for i, w in hints.items() if w == why)
+        if ids:
+            out.append(f'{"area" if len(ids) == 1 else "areas"} {", ".join(ids)}: {text}')
+    return out
+
+
+def body_told(data: Optional[Mapping[str, Any]], outlines: Any, cfg: Optional[PlannerConfig]) -> List[str]:
+    """body_warnings of a plan of these outlines with cfg (its config)."""
+    return body_warnings(body_hints(data, outlines, cfg.body_outline if cfg is not None and cfg.body else None))
 
 
 def openmower_settings(params: Optional[Mapping[str, Any]], mower_width: float) -> Dict[str, Any]:

@@ -1875,6 +1875,27 @@ def test_body_reaches_over_into_navigation_areas(planner):
     assert not space.contains(Spot(-0.5, 7.5))
 
 
+def test_recorded_bodies(planner, stub_planner):
+    """mower_logic's plan_path: each ring the map has with a recorded_body (by its outline, as it sends them: float32)
+    is planned with that body, the others with this one; planner.plan says where this body is larger (body_hints)."""
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14})
+    small = {'robot_width': 0.3, 'robot_front': 0.3, 'robot_rear': 0.1, 'robot_outline': []}
+    data = the_map(recorded_body=small)
+    data['areas'][1]['properties']['recorded_body'] = small
+    send_map(data)
+    corners = core.PlannerConfig(robot_width=0.3, robot_front=0.3, robot_rear=0.1).body_outline
+    planner.handle(request(outline=GARDEN, holes=[BED]))
+    bodies = stub_planner.calls[-1][1]['bodies']
+    assert sorted(r[:4] for r, _ in bodies) == [tuple(GARDEN), tuple(BED)] and {c for _, c in bodies} == {corners}
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and plan['body_hints'] == {'a': 'larger', 'bed': 'larger'}
+    send_map(the_map())
+    planner.handle(request(outline=GARDEN, holes=[BED], angle=0.2))
+    assert 'bodies' not in stub_planner.calls[-1][1]
+    plan, error = rpc('planner.plan', {'area_id': 'a'})
+    assert error is None and 'body_hints' not in plan
+
+
 def test_drive(planner, stub_planner):
     """drive (slope, reverse) for all areas (planner.settings.set) and an area's own (beats it, null: as for all):
     planned so only with OpenMower's FTC backing up (back_up_with_plan true), the body set and planner mowbite, else

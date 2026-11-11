@@ -12,6 +12,9 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     MATCH again the areas are planned ahead. planner.area.set writes the map with map/replace, expected_sha256 the
     digest of the map/json text it changed, and waits for the map/json that follows; mowbite_map's no comes back with
     its code (-32001: the map changed meanwhile, nothing written).
+  - an area's recorded_body (the body it was recorded with, see mowbite_planner's mapfile.recorded_body): the plans and
+    the ways (~/plan_transit, arrives) take where the body was while recording from that one, a ring of a request
+    found in the map by its outline. planner.plan's body_hints: missing for the areas recorded without one too.
   - mowbite_logic's events (STATE, JOB_COMPLETE, JOB_RESET) from bridge/publish (events/json): angle_increment,
     perimeter_direction random, finished_mows, the finished mow's planner.drive and timing. The planning's progress
     (mowbite/planner/progress) out on bridge/publish, as api/planner.schema.json says (the planner's part of MowBite OS'
@@ -92,6 +95,7 @@ from mowbite_planner import node as base
 from mowbite_planner.config import INTERNAL, RETIRED, CoveragePlan, PlannerConfig, PlanningError
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import polygons
+from mowbite_planner.mapfile import bodies_for
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
@@ -445,6 +449,9 @@ class OsNode(base.MowbitePlannerNode):
         self.core.logerr('MowBite Planner: %s', message)
         raise PlanningError(message, word='BODY_OUT')
 
+    def hints_missing(self) -> bool:
+        return True
+
     def drive_ignored(self) -> str:
         return 'MowBite OS: drives forwards only for now (M8)'
 
@@ -454,7 +461,7 @@ class OsNode(base.MowbitePlannerNode):
     # how it gets to a plan's sections: ~/plan_transit
 
     def arrives(self, boundary, obstacles, cfg: PlannerConfig, drivable, keep_out, reach_over=(), unmowed=(),
-                margins=()):
+                margins=(), bodies=()):
         """Whether ~/plan_transit gets to a pose facing its heading (yaw None: there facing any way, the way out of
         where a section ends) as mowbite_logic asks for it (masterplan 3.4): through every active mowing and navigation
         area of the map (the area, drivable, reach_over, unmowed) but the obstacles and the areas to keep out of, the
@@ -463,7 +470,8 @@ class OsNode(base.MowbitePlannerNode):
         the centre has on a way parts the two (nothing planned then); the first section's (came_from None) from
         ARRIVE_FROM m behind, beside or ahead of it (where the body fits, the closest place to there), from nearer where
         the lawn is too small for those. A pose none of them gets to isn't got to: no start it can't get to (the Tron's
-        case of 30.10.). None without the body: nothing to check."""
+        case of 30.10.). bodies: the plan's, the ways' room goes by them too. None without the body: nothing to
+        check."""
         if not cfg.body:
             return None
         areas = [list(boundary)] + [list(d) for d in list(drivable) + list(reach_over) + list(unmowed)]
@@ -479,7 +487,8 @@ class OsNode(base.MowbitePlannerNode):
             if not body:
                 over = list(reach_over) + list(unmowed)
                 margin_of = margins_of(boundary, obstacles, drivable, keep_out, over, margins, cfg)
-                got, _ = build_space(boundary, obstacles, drivable, keep_out, over, margin_of, cfg, False, unmowed)
+                got, _ = build_space(boundary, obstacles, drivable, keep_out, over, margin_of, cfg, False, unmowed,
+                                     bodies)
                 body.append(Footprint(got.body_space, cfg.body_outline, cfg.spin_margin))
             end = t.poses[-1]
             k = next(i for i, q in enumerate(t.poses) if math.hypot(q.x - end.x, q.y - end.y) <= t.goal_outside + 1e-6)
@@ -491,13 +500,14 @@ class OsNode(base.MowbitePlannerNode):
             ways[0] += 1
             goal = (p.x, p.y) if p.yaw is None else (p.x, p.y, p.yaw)
             try:
-                return fits(plan_transit(start, goal, areas, away, cfg, max_outside=max_outside))
+                return fits(plan_transit(start, goal, areas, away, cfg, max_outside=max_outside,
+                                         **({'bodies': bodies} if bodies else {})))
             except PlanningError:
                 return False
 
         def part(q: Pose2D) -> set:
             if not parts:
-                parts.extend(polygons(centre_space(areas, away, cfg)[0]))
+                parts.extend(polygons(centre_space(areas, away, cfg, bodies)[0]))
             point = Point(q.x, q.y)
             return {i for i, a in enumerate(parts) if a.distance(point) <= ARRIVE_OUTSIDE + 1e-9}
 
@@ -508,7 +518,7 @@ class OsNode(base.MowbitePlannerNode):
                     return False
                 return way((came_from.x, came_from.y, came_from.yaw), p, ARRIVE_OUTSIDE)
             if not space:
-                space.append(centre_space(areas, away, cfg)[0])
+                space.append(centre_space(areas, away, cfg, bodies)[0])
             froms: List[tuple] = []
             far = ARRIVE_FROM
             while not froms and far >= ARRIVE_NEAREST - 1e-9:
@@ -561,11 +571,13 @@ class OsNode(base.MowbitePlannerNode):
             self.get_logger().warning(w)
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         limit = self.search_limit()
+        # (the body each one was recorded with, from the map by its outline)
+        bodies = bodies_for(self.core.current_map() if self.core is not None else None, drivable + obstacles)
         try:
             # (the limit looked at where the search checks the body, progress.check: it ends there with Stopped)
             with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
                 transit = plan_transit(start, goal, drivable, obstacles, cfg, float(request.goal_straight_length),
-                                       max_outside)
+                                       max_outside, **({'bodies': bodies} if bodies else {}))
         except Stopped:
             return no('SEARCH_LIMIT', base.with_warnings(
                 f'planning the transit failed: no way found in {limit:g} s (transit_search_limit)', warnings))

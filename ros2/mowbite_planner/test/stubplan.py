@@ -30,7 +30,7 @@ STATS_KEYS = ('sections', 'path_length', 'perimeter_length', 'lane_length', 'tur
 
 def stub_plan_coverage(boundary, obstacles=(), config: Optional[PlannerConfig] = None, start=None, end=None,
                        drivable=(), keep_out=(), margins=(), mowed=None, reach_over=(), unmowed=(),
-                       arrives=None, progress=None) -> CoveragePlan:
+                       arrives=None, progress=None, bodies=()) -> CoveragePlan:
     cfg = config or PlannerConfig()
     cfg.validate()
     if progress is not None:  # (like plan_coverage: from angles to done, here in two steps)

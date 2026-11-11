@@ -54,7 +54,7 @@ def _planned(args: tuple, kw: Dict[str, Any]) -> Tuple[CoveragePlan, Any]:
         return _plan_coverage(*args, **kw), kw.get('probe')
     boundary, obstacles, _, start, end, drivable, keep_out, margins = args
     area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, kw.get('reach_over', ()),
-                 kw.get('unmowed', ()))
+                 kw.get('unmowed', ()), kw.get('bodies', ()))
     return _final(area, _completed(area, _plan_coverage(*args, **kw))), kw.get('probe')
 
 
@@ -76,7 +76,7 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
                   margins: Sequence[Optional[float]] = (), mowed=None,
                   reach_over: Sequence[Sequence[Sequence[float]]] = (),
                   unmowed: Sequence[Sequence[Sequence[float]]] = (), arrives: Optional[Arrives] = None,
-                  progress: Optional[Report] = None) -> CoveragePlan:
+                  progress: Optional[Report] = None, bodies=()) -> CoveragePlan:
     """Plans the coverage path of one area, see _plan_coverage. With lane_spacing_mode 'auto' the best of
     SPACING_CANDIDATES lane spacings (see PlannerConfig), the same input always picks the same. stats['chosen']: the
     lane spacing and loops it was planned with. mowed (a geometry: where the blade went already, see
@@ -87,31 +87,32 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     the section before; None for the first): every section starts where it does, see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
     see backing.py; without the body set forwards, said in the warnings. back_out (drive forward): out of a dead end
     where a section ends backing up, see starts.py (without arrives backed_out). Stopped from outside
-    (progress.stoppable): Stopped at its next step, the pool's processes at its plans ended."""
+    (progress.stoppable): Stopped at its next step, the pool's processes at its plans ended. bodies ((ring, corners),
+    ...): the body a ring was recorded with where it's another, see space._body_space."""
     cfg = config or PlannerConfig()
     cfg.validate()
     if cfg.back_out and cfg.drive == 'forward':
         cfg, told = backing.backed(cfg)
         plan = _coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, mowed, reach_over, unmowed,
-                         arrives, progress)
+                         arrives, progress, bodies)
         return dataclasses.replace(plan, warnings=plan.warnings + told) if told else plan
     if cfg.drive != 'forward':
         why = backing.unavailable(cfg)
         if why:
             plan = plan_coverage(boundary, obstacles, cfg.with_overrides({'drive': 'forward'}), start, end, drivable,
-                                 keep_out, margins, mowed, reach_over, unmowed, arrives, progress)
+                                 keep_out, margins, mowed, reach_over, unmowed, arrives, progress, bodies)
             return dataclasses.replace(plan, warnings=plan.warnings + ['drive %s ignored: %s' % (cfg.drive, why)])
         return backing.planned(lambda c: _coverage(boundary, obstacles, c, start, end, drivable, keep_out, margins,
-                                                   mowed, reach_over, unmowed, arrives, progress), cfg, mowed)
+                                                   mowed, reach_over, unmowed, arrives, progress, bodies), cfg, mowed)
     return _coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, mowed, reach_over, unmowed,
-                     arrives, progress)
+                     arrives, progress, bodies)
 
 
 def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, keep_out, margins, mowed, reach_over,
-              unmowed, arrives: Optional[Arrives], progress: Optional[Report]) -> CoveragePlan:
+              unmowed, arrives: Optional[Arrives], progress: Optional[Report], bodies=()) -> CoveragePlan:
     """plan_coverage with cfg checked, every pose forwards (drive reverse: the outermost loop as recorded goes the
     other way round, see _new_route)."""
-    area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed)
+    area = _Area(boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed, bodies)
     auto = mowed is None and cfg.lane_spacing_mode == 'auto'
     area.progress, area.stage = Progress(progress, 1 if mowed is not None else SPACING_CANDIDATES + 3 if auto else 3), \
         'spacing' if auto else 'route'
@@ -131,10 +132,11 @@ def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, kee
 class _Area:
     """One area's input, planned with a config: in a process of the pool where there's one."""
 
-    def __init__(self, boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed=()) -> None:
+    def __init__(self, boundary, obstacles, start, end, drivable, keep_out, margins, reach_over, unmowed=(),
+                 bodies=()) -> None:
         self.boundary, self.obstacles, self.start, self.end = boundary, obstacles, start, end
         self.drivable, self.keep_out, self.margins, self.reach_over = drivable, keep_out, margins, reach_over
-        self.unmowed = unmowed
+        self.unmowed, self.bodies = unmowed, bodies
         self._lawn = None
         self.progress, self.stage = Progress(None, 1), 'route'  # (plan_coverage's, a plan planned through a step)
 
@@ -147,11 +149,12 @@ class _Area:
 
     def one(self, c: PlannerConfig, **more: Any) -> Any:
         return _plan_coverage(self.boundary, self.obstacles, c, self.start, self.end, self.drivable, self.keep_out,
-                              self.margins, reach_over=self.reach_over, unmowed=self.unmowed, **more)
+                              self.margins, reach_over=self.reach_over, unmowed=self.unmowed, bodies=self.bodies,
+                              **more)
 
     def later(self, c: PlannerConfig, **more: Any) -> Tuple['Future', tuple, Dict[str, Any]]:
         args = (self.boundary, self.obstacles, c, self.start, self.end, self.drivable, self.keep_out, self.margins)
-        kw = dict(reach_over=self.reach_over, unmowed=self.unmowed, **more)
+        kw = dict(reach_over=self.reach_over, unmowed=self.unmowed, bodies=self.bodies, **more)
         return _later(args, kw), args, kw
 
     def got(self, planning: Tuple['Future', tuple, Dict[str, Any]], probe: Any) -> CoveragePlan:
@@ -380,7 +383,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
                    keep_out: Sequence[Sequence[Sequence[float]]] = (), margins: Sequence[Optional[float]] = (),
                    probe: Any = False, mowed=None, edge_slots: bool = False,
                    reach_over: Sequence[Sequence[Sequence[float]]] = (),
-                   unmowed: Sequence[Sequence[Sequence[float]]] = ()) -> CoveragePlan:
+                   unmowed: Sequence[Sequence[Sequence[float]]] = (), bodies=()) -> CoveragePlan:
     """Plans the coverage path of one area.
 
     boundary: [(x, y), ...] of the outline, obstacles: a list of those for no-go zones, all in metres in one flat frame
@@ -396,8 +399,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     none given: the setting). mowed (a geometry, where the blade went on a mow): no loops and lanes, only moves over
     what that left (complete.leftovers), the one nearest start first; stats['leftovers'] says how much. edge_slots: the
     slots by the edge too narrow for the body closed in free (see _edge_gaps; plan_coverage leaves that to the loops'
-    levels). Raises PlanningError when there's nothing to plan, or a setting or point is out of range (every coordinate
-    within MAX_COORDINATE of the origin).
+    levels). bodies: see space._body_space. Raises PlanningError when there's nothing to plan, or a setting or point
+    is out of range (every coordinate within MAX_COORDINATE of the origin).
     """
     timer = _Timer(time.perf_counter())
     cfg = config or PlannerConfig()
@@ -407,7 +410,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
     _check_coordinates('start or end', [p for p in (start, end) if p is not None])
     space, footprint = build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of, cfg, edge_slots,
-                                   unmowed)
+                                   unmowed, bodies)
     if cfg.waypoint_spacing > 0:
         # every square metre takes about 1 / lane spacing metres of path
         estimate = space.free.area / cfg.lane_spacing / cfg.waypoint_spacing

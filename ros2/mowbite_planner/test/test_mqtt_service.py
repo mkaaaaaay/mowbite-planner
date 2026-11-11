@@ -229,6 +229,37 @@ def test_plan_with_the_margins_of_the_map(planned):
         assert planned[-1][7] == margins
 
 
+def test_plan_with_the_bodies_of_the_map(monkeypatch):
+    """The body each ring of the map was recorded with goes to the planner by its outline (none: no bodies, the
+    request's own outline none either); body_hints and the warnings tell of a larger planning body and an unreadable
+    recorded_body, missing only where the robot asks for it (MowBite OS)."""
+    got = []
+    monkeypatch.setattr(mqtt_service, 'plan_coverage', lambda *args, **kw: got.append(kw) or stub_plan_coverage(
+        *args, **kw))
+    s = PlannerService(PlannerConfig(robot_width=0.4, robot_front=0.43, robot_rear=0.14))
+    narrow = {'robot_width': 0.3, 'robot_front': 0.43, 'robot_rear': 0.14, 'robot_outline': [], 'by': 'os-1'}
+    front, bed = MAP['areas'][0], MAP['areas'][1]
+    s.on_map(json.dumps(dict(MAP, areas=[dict(front, properties=dict(front['properties'], recorded_body=narrow)),
+                                         dict(bed, properties=dict(bed['properties'], recorded_body='?')),
+                                         *MAP['areas'][2:]])))
+    res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'front'})
+    small = PlannerConfig(robot_width=0.3, robot_front=0.43, robot_rear=0.14).body_outline
+    assert got[-1]['bodies'] == (([(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)], small),)
+    assert res['body_hints'] == {'front': 'larger', 'bed': 'unreadable'}
+    assert res['warnings'][-2:] == [
+        'area front: recorded with a smaller body than this one, record again for the exact edge',
+        'area bed: recorded_body unreadable, planned with this body']
+    s.missing = True
+    assert result(s, 'ext.mowbite_planner.plan', {'area_id': 'front'})['body_hints'] == {
+        'front': 'larger', 'bed': 'unreadable', 'path': 'missing', 'back': 'missing'}
+    res = result(s, 'ext.mowbite_planner.plan', {'outline': rect(0, 0, 9, 6)})
+    assert 'bodies' not in got[-1] and 'body_hints' not in res
+    s.on_map(json.dumps(MAP))
+    s.missing = False
+    res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'front'})
+    assert 'bodies' not in got[-1] and 'body_hints' not in res
+
+
 def test_plan_like_the_mower(planned):
     """The preview plans what the ROS 1 node gives mower_logic: parts only reachable over a navigation area
     get paths of their own, mow_around areas are left out, an absolute mow_angle_offset is the angle."""

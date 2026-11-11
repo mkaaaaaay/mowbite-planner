@@ -122,13 +122,16 @@ def loads(text: bytes) -> Any:
 
 # -- the request ---------------------------------------------------------------------------------------------------
 
-def request_json(args: tuple, reach_over: tuple = (), unmowed: tuple = ()) -> Dict[str, Any]:
+def request_json(args: tuple, reach_over: tuple = (), unmowed: tuple = (), bodies: tuple = ()) -> Dict[str, Any]:
     """The request's form: plan_coverage's arguments (args its first eight, canon'd, the obstacles in one order with
-    their margins, as the ROS 1 node's kept_plan has them)."""
+    their margins, as the ROS 1 node's kept_plan has them; bodies only where there are)."""
     boundary, obstacles, cfg, start, end, drivable, keep_out, margins = args
-    return {'boundary': boundary, 'obstacles': obstacles, 'start': start, 'end': end, 'drivable': drivable,
+    form = {'boundary': boundary, 'obstacles': obstacles, 'start': start, 'end': end, 'drivable': drivable,
             'keep_out': keep_out, 'margins': margins, 'reach_over': reach_over, 'unmowed': unmowed,
             'config': {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg)}}
+    if bodies:
+        form['bodies'] = bodies
+    return form
 
 
 def request_from(form: Any) -> Tuple[tuple, tuple, tuple]:
@@ -141,6 +144,14 @@ def request_from(form: Any) -> Tuple[tuple, tuple, tuple]:
     args = (rings['boundary'], rings['obstacles'], _config(form.get('config')), ends['start'], ends['end'],
             rings['drivable'], rings['keep_out'], margins)
     return args, rings['reach_over'], rings['unmowed']
+
+
+def bodies_from(form: Any) -> tuple:
+    """plan_coverage's bodies of a request's form ((ring, corners), ...). RemoteError where they aren't."""
+    pairs = _list(_object(form, 'the request').get('bodies') or [], 'bodies')
+    if not all(isinstance(p, list) and len(p) == 2 for p in pairs):
+        raise RemoteError('bodies: each [ring, corners]')
+    return tuple((canon(_nested(r, 'bodies', 2)), canon(_nested(c, 'bodies', 2))) for r, c in pairs)
 
 
 def _config(values: Any) -> PlannerConfig:
@@ -210,13 +221,13 @@ def _asked(cfg: PlannerConfig) -> Tuple[PlannerConfig, Optional[PlannerConfig], 
 
 
 def plan_geometry(boundary, obstacles, cfg: PlannerConfig, drivable=(), keep_out=(), margins=(), reach_over=(),
-                  unmowed=(), cells=()) -> Dict[str, Any]:
+                  unmowed=(), cells=(), bodies=()) -> Dict[str, Any]:
     """The geometry planner._plan_coverage plans on with cfg (planned_with's second) as a CoveragePlan's fields, for a
     plan whose poses come from elsewhere; cells: the plan's."""
     reach_over = list(reach_over) + list(unmowed)
     margin_of = margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins, cfg)
     space, footprint = build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of, cfg, False,
-                                   unmowed)
+                                   unmowed, bodies)
     rings_of = ring_levels(space, cfg, None, footprint)
     return dict(area=space.area, free_space=space.free, robot_space=space.drive_space,
                 lane_region=rings_of.lane_region, remaining=rings_of.remaining, transit_space=space.transit_space,
@@ -232,7 +243,7 @@ def _spacing_of(plan: CoveragePlan, cfg: PlannerConfig) -> Optional[float]:
     raise PlanningError('the plan has a config planned_with doesn\'t give')
 
 
-def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = ()) -> CoveragePlan:
+def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = (), bodies: tuple = ()) -> CoveragePlan:
     """The plan of its form for the request args (as plan_key takes them), its config and geometry worked out here.
     RemoteError where it isn't one. Not checked yet: see refused."""
     form = _object(form, 'the plan')
@@ -255,7 +266,7 @@ def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = (
                 cells=cells, origins=_object(form.get('origins'), 'origins'))
     boundary, obstacles, _, _, _, drivable, keep_out, margins = args
     return CoveragePlan(lane_spacing=used.lane_spacing, config=own, **sent, **plan_geometry(
-        boundary, obstacles, used, drivable, keep_out, margins, reach_over, unmowed, cells))
+        boundary, obstacles, used, drivable, keep_out, margins, reach_over, unmowed, cells, bodies))
 
 
 def refused(plan: CoveragePlan) -> str:

@@ -654,15 +654,19 @@ class PlannerCore:
     def plan_map(self, data):
         return data
 
-    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=()):
+    def arrives(self, boundary, obstacles, cfg, drivable, keep_out, reach_over=(), unmowed=(), margins=(), bodies=()):
         """For a plan of these (plan_coverage's), arrives(pose, came_from): whether the robot gets to the pose facing its
         heading from came_from (planner.starts), None: it drives what it's given."""
         return None
 
+    def hints_missing(self):
+        """Whether planner.plan's body_hints tells of the areas recorded without a body (MowBite OS)."""
+        return False
+
     def classic_plan(self, boundary, obstacles, cfg, *rest, **more):
         raise PlanningError('no slic3r planner here')
 
-    def remote_plan(self, key, form, args, reach_over, unmowed, area_id):
+    def remote_plan(self, key, form, args, reach_over, unmowed, area_id, bodies=()):
         return None
 
     def remote_state(self):
@@ -1122,6 +1126,7 @@ class PlannerCore:
                 lambda *args, **kw: keep.append(self.plan_coverage(*args, **kw)) or keep[-1])
             service.own = current.own
         service.map = data
+        service.missing = self.hints_missing()
         service.params = self.param('/mower_logic', {})
         self.local.kept, self.local.on = False, 'mower'
         got = []
@@ -1497,12 +1502,12 @@ class PlannerCore:
         return False
 
     def plan_coverage(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-                      reach_over=(), unmowed=()):
+                      reach_over=(), unmowed=(), bodies=()):
         """plan_coverage(), the plans last asked for kept, in memory (CACHED_PLANS, CACHED_MB) and in plans_dir: the
         plan only depends on what it's given and the planner's code, the same again (to the last bit) is the same
         plan."""
         return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over,
-                              unmowed)[0]
+                              unmowed, bodies=bodies)[0]
 
     def driven(self, cfg):
         """(cfg, '') or, where drive slope or reverse or back_out is ignored here (drive_ignored, back_out_ignored),
@@ -1528,17 +1533,18 @@ class PlannerCore:
         cfg = self.bound(cfg)
         cfg, why = self.driven(cfg)
         arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out, kw.get('reach_over', ()),
-                               kw.get('unmowed', ()), margins)
+                               kw.get('unmowed', ()), margins, kw.get('bodies', ()))
         return self.told(self.checked(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins,
                                                     *args, arrives=arrives, **kw)), why)
 
     def kept_plan(self, boundary, obstacles, cfg, start=None, end=None, drivable=(), keep_out=(), margins=(),
-                  reach_over=(), unmowed=(), from_start=False):
+                  reach_over=(), unmowed=(), from_start=False, bodies=()):
         """(plan, whether it was kept from before), see plan_coverage; with remote_planning planned on the house
         computer where it can (remote_plan). The robot's bounds (bound). drive slope or reverse forwards where it's
         ignored (driven), said in its warnings. With the adapter's arrives every section starts where the robot gets to
-        it (its key another), from_start: the first from start (x, y, yaw; arrives.start). self.local: kept, the plan's
-        key and where it was planned (on: mower or house)."""
+        it (its key another), from_start: the first from start (x, y, yaw; arrives.start). bodies: plan_coverage's, the
+        body a ring was recorded with. self.local: kept, the plan's key and where it was planned (on: mower or
+        house)."""
         cfg = self.bound(cfg)
         cfg, why = self.driven(cfg)
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
@@ -1549,9 +1555,9 @@ class PlannerCore:
         obstacles = [o for o, _ in pairs]
         margins = tuple(m for _, m in pairs) + canon(margins[len(obstacles):])
         args = (canon(boundary), obstacles, cfg, canon(start), canon(end), canon(drivable), canon(keep_out), margins)
-        reach_over, unmowed = canon(reach_over), canon(unmowed)
-        arrives = self.arrives(args[0], args[1], cfg, args[5], args[6], reach_over, unmowed, args[7])
-        form = request_json(args, reach_over, unmowed)
+        reach_over, unmowed, bodies = canon(reach_over), canon(unmowed), tuple(sorted(canon(bodies)))
+        arrives = self.arrives(args[0], args[1], cfg, args[5], args[6], reach_over, unmowed, args[7], bodies)
+        form = request_json(args, reach_over, unmowed, bodies)
         if arrives is not None:
             form = dict(form, arrives=getattr(arrives, 'key', True))
             if from_start and args[3] is not None and len(args[3]) >= 3:
@@ -1582,11 +1588,11 @@ class PlannerCore:
                     area_id = self.area_of(boundary)
                     self.progress.begin(area_id, key)
                     try:
-                        plan = self.remote_plan(key, form, args, reach_over, unmowed, area_id) if arrives is None \
-                            else None
+                        plan = self.remote_plan(key, form, args, reach_over, unmowed, area_id, bodies) \
+                            if arrives is None else None
                         got = (plan, 'house') if plan is not None else (plan_coverage(
                             *args, reach_over=reach_over, unmowed=unmowed, arrives=arrives,
-                            progress=self.progress.step), 'mower')
+                            progress=self.progress.step, **({'bodies': bodies} if bodies else {})), 'mower')
                         got = (self.checked(got[0]), got[1])
                     except Stopped:
                         self.progress.end(stopped=True)

@@ -27,7 +27,8 @@ import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .export import ANSWER_TOO_BIG, to_openmower_json, to_poses_json, to_studio_payload, to_trace_json, too_big
-from .mapfile import AreaJob, _number, area_job, area_settings, margins_for, settings_for
+from .mapfile import (AreaJob, _number, area_job, area_settings, bodies_for, body_hints, body_warnings, margins_for,
+                      settings_for)
 from .config import PlannerConfig, PlanningError
 from .planner import plan_coverage
 from .report import check_plan
@@ -145,6 +146,7 @@ class PlannerService:
         self.params: Optional[Mapping[str, Any]] = None
         self.planner: Optional[Callable[..., Any]] = None  # in place of plan_coverage (the ROS 1 node's, cached)
         self.own: frozenset = frozenset()  # settings of base that beat the mower's parameters (see settings_for)
+        self.missing = False  # body_hints' missing too (MowBite OS)
         self.methods: Dict[str, Callable[[Mapping[str, Any]], Any]] = {
             'ext.mowbite_planner.plan': self.plan, 'ext.planner.plan': self.studio_plan,
             'ext.mowbite_planner.info': self.info}
@@ -176,7 +178,9 @@ class PlannerService:
         """ext.mowbite_planner.plan: {area_id} of the mower's map or {outline, obstacles, nav_areas}, angle,
         outline_count, ... in place of the area's properties (like OpenMower's mowing.plan), settings (any
         planner setting), start, end, poses, report (check_plan), trace (stages and lineage). Planned with the
-        settings the ROS 1 node would use, the margins of the map's obstacles and areas too."""
+        settings the ROS 1 node would use, the margins of the map's obstacles and areas too, the bodies they were
+        recorded with (recorded_body; body_hints: the areas where that's smaller than this one, unreadable, with
+        missing those without one)."""
         props = {k: p[k] for k in AREA_PROPERTIES if k in p}
         area_id, start, end = None, None, None
         data = self.map  # the network thread may replace it meanwhile
@@ -207,9 +211,18 @@ class PlannerService:
         obstacles = job.obstacles + job.nested if cfg.nested_areas else job.obstacles
         # an obstacle's or area's own margin, from the map by its outline (an obstacle the request changed has none)
         margins = margins_for(data, obstacles + job.keep_out)
+        # the body each area was recorded with, by its outline too
+        rings = [job.boundary] + obstacles + job.drivable + job.keep_out + job.navigation + job.unmowed
+        bodies = bodies_for(data, rings)
         plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
-                                               margins, reach_over=job.navigation, unmowed=job.unmowed)
+                                               margins, reach_over=job.navigation, unmowed=job.unmowed,
+                                               **({'bodies': bodies} if bodies else {}))
         result = to_openmower_json(plan, area_id)
+        used = plan.config
+        hints = body_hints(data, rings, used.body_outline if used is not None and used.body else None, self.missing)
+        if hints:
+            result['body_hints'] = hints
+            result['warnings'] = result['warnings'] + body_warnings(hints)
         if p.get('poses'):
             result.update(to_poses_json(plan))
         if p.get('report'):  # what's wrong with it, what's worth knowing, how much is mowed

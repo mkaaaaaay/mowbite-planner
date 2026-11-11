@@ -68,7 +68,7 @@ class Transit:
 
 
 def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-                 cfg: PlannerConfig) -> Tuple[Any, Optional[Footprint]]:
+                 cfg: PlannerConfig, bodies=()) -> Tuple[Any, Optional[Footprint]]:
     """Where the mower's centre may go on a transit (cfg as plan_transit takes it): with the body set where it fits
     sideways driving straight (and its Footprint there, see plan_transit), without it half the mower_width off the
     obstacles (and None). Raises PlanningError where that's nowhere."""
@@ -78,7 +78,7 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
     footprint: Optional[Footprint] = None
     if cfg.body:
         body_space, footprint = _body_space(list(drivable), list(obstacles), [cfg.obstacle_margin] * len(obstacles),
-                                            cfg)
+                                            cfg, bodies=bodies)
         space = polygonal(inset(body_space, footprint.half).intersection(areas))
     else:
         blocked = union(clean_polygon(o) for o in obstacles)
@@ -90,16 +90,16 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
 
 
 def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-          cfg: PlannerConfig) -> Tuple[Any, Optional[Footprint], Dict[tuple, TransitPlanner]]:
+          cfg: PlannerConfig, bodies=()) -> Tuple[Any, Optional[Footprint], Dict[tuple, TransitPlanner]]:
     """centre_space() and the planners made in that space so far ({what it's made with: one}, their graphs as far as
     they got, the ways they kept forgotten), the last request's where this one's areas, obstacles and settings are the
     same (_ROOM)."""
     key = ([[(float(p[0]), float(p[1])) for p in ring] for ring in drivable],
-           [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg)
+           [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg) + ((tuple(bodies),) if bodies else ())
     last = getattr(_ROOM, 'last', None)
     if last is None or last[0] != key:
-        space, footprint = centre_space(drivable, obstacles, cfg)
-        last = _ROOM.last = ((key[0], key[1], dataclasses.replace(cfg)), space, footprint, {})
+        space, footprint = centre_space(drivable, obstacles, cfg, bodies)
+        last = _ROOM.last = ((key[0], key[1], dataclasses.replace(cfg)) + key[3:], space, footprint, {})
     for tp in last[3].values():
         tp.forget()
     return last[1], last[2], last[3]
@@ -134,7 +134,7 @@ def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Seq
 
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
-                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE) -> Transit:
+                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=()) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -148,7 +148,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     already (closer than waypoint_spacing, facing its way; with turn_on_spot whatever way it faces, turning there is
     up to whoever drives it). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets
     to facing its heading, where the body sticks out turning into it there too, says so), or the input is out of
-    range; its word what ~/plan_transit's code says (CODES)."""
+    range; its word what ~/plan_transit's code says (CODES). bodies: the body a ring was recorded with where it's
+    another (space._body_space)."""
     cfg = config or PlannerConfig()
     try:
         heading = _asked(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
@@ -157,7 +158,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         raise
     cfg = _turning(cfg)  # (as in plan_coverage)
     step = cfg.waypoint_spacing
-    space, footprint, planners = _room(drivable, obstacles, cfg)
+    space, footprint, planners = _room(drivable, obstacles, cfg, bodies)
     warnings: List[str] = [] if footprint is not None else [cfg.no_body or '']
 
     def planner(clearance: float, edge: float = 0.0, cost: float = 0.0, off_edge: float = 0.0) -> TransitPlanner:
