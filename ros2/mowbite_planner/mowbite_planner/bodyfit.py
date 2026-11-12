@@ -19,6 +19,7 @@ from .geometry import QUAD_SEGS, subtract, union
 from .maneuvers import CORNER_ANGLE, dubins, join, path_length, same_position, sample_arc, sample_straight
 from .mathutil import Pose2D, angle_diff, normalize_angle
 from .objective import EARLIER_LEFT
+from .sweep import on_recorded
 from .transit import TransitPlanner
 
 
@@ -30,6 +31,8 @@ class BodyRoute(Protocol):
     transit: TransitPlanner  # drives, through the drivable areas too
     area: TransitPlanner  # the mowing area
     field: Any  # headland_turns: the lanes' field, else None
+    recorded_fp: Optional[Footprint]  # recorded_loop: the recorded loop's check, its pieces by name (recorded.py)
+    recorded_loops: Set[str]
     rounded: Set[XY]  # headland_corners 'rounded': the arcs into the field (_round_corners adds them)
     sharp: Set[XY]  # headland_corners 'sharp': the drives along the headland
 
@@ -149,6 +152,12 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     for info in infos:
         on_turn[info.start + 1:info.end + 1] = [info.kind == TURN] * (info.end - info.start)
     fit, turn_room = fp.fit(poses, on_turn), fp.turning.anywhere
+    # (the recorded loop's poses in its own space: it's made to fit that, nothing here changes it)
+    rec = getattr(route, 'recorded_fp', None)
+    mild = on_recorded(infos, route.recorded_loops, n) if rec is not None else [False] * n
+    own = [i for i in range(n) if mild[i]]
+    for i, f in zip(own, rec.fit([poses[i] for i in own]) if own else ()):
+        fit[i] = f
     # where the way turns as a turn does (drive.turning) spin_margin too, but BODY_OUT; on the loops (and the ways
     # between their pieces) only turning on the spot there (mkay 31.10.)
     if fp.turning is not fp:
@@ -157,7 +166,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
             if (info.kind == PERIMETER or info.maneuver == 'ring') and info.maneuver != 'mop_up':
                 ring[info.start:info.end + 1] = [True] * (info.end + 1 - info.start)
         geo = turning(poses).tolist()
-        more = [i for i in range(n) if geo[i] and fit[i] and not on_turn[i] and
+        more = [i for i in range(n) if geo[i] and fit[i] and not on_turn[i] and not mild[i] and
                 (not ring[i] or on_spot(poses, i))]
         tight = [i for i, f in zip(more, fp.turning.fit([poses[i] for i in more])) if not f]
         # (clear where the body fits BODY_OUT less OUT_EPS further in, or doesn't BODY_OUT and OUT_EPS more: out_by,
@@ -188,7 +197,7 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     def fits(prev: Optional[Pose2D], i: int) -> bool:
         p = poses[i]
         if prev is not None and angle_diff(p.yaw, prev.yaw) > SPIN:
-            return fp.fits_turn(p.x, p.y, prev.yaw, p.yaw)
+            return (rec if mild[i] else fp).fits_turn(p.x, p.y, prev.yaw, p.yaw)
         return fit[i]
 
     def spent() -> bool:
@@ -492,8 +501,10 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                                 FIT_FIELD, FIT_AROUND, FIT_IN, FIT_TURNS, FIT_ROUND, ROOM_SIMPLIFY, FIT_ON, FIT_ON_MAX,
                                 route.cfg.turn_radius, route.cfg.min_turn_radius, route.cfg.turn_on_spot,
                                 route.cfg.allowed_turns, route.cfg.headland_corners)).encode())
-    for geom in (fp.space, route.transit.space, route.field):
+    for geom in (fp.space, route.transit.space, route.field) + ((rec.space,) if own else ()):
         hashed.update(b'-' if geom is None else geom.wkb)
+    if own:
+        hashed.update(repr(sorted(route.recorded_loops)).encode())
     if fp.blade is not None:  # (the blade kept off the areas not to mow)
         hashed.update(repr(fp.blade.key).encode())
     key = hashed.hexdigest()
@@ -1079,6 +1090,8 @@ def _turn_at(route: BodyRoute, poses: List[Pose2D],
     is longer than twice TURN_AHEAD, a pose TURN_AHEAD before the point on it, facing the way it came (where the body
     fits so; not where the way in goes the new way already, turned at its start)."""
     first = {info.start for k, info in enumerate(infos) if k == 0 or infos[k - 1].section != info.section}
+    rec = getattr(route, 'recorded_fp', None)  # (on the recorded loop in its own space)
+    mild = on_recorded(infos, route.recorded_loops, len(poses)) if rec is not None else None
     out, at = [], []  # (at: where the poses are put in, by the index of the one after)
     for i, p in enumerate(poses):
         q = poses[i - 1] if i else p
@@ -1087,7 +1100,7 @@ def _turn_at(route: BodyRoute, poses: List[Pose2D],
                 (p.x - q.x) * math.cos(q.yaw) + (p.y - q.y) * math.sin(q.yaw) > 0.0:
             f = TURN_AHEAD / d
             ahead = Pose2D(p.x + f * (q.x - p.x), p.y + f * (q.y - p.y), q.yaw)
-            if route.body([ahead]):
+            if (rec.poses_fit if mild is not None and mild[i] else route.body)([ahead]):
                 out.append(ahead)
                 at.append(i)
         out.append(p)

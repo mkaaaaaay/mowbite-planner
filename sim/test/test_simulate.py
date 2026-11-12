@@ -17,7 +17,7 @@ from mowbite_planner.export import plan_pieces  # noqa: E402
 from mowbite_planner.mathutil import Pose2D  # noqa: E402
 from golden import golden_plan  # noqa: E402
 from mowbite_sim.simulate import (_FOLLOWING, APPROACH, HISTORY_DIST, PATH, MowerModel, _decimate,  # noqa: E402
-                                  _Ftc, _History, _rdp, evaluate, simulate)
+                                  _Ftc, _History, _rdp, body_places, evaluate, simulate)
 
 
 def rect(x0, y0, x1, y1):
@@ -151,6 +151,19 @@ def test_body_places_where_the_mower_is_off():
     assert ideal['body']['worst'] < 0.01
     assert off['body']['worst'] > ideal['body']['worst'] + 0.01
     assert all(len(place) == 3 for place in off['body']['places'])
+
+
+def test_body_places_on_the_recorded_loop():
+    """Following the recorded loop (recorded_loop) the body is looked at in that loop's space: an ideal mower is out
+    of it only turning on the spot at the outline's corners (FTC drives on before it has turned all the way); in the
+    space of all the rest (the loop not told) it's out all along the loop."""
+    plan = golden_plan('garden-sim-loop')
+    assert plan.recorded_loops and plan.recorded_space is not None
+    res = simulate(plan, MowerModel())
+    places, looks = body_places(plan, res.samples)
+    assert all(min(math.hypot(x - cx, y - cy) for cx, cy in AREA) < 0.7 and m < 0.07 for x, y, m in places)
+    _, all_along = body_places(dataclasses.replace(plan, recorded_loops=()), res.samples)
+    assert all_along > 5 * looks + 100
 
 
 def test_history_like_position_history():

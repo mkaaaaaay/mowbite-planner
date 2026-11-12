@@ -596,6 +596,30 @@ def drive_polyline(points: Sequence[XY], step: float, radius: float = 0.0, fits:
     return out
 
 
+def clear_of_corners(closed: List[XY], i: int, entry: XY, keep: float) -> XY:
+    """Moves a loop's start/end point on segment i away from a corner next to it: the loop starts and ends
+    there, so a corner right at it couldn't be rounded."""
+    n = len(closed) - 1
+    (ax, ay), (bx, by) = closed[i], closed[i + 1]
+    length = math.hypot(bx - ax, by - ay)
+    if keep <= 0.0 or length < 1e-9:
+        return entry
+    t = math.hypot(entry[0] - ax, entry[1] - ay)
+
+    def corner(k: int) -> bool:
+        p, q, r = closed[(k - 1) % n], closed[k % n], closed[(k + 1) % n]
+        turn = math.atan2(r[1] - q[1], r[0] - q[0]) - math.atan2(q[1] - p[1], q[0] - p[0])
+        return abs(normalize_angle(turn)) > CORNER_ANGLE
+
+    if t < keep and corner(i):
+        t = min(keep, 0.5 * length)
+    elif length - t < keep and corner(i + 1):
+        t = max(length - keep, 0.5 * length)
+    else:
+        return entry
+    return ax + (bx - ax) * t / length, ay + (by - ay) * t / length
+
+
 def closest_on_polyline(points: Sequence[XY], q: XY) -> Tuple[int, XY, float]:
     """(index of the segment, the closest point on it, its distance) of q to a polyline."""
     best = (0, (points[0][0], points[0][1]), math.inf)

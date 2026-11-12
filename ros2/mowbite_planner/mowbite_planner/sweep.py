@@ -1,7 +1,7 @@
 """Where the blade mows along poses, and where a plan's body sticks out."""
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import LineString, MultiLineString, Polygon
 
@@ -10,6 +10,7 @@ from .footprint import BLADE_SLACK, SPIN, SPIN_BACK, Blade, Footprint
 from .geometry import union
 from .mathutil import Pose2D, normalize_angle
 from .progress import check
+from .space import loop_footprint
 
 
 # blade's answers kept (the same poses again, to the bit: the same geometry; the safety net and the completion stage
@@ -89,12 +90,31 @@ def _backwards(segments: List[SegmentInfo], n: int) -> List[bool]:
     return out
 
 
+def on_recorded(segments: Sequence, names, n: int) -> List[bool]:
+    """For each of n poses whether it's the recorded loop's (recorded_loop; names: its pieces, CoveragePlan's
+    recorded_loops): of a PERIMETER segment of one of them, its ways on and off too."""
+    out = [False] * n
+    for seg in segments if names else ():
+        if seg.kind == PERIMETER and seg.source in names:
+            out[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
+    return out
+
+
+def recorded_footprint(plan: CoveragePlan) -> Optional[Tuple[Footprint, Tuple[str, ...]]]:
+    """(the body's check on the recorded loop, its pieces by name) as body_out takes it, None where the plan has
+    none."""
+    cfg = plan.config
+    if cfg is None or not cfg.body or plan.recorded_space is None or not plan.recorded_loops:
+        return None
+    return loop_footprint(plan.recorded_space, cfg), tuple(plan.recorded_loops)
+
+
 def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
-             footprint: Footprint) -> List[Dict[str, Any]]:
+             footprint: Footprint, recorded: Optional[Tuple[Footprint, Sequence[str]]] = None) -> List[Dict[str, Any]]:
     """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
     'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
     (footprint.OnTurn). Turning on the spot where it came backing up, the way in is ahead of it (segments driven
-    backwards)."""
+    backwards). recorded (recorded_footprint): the recorded loop's poses in its own space instead."""
     kind_at: Dict[int, str] = {}
     on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
     for seg in segments:
@@ -105,9 +125,17 @@ def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: L
         on_turn[seg.start + 1:seg.end + 1] = [seg.kind == TURN] * (seg.end - seg.start)
     out = []
     backwards = _backwards(segments, len(poses))
+    mild = on_recorded(segments, recorded[1], len(poses)) if recorded is not None else None
     for a, b in zip(section_starts, list(section_starts[1:]) + [len(poses)]):
         part = poses[a:b]
         bad = footprint.bad_poses(part, on_turn[a:b], backwards[a:b] if any(backwards[a:b]) else None)
+        mine = [i for i in range(len(part)) if mild[a + i]] if mild is not None else []
+        if mine:
+            rec = recorded[0]
+            fit = dict(zip(mine, rec.fit([part[i] for i in mine])))
+            own = [i for i in mine if not (rec.fits_turn(part[i].x, part[i].y, part[i - 1].yaw, part[i].yaw,
+                                                         backwards[a + i]) if rec.spins(part, i) else fit[i])]
+            bad = sorted(own + [i for i in bad if not mild[a + i]])
         for i in bad:
             p = part[i]
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),

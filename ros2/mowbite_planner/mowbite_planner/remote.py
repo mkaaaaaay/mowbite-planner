@@ -38,9 +38,10 @@ MAX_STRING = 4096
 KINDS = (PERIMETER, LANE, TURN, TRANSIT)
 # rad, a pose faces the way it's driven to the next one (test/planrules.py)
 FACING = math.radians(6.0)
-# the plan's fields in its form; the rest the mower works out: lane_spacing, config and the geometry (plan_geometry)
+# the plan's fields in its form (recorded_loops only where it has some); the rest the mower works out: lane_spacing,
+# config and the geometry (plan_geometry)
 SENT = ('poses', 'segments', 'angle', 'perimeter_loops', 'lanes', 'stats', 'warnings', 'angles', 'section_starts',
-        'cells', 'origins')
+        'cells', 'origins', 'recorded_loops')
 
 
 class RemoteError(ValueError):
@@ -186,7 +187,7 @@ def plan_json(plan: CoveragePlan, cfg: PlannerConfig) -> Dict[str, Any]:
             'cells': [[angle, [[[lane.row, lane.x0, lane.x1, lane.y,
                                  [[x0, x1, [v for p in way for v in p]] for x0, x1, way in lane.bends]]
                                 for lane in cell] for cell in cells]] for angle, cells in plan.cells],
-            'origins': plan.origins}
+            'origins': plan.origins, **({'recorded_loops': list(plan.recorded_loops)} if plan.recorded_loops else {})}
 
 
 def planned_with(cfg: PlannerConfig, spacing: Optional[float] = None) -> Tuple[PlannerConfig, PlannerConfig]:
@@ -232,7 +233,7 @@ def plan_geometry(boundary, obstacles, cfg: PlannerConfig, drivable=(), keep_out
     return dict(area=space.area, free_space=space.free, robot_space=space.drive_space,
                 lane_region=rings_of.lane_region, remaining=rings_of.remaining, transit_space=space.transit_space,
                 body_space=space.body_space, levels=rings_of.levels, narrow=_narrow(rings_of, cells, cfg),
-                unmowed=space.unmowed)
+                unmowed=space.unmowed, recorded_space=space.recorded.space if space.recorded is not None else None)
 
 
 def _spacing_of(plan: CoveragePlan, cfg: PlannerConfig) -> Optional[float]:
@@ -263,7 +264,8 @@ def plan_from(form: Any, args: tuple, reach_over: tuple = (), unmowed: tuple = (
     sent = dict(poses=poses, segments=segments, angle=_number(form.get('angle'), 'angle'), perimeter_loops=loops,
                 lanes=lanes, stats=_object(form.get('stats'), 'stats'), warnings=_strings(form, 'warnings'),
                 angles=[_number(a, 'angles') for a in _list(form.get('angles'), 'angles')], section_starts=starts,
-                cells=cells, origins=_object(form.get('origins'), 'origins'))
+                cells=cells, origins=_object(form.get('origins'), 'origins'),
+                recorded_loops=tuple(_strings(form, 'recorded_loops')) if 'recorded_loops' in form else ())
     boundary, obstacles, _, _, _, drivable, keep_out, margins = args
     return CoveragePlan(lane_spacing=used.lane_spacing, config=own, **sent, **plan_geometry(
         boundary, obstacles, used, drivable, keep_out, margins, reach_over, unmowed, cells, bodies))

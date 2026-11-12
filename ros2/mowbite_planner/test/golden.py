@@ -25,9 +25,10 @@ PLANS = {
     'garden': (AREA, [BED], {}),
     'garden-sim': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18)),
     'garden-sim-body': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18, **BODY)),
+    'garden-sim-loop': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18, recorded_loop=True, **BODY)),
 }
 SPACES = ('area', 'free_space', 'robot_space', 'lane_region', 'remaining', 'transit_space', 'body_space', 'narrow',
-          'unmowed')
+          'unmowed', 'recorded_space')
 _loaded = {}
 
 
@@ -47,6 +48,7 @@ def to_json(plan: CoveragePlan):
         'angle': plan.angle, 'lane_spacing': plan.lane_spacing, 'perimeter_loops': plan.perimeter_loops,
         'lanes': plan.lanes, 'stats': plan.stats, 'warnings': plan.warnings, 'angles': plan.angles,
         'config': cfg, 'section_starts': plan.section_starts, 'origins': plan.origins,
+        'recorded_loops': list(plan.recorded_loops),
         'cells': [[a, [[dataclasses.astuple(lane) for lane in cell] for cell in cells]] for a, cells in plan.cells],
         'levels': [shapely.to_wkb(g, hex=True) for g in plan.levels],
         **{k: None if getattr(plan, k) is None else shapely.to_wkb(getattr(plan, k), hex=True)
@@ -63,6 +65,7 @@ def from_json(d) -> CoveragePlan:
         lane_spacing=d['lane_spacing'], perimeter_loops=[[tuple(p) for p in loop] for loop in d['perimeter_loops']],
         lanes=[(tuple(a), tuple(b)) for a, b in d['lanes']], stats=d['stats'], warnings=d['warnings'],
         angles=d['angles'], config=cfg, section_starts=d['section_starts'], origins=d['origins'],
+        recorded_loops=tuple(d['recorded_loops']),
         levels=[shapely.from_wkb(g) for g in d['levels']],
         cells=[(a, [[Lane(*lane[:4], tuples(lane[4])) for lane in cell] for cell in cells]) for a, cells in d['cells']],
         **{k: None if d[k] is None else shapely.from_wkb(d[k]) for k in SPACES})

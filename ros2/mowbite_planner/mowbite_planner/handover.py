@@ -259,8 +259,11 @@ def _stats(route: Any, cfg: PlannerConfig, space, segments, poses, passes, zones
         'edge_slots': len(space.slots),
         'planning_time': time.perf_counter() - timer.t0,
         'timings': timer.timings,
-        'chosen': {'lane_spacing': round(cfg.lane_spacing, 4), 'perimeter_passes': rings_of.count, 'mode': 'fixed'},
+        'chosen': {'lane_spacing': round(cfg.lane_spacing, 4),
+                   'perimeter_passes': rings_of.count + bool(rings_of.recorded), 'mode': 'fixed'},
     }
+    if rings_of.recorded:  # (m driven of the recorded line and left out, its pieces, stretches driven anew)
+        stats['recorded_loop'] = {k: round(v, 2) for k, v in route.recorded_done.items()}
     for key in ('turns_u_turn', 'turns_bulb', 'turns_detour', 'turns_pivot', 'turns_fallback'):
         stats[key] = route.counts.get(key, 0)
     if cfg.split_zones:

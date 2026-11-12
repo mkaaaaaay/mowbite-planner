@@ -294,6 +294,15 @@
       ],
       "type": "string"
     },
+    "recorded_loop": {
+      "type": "boolean"
+    },
+    "recorded_loop_margin": {
+      "max": 0.5,
+      "min": 0.0,
+      "type": "number",
+      "unit": "m"
+    },
     "remote_planning": {
       "type": "boolean"
     },

@@ -1,12 +1,15 @@
 """The lanes: their sets across the area, and each as the centre drives it, its ends pulled back for the body."""
 
+import bisect
 import dataclasses
 import math
 from typing import Callable, Dict, List, Optional, Tuple
 
+from shapely.geometry import LineString
+
 from .config import XY, Lane, PlannerConfig
 from .footprint import Footprint
-from .geometry import polygonal, union
+from .geometry import QUAD_SEGS, polygonal, polygons, subtract, union
 from .lanes import scan_lanes, split_cells, zone_angles
 from .maneuvers import sample_arc
 from .mathutil import Pose2D, normalize_angle
@@ -134,3 +137,27 @@ def _edge(inside: float, outside: float, fits: Callable[[float], bool]) -> float
         t = 0.5 * (inside + outside)
         inside, outside = (t, outside) if fits(t) else (inside, t)
     return inside
+
+
+def narrow_left(narrow, passes, remaining, half: float):
+    """Of the strips too narrow for lanes those the lanes leave something of (more than a cm2): a narrow piece needs no
+    loop where the lanes already mow what the loops leave around it (they reach on into a strip along them, see
+    scan_lanes). The lanes of each set by row, so only those next to a piece are looked at."""
+    by_row = [(a, sorted((lane.y, x0, x1) for cell in cells for lane in cell for x0, x1 in lane.pieces()))
+              for a, cells in passes]
+
+    def left(piece) -> float:
+        strip = piece.buffer(half, QUAD_SEGS)
+        near = []
+        for a, lanes in by_row:
+            c, s = math.cos(a), math.sin(a)
+            xs, ys = zip(*[(x * c + y * s, -x * s + y * c) for x, y in strip.exterior.coords])
+            first = bisect.bisect_left(lanes, (min(ys) - half,))
+            for y, x0, x1 in lanes[first:bisect.bisect_right(lanes, (max(ys) + half, math.inf))]:
+                if x0 < max(xs) + half and x1 > min(xs) - half:
+                    line = LineString(Lane(0, x0, x1, y).ends(a))
+                    if line.distance(strip) < half:
+                        near.append(line.buffer(half, QUAD_SEGS))
+        return subtract(strip.intersection(remaining), near).area
+
+    return polygonal(union(p for p in polygons(narrow) if left(p) > 1e-4))  # more than a cm2

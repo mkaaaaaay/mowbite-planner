@@ -26,13 +26,14 @@ def lawn_of(garden, area_id: str):
 
 
 def body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
-               margin_of: List[float], cfg):
-    """Where the body may be (planner._body_space without its caches and Footprint)."""
+               margin_of: List[float], cfg, turn_step: float = TURN_STEP):
+    """Where the body may be (planner._body_space without its caches and Footprint). turn_step: see _driven."""
     outlines, away_from = ([[(float(p[0]), float(p[1])) for p in ring] for ring in rs]
                            for rs in (outlines, away_from))
     hard = cfg.edges == 'hard'
-    outer = union([clean_polygon(o) for o in outlines] + ([] if hard else [_driven(outlines, cfg.body_outline)]))
-    band = None if hard else _driven(away_from, cfg.body_outline)
+    outer = union([clean_polygon(o) for o in outlines] +
+                  ([] if hard else [_driven(outlines, cfg.body_outline, turn_step)]))
+    band = None if hard else _driven(away_from, cfg.body_outline, turn_step)
     inner = []
     for w in away_from:
         w = clean_polygon(w)
@@ -42,11 +43,12 @@ def body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequen
     return wkb.loads(subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb)
 
 
-def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY]):
+def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY], turn_step: float = TURN_STEP):
     """Where a body of these corners (counter-clockwise round its centre, see PlannerConfig.body_outline) was while the
     centre drove along each of the rings the way its points go: along every edge from where it was at the edge's start
     to where it was at its end (_rows), so past a corner and on the outside of a bend the front reaches out, and at
-    every point turning on the spot from the heading of the edge before to the next one's (TURN_STEP apart)."""
+    every point turning on the spot from the heading of the edge before to the next one's (turn_step apart: between
+    two of them the body's far corners leave a notch, 2 cm deep TURN_STEP apart at a right angle of the ring)."""
     parts, rows = [], _rows(corners)
 
     def body(x: float, y: float, h: float, points: Sequence[XY]) -> Polygon:
@@ -63,7 +65,7 @@ def _driven(rings: Sequence[Sequence[Sequence[float]]], corners: Sequence[XY]):
                           for row in rows]
         for (h, x, y), (h1, _, _) in zip(heads, heads[1:] + heads[:1]):
             turn = normalize_angle(h1 - h)
-            n = int(math.ceil(abs(turn) / TURN_STEP))
+            n = int(math.ceil(abs(turn) / turn_step))
             parts += [body(x, y, h + turn * k / n, corners) for k in range(1, n)]
     return union(parts)
 

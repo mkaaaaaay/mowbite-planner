@@ -7,7 +7,7 @@ from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.prepared import prep
 
 from mowbite_planner.backing import CORNER_STEP
-from mowbite_planner.config import LANE, TRANSIT
+from mowbite_planner.config import LANE, PERIMETER, RECORDED_OFF, TRANSIT
 from mowbite_planner.mathutil import angle_diff
 
 DEG = math.pi / 180.0
@@ -22,12 +22,17 @@ def check_invariants(plan, cfg, obstacles=(), arc_tol=6 * DEG):
     inside = prep(plan.robot_space.buffer(2e-3))
     drivable = inside if plan.transit_space is plan.robot_space else prep(plan.transit_space.buffer(2e-3))
     in_transit = {i for s in segs if s.kind == TRANSIT for i in range(s.start, s.end + 1)}
+    # (the recorded loop, recorded_loop: on the outline itself, RECORDED_OFF past it)
+    on_line = {i for s in segs if s.kind == PERIMETER and s.source in plan.recorded_loops
+               for i in range(s.start, s.end + 1)}
+    line = prep(plan.area.buffer(RECORDED_OFF + 2e-3)) if on_line else None
     step = cfg.waypoint_spacing
     for i, p in enumerate(poses):
         assert math.isfinite(p.x) and math.isfinite(p.y) and math.isfinite(p.yaw)
         assert -math.pi < p.yaw <= math.pi
         at = Point(p.x, p.y)
-        assert inside.covers(at) or i in in_transit and drivable.covers(at), f'pose {p} outside the free space'
+        assert inside.covers(at) or i in in_transit and drivable.covers(at) or i in on_line and line.covers(at), \
+            f'pose {p} outside the free space'
     # without the body no obstacle closer than the first loop's offset (minus what simplifying the input may move; with
     # the body it's the body that keeps off them, the measuring tools' rules)
     cloud = MultiPoint([(p.x, p.y) for p in poses])

@@ -30,7 +30,7 @@ from .footprint import Footprint
 from .geometry import QUAD_SEGS, polygons
 from .maneuvers import path_length, same_position
 from .mathutil import Pose2D, angle_diff
-from .sweep import body_out, plan_footprint, swept_area
+from .sweep import body_out, plan_footprint, recorded_footprint, swept_area
 
 # m of path apart a section's later poses are tried (then the ones between the last it doesn't get to and the first it
 # does), the poses tried at most for a section (and asked about for the way out of a dead end), the poses asked about at
@@ -446,7 +446,7 @@ def _fits_back(plan: CoveragePlan, fp, to: int, e: int) -> bool:
     """Whether the body fits all along backing up from pose e to pose to (where it was going forwards, the corners
     turned), checked as body_out checks a plan."""
     got = _back(plan, to, e) if fp is not None else None
-    return got is not None and not body_out(got[0], got[1], [0], fp)
+    return got is not None and not body_out(got[0], got[1], [0], fp, recorded_footprint(plan))
 
 
 def _shared(segments: List[SegmentInfo], k: int, i: int) -> bool:

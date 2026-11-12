@@ -685,6 +685,42 @@ def test_back_up_with_plan(make, planned):
 
 
 @fake_only
+def test_recorded_loop_only_where_the_map_has_the_recording_body(make, planned):
+    """recorded_loop on MowBite OS: planned only on an area the map has the body it was recorded with of
+    (recorded_body: recorded by driving along it); one without (drawn) is planned without it, the answer says so."""
+    why = 'recorded_loop ignored: MowBite OS: only on an area recorded by driving along it (recorded_body in the ' \
+        'map), this one has none'
+    node = make()
+    send_map(node, the_map(planner={'recorded_loop': True, 'recorded_loop_margin': 0.02}))
+    got = plan_area(node)
+    assert got.success and why in got.message and planned.config().recorded_loop is False
+    result, _ = rpc(node, 'planner.plan', {'area_id': 'a'})
+    assert why in result['warnings'] and result['body_hints']['a'] == 'missing'
+    assert 'ignored' not in rpc(node, 'planner.settings', None, 'r2')[0]['settings']['recorded_loop']
+    own = {k: TRON_BODY[k] for k in ('robot_width', 'robot_front', 'robot_rear', 'robot_outline')}
+    send_map(node, the_map(planner={'recorded_loop': True, 'recorded_loop_margin': 0.02}, recorded_body=own))
+    got = plan_area(node)
+    cfg = planned.config()
+    assert got.success and 'recorded_loop' not in got.message
+    assert cfg.recorded_loop is True and cfg.recorded_loop_margin == 0.02
+
+
+@fake_only
+@pytest.mark.real_planner
+def test_a_plan_with_the_recorded_loop_passes_the_last_check(make):
+    """The node's last check of a plan (checked) takes the recorded loop in its own space: the plan is given out,
+    though on that loop the body is past the margins all the others keep."""
+    node = make()
+    own = {k: TRON_BODY[k] for k in ('robot_width', 'robot_front', 'robot_rear', 'robot_outline')}
+    send_map(node, the_map(planner={'recorded_loop': True}, recorded_body=own))
+    got = plan_area(node)
+    assert got.success and got.code == '' and 'recorded_loop' not in got.message, got.message
+    plan = next(reversed(node.core.plans.values()))[0]
+    assert plan.recorded_loops and rules(plan)['body_out'] == []
+    assert rules(dataclasses.replace(plan, recorded_loops=()))['body_out']
+
+
+@fake_only
 def test_home_facing_any_way(make, monkeypatch):
     """Home from where a section ends (starts.py asks with no heading): a way there arriving facing any way."""
     asked = []

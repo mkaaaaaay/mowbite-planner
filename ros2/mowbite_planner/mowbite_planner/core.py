@@ -29,6 +29,8 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
                 drive_ignored(): why drive slope and reverse are planned forwards ('' where they aren't),
                 back_out_ignored(): why back_out is off ('' where it isn't: the robot backs up where a plan does;
                 by default drive_ignored's),
+                recorded_loop_ignored(recorded): why recorded_loop is off for an area ('' where it isn't; recorded:
+                the map has the body it was recorded with),
                 classic_plan (planner slic3r), remote_plan (remote_planning), remote_state, mower_ready, held and
                 start_mowing (leftovers_auto),
                 checked(plan): the robot's own last check of a plan just planned, a PlanningError where it doesn't
@@ -62,7 +64,7 @@ from . import config as limits
 from .config import IGNORED, NothingLeft, PlannerConfig, PlanningError
 from .footprint import Footprint
 from .geometry import clean_polygon, polygons, union
-from .mapfile import _points, area_settings, match_area, mow_areas, openmower_settings
+from .mapfile import _points, area_settings, body_known, match_area, mow_areas, openmower_settings
 from .mathutil import Pose2D
 from .mqtt_service import PlannerService
 from .planner import fill_field, plan_coverage, plan_footprint, set_workers
@@ -114,7 +116,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'blade_offset': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'blade_ahead': (-limits.MAX_BLADE_OFFSET, limits.MAX_BLADE_OFFSET),
           'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
-          'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET)}
+          'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET),
+          'recorded_loop_margin': (0.0, limits.MAX_RECORDED_MARGIN)}
 # plans kept, in memory and on disk (in plans_dir, <build>-<key>.pkl: the ones of another planner code or another
 # Python, shapely, GEOS or numpy go at the start, none of them is asked for again), in both the ones last asked for:
 # the same request again (a preview, then the mow; mowing.plan, then planner.plan; a mow going on) gets the plan at once
@@ -685,6 +688,11 @@ class PlannerCore:
         """Why back_out is off here ('' where it isn't): where the robot doesn't back up, as for drive."""
         return self.drive_ignored()
 
+    def recorded_loop_ignored(self, recorded):
+        """Why recorded_loop is off here for an area ('' where it isn't; recorded: whether the map has the body it was
+        recorded with, recorded_body). Here for none: an area without is taken as recorded with this mower."""
+        return ''
+
     def mower_ready(self):
         return False
 
@@ -909,6 +917,10 @@ class PlannerCore:
                 else:
                     entry['forces'] = {'body_fit': True, 'spin_margin': limits.DRIVE_SPIN_MARGIN}
                     entry['forces_why'] = ('slope and reverse: ' if name == 'drive' else 'back_out: ') + backing.WHY
+            if name == 'recorded_loop':  # (what else is set keeps it from doing anything)
+                why = dataclasses.replace(current.base, recorded_loop=True).recorded_off
+                if why:
+                    entry['ignored'] = why
             if name in ('body_fit', 'spin_margin'):
                 forced = self.forced_by(current.base)
                 if forced is not None:
@@ -1509,29 +1521,32 @@ class PlannerCore:
         return self.kept_plan(boundary, obstacles, cfg, start, end, drivable, keep_out, margins, reach_over,
                               unmowed, bodies=bodies)[0]
 
-    def driven(self, cfg):
-        """(cfg, '') or, where drive slope or reverse or back_out is ignored here (drive_ignored, back_out_ignored),
-        (cfg with drive forward or back_out off, why for the plan's warnings)."""
+    def driven(self, cfg, boundary=(), bodies=()):
+        """(cfg, []) or, where drive slope or reverse or back_out is ignored here (drive_ignored, back_out_ignored) or
+        recorded_loop for the area of boundary (recorded_loop_ignored; bodies: plan_coverage's), (cfg with drive
+        forward, back_out or recorded_loop off, why for the plan's warnings)."""
         drive = self.drive_ignored() if cfg.drive != 'forward' else ''
         out = self.back_out_ignored() if cfg.back_out else ''
-        if not drive and not out:
-            return cfg, ''
-        told = '; '.join(['drive %s ignored: %s' % (cfg.drive, drive)] * bool(drive) +
-                         ['back_out ignored: %s' % out] * bool(out))
-        self.logwarn_throttle(60, 'MowBite Planner: ' + told)
-        return cfg.with_overrides(dict({'drive': 'forward'} if drive else {}, **{'back_out': False} if out else {})), \
-            told
+        loop = self.recorded_loop_ignored(body_known(bodies, boundary)) if cfg.recorded_loop else ''
+        if not drive and not out and not loop:
+            return cfg, []
+        told = ['; '.join(['drive %s ignored: %s' % (cfg.drive, drive)] * bool(drive) +
+                          ['back_out ignored: %s' % out] * bool(out))] * bool(drive or out) + \
+            ['recorded_loop ignored: %s' % loop] * bool(loop)
+        self.logwarn_throttle(60, 'MowBite Planner: ' + '; '.join(told))
+        return cfg.with_overrides(dict({'drive': 'forward'} if drive else {}, **{'back_out': False} if out else {},
+                                       **{'recorded_loop': False} if loop else {})), told
 
     @staticmethod
     def told(plan, why):
-        """plan, with why last among its warnings where there's one."""
-        return dataclasses.replace(plan, warnings=list(plan.warnings) + [why]) if why else plan
+        """plan, with why (driven's) last among its warnings."""
+        return dataclasses.replace(plan, warnings=list(plan.warnings) + list(why)) if why else plan
 
     def left_plan(self, boundary, obstacles, cfg, start, end, drivable, keep_out, margins=(), *args, **kw):
         """plan_coverage of what a mow left (not kept), the robot's bounds, drive and arrives as kept_plan takes
         them."""
         cfg = self.bound(cfg)
-        cfg, why = self.driven(cfg)
+        cfg, why = self.driven(cfg, boundary, kw.get('bodies', ()))
         arrives = self.arrives(boundary, obstacles, cfg, drivable, keep_out, kw.get('reach_over', ()),
                                kw.get('unmowed', ()), margins, kw.get('bodies', ()))
         return self.told(self.checked(plan_coverage(boundary, obstacles, cfg, start, end, drivable, keep_out, margins,
@@ -1546,7 +1561,7 @@ class PlannerCore:
         body a ring was recorded with. self.local: kept, the plan's key and where it was planned (on: mower or
         house)."""
         cfg = self.bound(cfg)
-        cfg, why = self.driven(cfg)
+        cfg, why = self.driven(cfg, boundary, bodies)
         if cfg.perimeter_direction != 'random' and cfg.finished_mows:  # (counts only there: the plan kept stays one)
             cfg = cfg.with_overrides({'finished_mows': 0})
         # the obstacles in one order, every way there (the request, the map) gives the same, each with its margin

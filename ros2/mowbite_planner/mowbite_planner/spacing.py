@@ -9,7 +9,7 @@ from .config import LEFT_TUFT, PERIMETER, TRACK, XY, CoveragePlan, Lane
 from .drive import turning
 from .footprint import Footprint
 from .geometry import polygons, subtract
-from .sweep import swept_area
+from .sweep import on_recorded, swept_area
 
 # lane_spacing_mode 'auto', the places in spin_margin it compares (turn_places): m the body sticks in at least, m
 # apart, m a step turning on the spot is at most (as the measuring tools count them, mkay 31.10.)
@@ -47,11 +47,11 @@ def strip_between_lanes(piece, angles: Sequence[float]) -> bool:
 def turn_places(plan: CoveragePlan, fp: Optional[Footprint]) -> int:
     """(for lane_spacing_mode 'auto') the places, TURN_NEAR apart, where the body sticks more than TURN_OUT into
     spin_margin where the path turns (drive.turning) or turns on the spot: on the loops only turning on the spot (mkay
-    31.10.)."""
+    31.10.), none on the recorded loop (recorded_loop: its own check)."""
     n, P = len(plan.poses), plan.poses
     if fp is None or not n:
         return 0
-    ringish = [False] * n
+    ringish, outer = [False] * n, on_recorded(plan.segments, plan.recorded_loops, n)
     for seg in plan.segments:
         if (seg.kind == PERIMETER or seg.maneuver == 'ring') and seg.maneuver != 'mop_up':
             ringish[seg.start:seg.end + 1] = [True] * (seg.end + 1 - seg.start)
@@ -64,7 +64,7 @@ def turn_places(plan: CoveragePlan, fp: Optional[Footprint]) -> int:
     for a, b in zip(plan.section_starts, list(plan.section_starts[1:]) + [n]):
         part = P[a:b]
         turn = turning(part).tolist()
-        bad = [i for i in fp.bad_poses(part, turn) if not ringish[a + i] or spot(a + i)]
+        bad = [i for i in fp.bad_poses(part, turn) if not outer[a + i] and (not ringish[a + i] or spot(a + i))]
         for d, xy in fp.out_by([(part[i - 1] if i else None, part[i]) for i in bad],
                                on_turn=[turn[i] for i in bad]) if bad else ():
             if xy is not None and d > TURN_OUT:

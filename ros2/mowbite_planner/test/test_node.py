@@ -509,6 +509,16 @@ def test_settings_over_rpc(make, tmp_path):
     assert got['version'] == mowbite_planner.__version__
     for name, why in MowbitePlannerNode.cannot.items():
         assert got['settings'][name]['ignored'] == why and not got['settings'][name]['settable'], name
+    # (recorded_loop: ignored with why while what else is set keeps it from doing anything, here no body)
+    loop, margin = got['settings']['recorded_loop'], got['settings']['recorded_loop_margin']
+    assert loop['type'] == 'boolean' and loop['value'] is False and loop['ignored'].startswith('no mower size set')
+    assert (margin['value'], margin['min'], margin['max'], margin['unit']) == (0.0, 0.0, 0.5, 'm')
+    got, _ = rpc(node, 'planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14}, 'r1a')
+    assert 'ignored' not in got['settings']['recorded_loop']
+    got, _ = rpc(node, 'planner.settings.set', {'edges': 'hard', 'recorded_loop': True}, 'r1b')
+    assert got['settings']['recorded_loop']['ignored'].startswith('edges hard')
+    rpc(node, 'planner.settings.set', dict.fromkeys(('robot_width', 'robot_front', 'robot_rear', 'edges',
+                                                     'recorded_loop')), 'r1c')
     got, error = rpc(node, 'planner.settings.set', {'fill_pattern': 'concentric'}, 'r2')
     assert error is None and got['settings']['fill_pattern']['stored']
     with open(tmp_path / 'planner' / 'mowbite_planner_settings.json') as f:

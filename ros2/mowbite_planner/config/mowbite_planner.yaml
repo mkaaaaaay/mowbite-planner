@@ -16,6 +16,14 @@
     # loops first or last (last mows over the marks the turns leave), ccw, cw or auto (the way the mower faces)
     perimeter_order: first
     perimeter_direction: auto
+    # the outermost loop along the outline is the line the area was recorded on itself: the mower's centre on that
+    # line, the way round it was recorded (whatever perimeter_direction says), the body where it was while recording
+    # (edge_margin and spin_margin don't count for this one loop), in the outermost loop's place. With the body set,
+    # edges recorded, blade_offset 0.0, perimeter_passes not 0 and fill_pattern not concentric, else planned without
+    # it (the plan warns of it). recorded_loop_margin: how far inside the recorded line the centre drives that one
+    # loop [m], 0.0: on the line itself (the blade mows half its width past it)
+    recorded_loop: false
+    recorded_loop_margin: 0.0
     # lanes reach this many loops further out (OpenMower's outline_overlap_count), with lane_overlap_limit the mower
     # gets no further out on them and the turns between them
     lane_overlap_passes: 0

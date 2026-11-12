@@ -90,9 +90,13 @@ SETTINGS = {
     'outside': dict(perimeter_offset=-0.03),
     # (backing.py: the body turned round, every pose turned round after; without the body forwards)
     'reverse': dict(drive='reverse'),
+    # (the outermost loop on the outline itself, in its own space; without the body as ever)
+    'recorded': dict(recorded_loop=True),
+    'recorded_in': dict(recorded_loop=True, recorded_loop_margin=0.03),
 }
 CASES = [(s, b, '') for s in SHAPES for b in BODIES if (s, b) != ('keep', 'bare')] + \
-    [('garden', b, k) for k in SETTINGS for b in BODIES]
+    [('garden', b, k) for k in SETTINGS for b in BODIES] + \
+    [(s, b, 'recorded') for s in ('rect', 'two', 'neck', 'slot', 'drive', 'keep') for b in ('rect', 'outline')]
 # the app's patterns for the counted warnings (mowbite-new-planner src/lib/areaPlan.ts, COUNTED)
 COUNTED = (re.compile(r"^(\d+) places? driven another way where the body would stick out"),
            re.compile(r"^(\d+) places? left out where the body doesn't fit"))
@@ -140,7 +144,7 @@ def keeps_the_rules(plan, r):
     check_invariants(plan, r['cfg'], r['obstacles'])
     ref = metrics.Ref(lawn(r), r)
     got = dict(metrics.rules(plan, ref), **metrics.plan_body(plan, ref))
-    for key in ('centre_out', 'backwards', 'reverse_segs', 'dup_steps', 'rm_out', 'blade_over'):
+    for key in ('centre_out', 'backwards', 'reverse_segs', 'dup_steps', 'rm_out', 'ring_out', 'blade_over'):
         assert not got.get(key), (key, got.get(key), got.get(key + '_at'))
     assert not got.get('cfg_diff')
 
@@ -280,13 +284,26 @@ def test_random_gardens_with_the_body(seed):
     labels_fit_the_geometry(plan)
 
 
+# (a row of simbench's pairs of settings as it was on 02.11.)
+ROW = dict(mower_width=0.18, overlap=0.0, lane_spacing_mode='fixed', lane_spacing_min=0.08, lane_spacing_max=0.12,
+           perimeter_passes=0, obstacle_passes=-1, fill_pattern='lanes', crosshatch_angle=1.5708,
+           perimeter_order='last', perimeter_direction='ccw', angle=0.0, angle_strategy='min_width', angle_offset=0.5,
+           angle_min=0.2, angle_max=0.9, angle_step=0.349, angle_increment=0.0, angle_increment_every=1,
+           perimeter_offset=-0.05, turn_radius=0.25, turn_types=('pivot',), lane_order='skip', nested_areas=True,
+           narrow_parts='lanes', turn_on_spot=False, turn_radius_auto=False, split_zones=True, headland_turns=True,
+           headland_corners='rounded', route_order='optimized', bend_max_gap=0.0, bend_max_offset=0.2,
+           transit_edge_distance=0.0, transit_edge_cost=5.0, lane_overlap_passes=3, lane_overlap_limit=True,
+           edges='hard', edge_margin=0.0, obstacle_margin=0.0, spin_margin=0.0, body_fit=True, mop_up=False,
+           skip_lanes=False, blade_offset=0.0, blade_ahead=0.0)
+
+
 def test_same_plan_every_time():
     """A garden of simbench with the blade off the middle (the loops it drives with the blade inside were known by
     their id, a ring made later could get a freed one's and go the other way round): the same plan every time."""
     import gardens
     import simbench
-    case = 'model/0@rect+perimeter_passes=3+obstacle_passes=-1+pairs=28'
-    name, index, mower_name, _, settings = simbench.parse(case)
+    name, index, mower_name, _, _ = simbench.parse('model/0@rect')
+    settings = ROW
     garden = gardens.garden(name)
     area_id = garden.areas[index]
     garden, mower = simbench.with_settings(garden, area_id, settings), gardens.mower_of(mower_name, garden)

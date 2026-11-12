@@ -317,7 +317,8 @@ def _smooth_spins(route, cfg: PlannerConfig) -> None:
 
         if j == 0 and i > 0 and straight(i):  # where a lane starts: on the end of the segment before
             i, j = i - 1, len(route.segments[i - 1].poses)
-        if straight(i) or not route.segments[i].source.startswith('loop'):  # (a lane keeps its heading)
+        if straight(i) or not route.segments[i].source.startswith('loop') or \
+                route.segments[i].source in getattr(route, 'recorded_loops', ()):  # (the recorded loop keeps its line)
             return
         space = route.transit.is_free if route.segments[i].kind == TRANSIT else route.area.is_free
         clear = route.clear([(p.x, p.y)])  # (headland_turns: out of the lanes' field the loop stays out of it)

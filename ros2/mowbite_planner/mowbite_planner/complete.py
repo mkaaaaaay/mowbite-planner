@@ -105,7 +105,7 @@ class Placer:
     """Puts moves into the path: detours from its loops and drives out to them and back facing as before, the rest one
     after the other from its end (or from start: a path of its own)."""
 
-    def __init__(self, kit: Kit, poses: List[Pose2D], segments: List[SegmentInfo], rest: Rest):
+    def __init__(self, kit: Kit, poses: List[Pose2D], segments: List[SegmentInfo], rest: Rest, keep=()):
         self.kit, self.rest, self.P = kit, rest, poses
         n = len(poses)
         self.xy = numpy.array([(p.x, p.y) for p in poses]).reshape(-1, 2)
@@ -113,7 +113,7 @@ class Placer:
         self.ok, self.on_turn = numpy.zeros(n, bool), [False] * n
         self.section = numpy.zeros((n, 2), int)  # (first, last) of the section of each pose
         for k, s in enumerate(segments):
-            if s.kind in FROM:
+            if s.kind in FROM and not (s.kind == PERIMETER and s.source in keep):  # (keep: the recorded loop's)
                 self.ok[s.start + 1:s.end + 1] = True
             self.on_turn[s.start + 1:s.end + 1] = [s.kind == TURN] * (s.end - s.start)
         first = 0
@@ -452,17 +452,18 @@ def _left(geom, least: float) -> float:
 
 def complete(cfg: PlannerConfig, fp: Footprint, transit: TransitPlanner, drive_space, transit_space, lawn,
              poses: List[Pose2D], segments: List[SegmentInfo], field=None,
-             home: Optional[XY] = None) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
+             home: Optional[XY] = None, keep=()) -> Tuple[List[Pose2D], List[SegmentInfo], Dict[str, Any]]:
     """mop_up: what the path leaves of lawn mowed by detours and a chain at its end (the centre in drive_space mowing,
     transit_space too on drives; headland_turns: field, the lanes' field the drives don't turn in; home: where the
-    mower goes after). (poses, segments, stats)."""
+    mower goes after; keep: the loops, by name, no detour leaves from: the recorded loop's). (poses, segments,
+    stats)."""
     kit = Kit.of(cfg, fp, transit, drive_space, transit_space, DRIVES, field)
     starts = [s.start for k, s in enumerate(segments) if k == 0 or s.section != segments[k - 1].section]
     ends = starts[1:] + [len(poses)]
     left = lawn.difference(blade(cfg, *[poses[a:b] for a, b in zip(starts, ends) if b - a > 1], whole=True))
     rest = Rest.of(_reachable(cfg, left, drive_space), LEAST, kit.half)
     moves, why, built = _moves(kit, rest)
-    placer = Placer(kit, poses, segments, rest)
+    placer = Placer(kit, poses, segments, rest, keep)
     placer.chained(placer.place(moves), why, home=home)
     out, infos = _spliced(poses, segments, placer, 'mop_up') if placer.detours or placer.chain else (poses, segments)
     done = [m for d in placer.detours + ([placer.chain] if placer.chain else []) for m in d.moves]

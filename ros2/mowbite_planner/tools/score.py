@@ -41,7 +41,7 @@ def failed(rec: Optional[Dict[str, Any]]) -> bool:
 
 
 def sims(rec: Optional[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    # (a planner before 10.11. counted the outermost loop's contacts apart, against the same R0: added in)
+    # (a recorded loop's contacts are counted apart, against the same R0: added in)
     return {s['seed']: dict(s, r0_n=(s.get('r0_n') or 0) + s['ring_r0_n'],
                             r0_worst=max(s.get('r0_worst') or 0.0, s.get('ring_r0_worst') or 0.0))
             if 'ring_r0_n' in s else s for s in (rec or {}).get('sim') or []}
@@ -297,6 +297,9 @@ def gates(cases, ref, new, opts) -> Tuple[List[str], List[str]]:
     out = _total(cases, new, lambda r: rk(r, 'rm_out'))
     if out:
         bad.append(f'feste Regel: Körper > 1 cm aus R_m im Plan an {out:.0f} Stellen')
+    out = _total(cases, new, lambda r: rk(r, 'ring_out'))
+    if out:
+        bad.append(f'feste Regel: aufgenommene Randrunde > 1 cm aus dem Aufnahme-Raum im Plan an {out:.0f} Stellen')
     # (spin_margin: as mkay counts it (31.10.), on the loops turning on the spot only; to know, all of them)
     raw = _more(cases, ref, new, lambda r: rk(r, 'rm_turn_out'))
     notes.append(f'Körper im spin_margin roh (an Ringen auch Bögen): '
@@ -441,6 +444,13 @@ def table(names: List[str], runs: List[Dict[str, Dict]], cases: List[str], fails
         return [s.get(key) or 0 for x in ok(r) for s in sims(x).values()]
 
     line('fest', 'Körper > 1 cm aus R_m im Plan (Stellen)', tot('rm_out'))
+    if any(rk(x, 'ring_out') is not None for r in runs for x in ok(r)):  # (recorded_loop)
+        line('fest', 'Aufgenommene Randrunde > 1 cm aus dem Aufnahme-Raum im Plan (Stellen)', tot('ring_out'))
+        line('Bericht', 'Sim aufgenommene Randrunde: Stellen ≥ 5 cm aus dem Aufnahme-Raum (alle Seeds), tiefste cm',
+             [f'{sum(sim_all(r, "ring_n5"))}, {100 * max(sim_all(r, "ring_worst") or [0]):.1f}' for r in runs])
+        line('Bericht', 'Sim aufgenommene Randrunde: Kontakt ≥ 2 cm hinter R0 (Stellen, alle Seeds; in der Zeile '
+                        'unten enthalten)', [str(sum(s.get('ring_r0_n') or 0 for x in ok(r)
+                                                     for s in x.get('sim') or [])) for r in runs])
     line('fest', 'Körper im spin_margin an Wenden/Ecken nach Regel (an Ringen nur Drehen auf der Stelle), Plan '
                  '(Stellen)', tot('rm_turn_rule'))
     line('info', 'Körper im spin_margin an Wenden/Ecken roh, Plan (Stellen)', tot('rm_turn_out'))

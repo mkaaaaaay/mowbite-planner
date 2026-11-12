@@ -354,10 +354,13 @@ def lineage(plan: CoveragePlan, tolerance: float = SIMPLIFY) -> Tuple[List[Dict[
             parent = 'narrow-%d-0' % min(enumerate(polygons(plan.narrow)), key=lambda p: p[1].distance(start))[0]
         obj = {'id': name, 'stage': 'loops' if name.startswith('loop-') else 'lanes', 'kind': origin.get('kind', ''),
                'geometry': line(pts), 'meta': {k: v for k, v in origin.items() if k != 'parent'},
-               'parents': [parent] if parent else []}
+               'parents': area_ids if made in ('recorded', 'instead') else [parent] if parent else []}
         if name.startswith('loop-'):
             obj['op'] = op('loop', 'along the edge of its level' if made.startswith('level-') else
-                           'around a strip too narrow for lanes' if made == 'narrow' else 'a ring halfway in')
+                           'around a strip too narrow for lanes' if made == 'narrow' else
+                           'the line the area was recorded on (recorded_loop)' if made == 'recorded' else
+                           'the first loop where the body doesn\'t fit on the recorded line' if made == 'instead'
+                           else 'a ring halfway in')
             loops.append(obj)
         else:
             obj['op'] = op('lane', 'a lane of its cell' + (', bending around an obstacle'

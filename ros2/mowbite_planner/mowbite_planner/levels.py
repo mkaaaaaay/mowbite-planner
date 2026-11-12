@@ -3,7 +3,6 @@ slot by the edge narrower than the body: the loops go round it where the body fi
 concentric, on into the parts narrower than a U-turn with narrow_parts 'loops'; where the lanes go and what's left for
 them, the strips too narrow for lanes."""
 
-import bisect
 import dataclasses
 import math
 from typing import Any, Callable, List, Optional, Tuple
@@ -11,7 +10,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from shapely.geometry import LineString, Point, Polygon
 from shapely.prepared import prep
 
-from .config import MAX_ROWS, XY, Lane, PlannerConfig, PlanningError
+from .config import MAX_ROWS, XY, PlannerConfig, PlanningError
 from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings, subtract, union
 from .maneuvers import drive_polyline
 from .mathutil import Pose2D
@@ -89,6 +88,8 @@ class Rings:
     owners: Optional[List[Owner]] = None  # with body_levels: the islands' loops
     # (level, ring) of an island's loop on its own where the edge's goes round it (body_levels)
     own_rings: List[Tuple[int, List[XY]]] = dataclasses.field(default_factory=list)
+    # recorded_loop: the recorded loop's rings, driven before the first level's (count: the loops after it)
+    recorded: List[List[XY]] = dataclasses.field(default_factory=list)
 
     @property
     def most(self) -> int:
@@ -103,7 +104,7 @@ class Rings:
     def loop_rings(self, narrow) -> List[List[XY]]:
         """The rings of the loops driven (narrow: the strips too narrow for lanes that get one)."""
         return [ring for k, geom in enumerate(self.drive_levels) for kind, ring in rings(geom)
-                if self.driven(k, kind, ring)] + [ring for _, ring in self.own_rings] + \
+                if self.driven(k, kind, ring)] + [ring for _, ring in self.own_rings] + self.recorded + \
             [ring for geom in self.middles + [narrow] for _, ring in rings(geom)]
 
 
@@ -243,18 +244,21 @@ def _gap_room(body_space, hole, side: float, shut: bool = False):
     return polygonal(near.difference(inset(local, side + hi)))
 
 
-def body_levels(space, cfg: PlannerConfig, footprint=None) -> Tuple[list, Any, List[Owner], list]:
+def body_levels(space, cfg: PlannerConfig, footprint=None, count: Optional[int] = None,
+                plain: bool = False) -> Tuple[list, Any, List[Owner], list]:
     """With the body checked, the loops' levels from where it fits (levels 0 .. most - 1, the lanes' region after them,
     the islands' loops, (level, ring) of an island's first loop on its own where the edge's goes round it, see
     RING_SHUT): the centre RING_EPS further in than where the body sticks out across (fits); the edge's first
     level first in from the edge where that fits (RING_NOISE opened); the islands (a group of them where the body
     doesn't get between) first out from them, as far out as the body needs; level k the edge's first one k lane
     spacings in (its gaps by islands filled), less each island's grown that many lane spacings less its lag (each its
-    own number, see RING_AREA for an island by the edge), round near the islands (RING_ROUND)."""
+    own number, see RING_AREA for an island by the edge), round near the islands (RING_ROUND). count: the loops along
+    the edge where that's not passes; after a recorded loop the first of them where it says (plain: as without it)."""
     side = max(abs(y) for _, y in cfg.body_outline)
     fits = inset(space.body_space, side + RING_EPS)
     first, step = space.first, cfg.lane_spacing
-    count, islands = cfg.passes, cfg.island_passes
+    count, islands = cfg.passes if count is None else count, cfg.island_passes
+    out = first if plain or space.recorded is None else space.recorded.first
     by_part, owners, own_rings = [], [], []
     for part in polygons(space.free):
         shell = Polygon(part.exterior)
@@ -265,6 +269,9 @@ def body_levels(space, cfg: PlannerConfig, footprint=None) -> Tuple[list, Any, L
         # the loops' centres don't get past by the edge as robot_space keeps off it)
         edge = polygonal(_filled(inset(part, first)).intersection(whole))
         bound = polygonal(_filled(inset(part, first - RING_EPS)).intersection(whole))
+        if out != first:  # (after a recorded loop that far in from the outline, off the obstacles by it as ever)
+            edge, bound = (polygonal(g.intersection(inset(space.area, d)))
+                           for g, d in ((edge, out), (bound, out - RING_EPS)))
         for _ in range(2):
             edge = _opened(polygonal(_closed(edge, RING_CLOSE).intersection(bound)), RING_NOISE)
         if edge.is_empty:
@@ -407,8 +414,9 @@ def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]]
     first, off = space.first, space.off
     half, spacing = 0.5 * cfg.mower_width, cfg.lane_spacing
     concentric = cfg.fill_pattern == 'concentric'
-    count, islands = cfg.passes, cfg.island_passes
-    by_body = space.body_space is not None and not concentric and off == 0 and count > 0
+    islands, rec = cfg.island_passes, space.recorded
+    count = cfg.passes if rec is None else cfg.outline_passes  # (after the recorded loop, from rec.first in)
+    by_body = space.body_space is not None and not concentric and off == 0 and (count > 0 or rec is not None)
     free, robot_space, blade_space = (space.free, space.robot_space, space.blade_space) if by_body else \
         body_free(space, cfg)
     most = max(count, islands)
@@ -419,7 +427,7 @@ def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]]
     owners, lanes, own_rings = None, None, []
     if by_body:
         # (where the body gets: the blade's kept off the areas not to mow driving the rings)
-        levels, lanes, owners, own_rings = body_levels(space, cfg, footprint and footprint.plain)
+        levels, lanes, owners, own_rings = body_levels(space, cfg, footprint and footprint.plain, count)
         most = len(levels)
         drive_levels = list(levels)
     else:
@@ -437,14 +445,15 @@ def ring_levels(space, cfg: PlannerConfig, took: Optional[Callable[[str], None]]
     if took is not None:
         took('perimeter')
     rings_of = Rings(levels, drive_levels, len(perimeter_levels), [], Polygon(), Polygon(), Polygon(), concentric,
-                     count, islands, loop_spacing, owners, own_rings)
+                     count, islands, loop_spacing, owners, own_rings, list(rec.rings) if rec is not None else [])
     middles = [_middle(outer, inner, loop_spacing, half) for outer, inner in zip(levels, levels[1:] + [Polygon()])] \
         if concentric else []
     # what's left after the loops (kept for checks and plots, the lanes use the same edge directly)
     remaining = polygonal(subtract(free, [LineString(ring + [ring[0]]).buffer(half, QUAD_SEGS)
                                           for k, level in enumerate(perimeter_levels)
                                           for kind, ring in rings(level) if rings_of.driven(k, kind, ring)] +
-                                   [LineString(ring + [ring[0]]).buffer(half, QUAD_SEGS) for _, ring in own_rings]))
+                                   [LineString(ring + [ring[0]]).buffer(half, QUAD_SEGS)
+                                    for ring in [ring for _, ring in own_rings] + rings_of.recorded]))
     # (the lanes reach lane_overlap_passes loops further out, of the outline's and of the islands')
     lane_out, lane_isl = max(0, count - int(cfg.lane_overlap_passes)), max(0, islands - int(cfg.lane_overlap_passes))
     lane_passes = min(lane_out, lane_isl)
@@ -559,7 +568,6 @@ def _narrow_loops(levels: list, shrink: _Shrink, lane_region, lane_passes: int, 
     if not cut:
         return None
     # (opened by a hair: GEOS can leave a spike without area there, the first row of lanes would go by it)
-    # (opened by a hair: GEOS can leave a spike without area there, the first row of lanes would go by it)
     wide = polygonal(subtract(lane_region, cut).buffer(-1e-6, 1, join_style=2).buffer(1e-6, 1, join_style=2))
     # bits left between narrow parts too small for more than a few lanes go to the loops as well
     wide = polygonal(union(p for p in polygons(wide) if p.area >= (4.0 * r) ** 2))
@@ -574,27 +582,3 @@ def _narrow_loops(levels: list, shrink: _Shrink, lane_region, lane_passes: int, 
     middles = [_middle(outer, union([inner, wide]) if k + 1 >= lane_passes else inner, spacing, half)
                for k, (outer, inner) in enumerate(zip(levels, levels[1:] + [Polygon()]))]
     return middles, wide
-
-
-def narrow_left(narrow, passes, remaining, half: float):
-    """Of the strips too narrow for lanes those the lanes leave something of (more than a cm2): a narrow piece needs no
-    loop where the lanes already mow what the loops leave around it (they reach on into a strip along them, see
-    scan_lanes). The lanes of each set by row, so only those next to a piece are looked at."""
-    by_row = [(a, sorted((lane.y, x0, x1) for cell in cells for lane in cell for x0, x1 in lane.pieces()))
-              for a, cells in passes]
-
-    def left(piece) -> float:
-        strip = piece.buffer(half, QUAD_SEGS)
-        near = []
-        for a, lanes in by_row:
-            c, s = math.cos(a), math.sin(a)
-            xs, ys = zip(*[(x * c + y * s, -x * s + y * c) for x, y in strip.exterior.coords])
-            first = bisect.bisect_left(lanes, (min(ys) - half,))
-            for y, x0, x1 in lanes[first:bisect.bisect_right(lanes, (max(ys) + half, math.inf))]:
-                if x0 < max(xs) + half and x1 > min(xs) - half:
-                    line = LineString(Lane(0, x0, x1, y).ends(a))
-                    if line.distance(strip) < half:
-                        near.append(line.buffer(half, QUAD_SEGS))
-        return subtract(strip.intersection(remaining), near).area
-
-    return polygonal(union(p for p in polygons(narrow) if left(p) > 1e-4))  # more than a cm2

@@ -13,15 +13,13 @@ from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tup
 from shapely.geometry import Polygon
 
 from .geometry import QUAD_SEGS, clean_polygon
-from .config import MAX_BLADE_OFFSET, PlannerConfig, PlanningError
+from .config import LARGER, MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
 # a mowing area lies in another (is nested) with this share of it in there at least
 NESTED_SHARE = 0.9
 # what the planner reads of an area's properties that the robot or the app writes for it (contract.json)
 MAP_FIELDS = ('recorded_body',)
-# m, a body that sticks out of the one an area was recorded with by more than this is larger (body_hints, Master 10.11.)
-LARGER = 0.02
 
 
 @dataclass
@@ -198,6 +196,12 @@ def bodies_for(data: Optional[Mapping[str, Any]], outlines: Any,
         if corners is not None:
             out.append((outline, corners))
     return tuple(out)
+
+
+def body_known(bodies: Sequence[Tuple[Any, Any]], outline: Any) -> bool:
+    """Whether bodies (bodies_for's) has the body this outline was recorded with."""
+    pts = [(float(p[0]), float(p[1])) for p in outline]
+    return any([(float(p[0]), float(p[1])) for p in ring] == pts for ring, _ in bodies)
 
 
 def body_hints(data: Optional[Mapping[str, Any]], outlines: Any, corners: Optional[Sequence[XY]],

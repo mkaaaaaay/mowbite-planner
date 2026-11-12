@@ -14,7 +14,7 @@ from shapely.geometry import LineString
 from .config import DRIVE_SPIN_MARGIN, LANE, TURN, CoveragePlan, PlannerConfig, PlanningError, SegmentInfo
 from .handover import _lengths
 from .mathutil import Pose2D, normalize_angle
-from .sweep import body_out, plan_footprint
+from .sweep import body_out, on_recorded, plan_footprint, recorded_footprint
 
 # m along the lane the S takes to get one lane spacing across (longer, flatter, where the body doesn't fit: by
 # SHIFT_MORE up to SHIFT_MAX), m between poses on it
@@ -114,6 +114,8 @@ def corners(plan: CoveragePlan) -> CoveragePlan:
     if fp is None:
         return plan
     poses, starts = plan.poses, set(plan.section_starts)
+    rec = recorded_footprint(plan)  # (the recorded loop's corners in its own space)
+    mild = on_recorded(plan.segments, rec[1], len(poses)) if rec is not None else None
     back = [False] * len(poses)
     for s in plan.segments:
         back[s.start:s.end] = [s.reverse] * (s.end - s.start)
@@ -131,7 +133,8 @@ def corners(plan: CoveragePlan) -> CoveragePlan:
             continue
         h = math.atan2(hy, hx)
         q = Pose2D(c.x + CORNER_STEP * x2 / n2, c.y + CORNER_STEP * y2 / n2, c.yaw)
-        if fp.fits_turn(c.x, c.y, a.yaw, h, True) and fp.fits_turn(q.x, q.y, h, c.yaw, True):
+        f = rec[0] if mild is not None and mild[i] else fp
+        if f.fits_turn(c.x, c.y, a.yaw, h, True) and f.fits_turn(q.x, q.y, h, c.yaw, True):
             turn[i] = (h, q)
     if not turn:
         return dataclasses.replace(plan, stats=dict(plan.stats, corners=0))

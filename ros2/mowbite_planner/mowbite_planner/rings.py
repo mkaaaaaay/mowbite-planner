@@ -17,8 +17,9 @@ from .geometry import QUAD_SEGS, inset, polygonal, polygons, rings
 from .lead import lead_in
 from .levels import CORNER_CUT, centre_line, left_out as levels_left_out
 from .loopfit import LoopFits
-from .maneuvers import CORNER_ANGLE, closest_on_polyline, drive_polyline
+from .maneuvers import clear_of_corners, closest_on_polyline, drive_polyline
 from .mathutil import Pose2D, angle_diff
+from .recorded import RecordedLoops
 from .route import Route
 from .trace import HAIR_KEEP, _bad, repaired, turned_to
 
@@ -182,7 +183,7 @@ class Loops:
                 lead = 2.0 * self.cfg.lane_spacing
                 target = (target[0] + lead * math.cos(self.heading), target[1] + lead * math.sin(self.heading))
         i, entry, _ = (0, closed[0], 0.0) if target is None else closest_on_polyline(closed, target)
-        entry = _clear_of_corners(closed, i, entry, 2.0 * radius)
+        entry = clear_of_corners(closed, i, entry, 2.0 * radius)
         loop = [entry] + closed[i + 1:] + closed[1:i + 1] + [entry]
         flip = self._flip(ring, loop, hole, kind, level)
         if flip:
@@ -239,7 +240,7 @@ class Loops:
             return poses, flip, (fixed, left)
         elif better is not None:
             i, entry, _ = closest_on_polyline(closed, better)
-            entry = _clear_of_corners(closed, i, entry, 2.0 * radius)
+            entry = clear_of_corners(closed, i, entry, 2.0 * radius)
             loop = [entry] + closed[i + 1:] + closed[1:i + 1] + [entry]
             if flip:
                 loop = loop[::-1]
@@ -311,13 +312,15 @@ class Loops:
         return poses
 
     def perimeter(self, levels: List[object], base_holes: List[List[XY]], last: bool = False,
-                  finish: bool = False, own: Sequence[Tuple[int, List[XY]]] = ()) -> None:
+                  finish: bool = False, own: Sequence[Tuple[int, List[XY]]] = (),
+                  recorded: Sequence[List[XY]] = ()) -> None:
         """The loops along the outline (level by level) and around the obstacles (each from its outermost
         loop in towards it, closest obstacle first, like OpenMower). last: the obstacles first, then the
         outline from the inside out, ending on the outermost loop. finish (nothing comes after the loops):
         of the last level's loops (or obstacles) the one closest to the end point comes last and ends as close
         to it as it gets, the obstacles go first if that's closer. own: (level, ring) of islands' loops on their own
-        (levels.Rings.own_rings), with that level's."""
+        (levels.Rings.own_rings), with that level's. recorded: the recorded loop's rings (recorded.py), the outermost
+        of the outline's."""
         hole_polys = [Polygon(h) for h in base_holes]
         hole_marks = [p.representative_point() for p in hole_polys]
         outlines: List[Tuple[int, List[List[XY]]]] = []
@@ -368,10 +371,24 @@ class Loops:
                     final = group is keep and i == len(group) - 1
                     self.drive_ring(ring, True, target=self.end if final else None, level=k)
 
-        if last or obstacles_first:
-            obstacle_loops(finish and not outlines)
+        recorded = [] if self.cfg.skip_outline_loops else list(recorded)
+
+        def recorded_loop(finish: bool):
+            while recorded:
+                ring = min(recorded, key=self._ring_distance)
+                recorded.remove(ring)
+                self.drive_recorded(ring, self.end if finish and not recorded else None)
+
+        if last:
+            obstacle_loops(finish and not outlines and not recorded)
+            outline_loops(finish and not recorded)
+            recorded_loop(finish)
+        elif obstacles_first:
+            obstacle_loops(False)
+            recorded_loop(False)
             outline_loops(finish)
         else:
+            recorded_loop(finish and not outlines and not groups)
             outline_loops(finish and not groups)
             obstacle_loops(finish)
 
@@ -512,29 +529,6 @@ def _splice(ring: List[XY], other: List[XY], lead: float = 0.0) -> List[XY]:
     return from_to(closed, p) + from_to(round_, q)
 
 
-def _clear_of_corners(closed: List[XY], i: int, entry: XY, keep: float) -> XY:
-    """Moves a loop's start/end point on segment i away from a corner next to it: the loop starts and ends
-    there, so a corner right at it couldn't be rounded."""
-    n = len(closed) - 1
-    (ax, ay), (bx, by) = closed[i], closed[i + 1]
-    length = math.hypot(bx - ax, by - ay)
-    if keep <= 0.0 or length < 1e-9:
-        return entry
-    t = math.hypot(entry[0] - ax, entry[1] - ay)
-
-    def corner(k: int) -> bool:
-        p, q, r = closed[(k - 1) % n], closed[k % n], closed[(k + 1) % n]
-        return angle_diff(math.atan2(r[1] - q[1], r[0] - q[0]), math.atan2(q[1] - p[1], q[0] - p[0])) > CORNER_ANGLE
-
-    if t < keep and corner(i):
-        t = min(keep, 0.5 * length)
-    elif length - t < keep and corner(i + 1):
-        t = max(length - keep, 0.5 * length)
-    else:
-        return entry
-    return ax + (bx - ax) * t / length, ay + (by - ay) * t / length
-
-
 def _first_direction(loop: List[XY]) -> Optional[XY]:
     for p in loop[1:]:
         dx, dy = p[0] - loop[0][0], p[1] - loop[0][1]
@@ -544,5 +538,6 @@ def _first_direction(loop: List[XY]) -> Optional[XY]:
     return None
 
 
-class _Route(LoopFits, Loops, Route):
-    """The route the path is put together on (route.Route) with its loops (Loops) and their repairs (LoopFits)."""
+class _Route(LoopFits, RecordedLoops, Loops, Route):
+    """The route the path is put together on (route.Route) with its loops (Loops, RecordedLoops) and their repairs
+    (LoopFits)."""

@@ -54,7 +54,8 @@ A robot's own node is a class of MowbitePlannerNode: its parameters' defaults, t
 methods, whether it plans coverage at all (plans_coverage), its transport (rpc_input, answer, rpc_end, map_input,
 events_input, send_out), its parameters (robot_param), writing the map (replace_map), when the map can't be planned
 (map_unusable), the settings it gives itself (given_by, given), how it gets to a plan's sections (arrives), drive slope and reverse it can't drive (drive_ignored), backing up out of dead ends it
-can't drive (back_out_ignored, by default as drive), its own last check of every plan (checked);
+can't drive (back_out_ignored, by default as drive), the areas it drives no recorded loop on (recorded_loop_ignored),
+its own last check of every plan (checked);
 main(node_class=it, executor_class=its executor). SIGINT and SIGTERM end it with destroy_node first (see main).
 """
 
@@ -90,11 +91,11 @@ from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER
                    PlannerCore)
 from .core import call as core_call
 from .export import ANSWER_TOO_BIG, fingerprint, too_big
-from .mapfile import AreaJob, _number, area_job, bodies_for, body_told, margins_for, match_area
+from .mapfile import AreaJob, _number, area_job, bodies_for, body_known, body_told, margins_for, match_area
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, COVERAGE_CODES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS,
-                     MAX_PASSES, NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS, ROUTE_ORDERS,
-                     TRANSIT, TURN, TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
+                     MAX_PASSES, MAX_RECORDED_MARGIN, NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS,
+                     ROUTE_ORDERS, TRANSIT, TURN, TURN_TYPES, CoveragePlan, PlannerConfig, PlanningError, out_kinds)
 from .mqtt_service import _float32
 from .planner import plan_coverage
 
@@ -176,6 +177,17 @@ PARAMETERS = {
                             'same way every plan). With the body set the outermost loop of auto and random goes the '
                             'way the outline was recorded', lambda v: v in PERIMETER_DIRECTIONS,
                             'must be auto, ccw, cw or random'),
+    'recorded_loop': (False, 'the outermost loop along the outline is the line the area was recorded on itself: the '
+                      "mower's centre drives on that line, the way round it was recorded (whatever "
+                      'perimeter_direction says), the body where it was while recording (edge_margin and spin_margin '
+                      "don't count for this one loop). It takes the outermost loop's place (perimeter_passes counts "
+                      'it), the loops after it and the ones round the obstacles as ever. Only with the body set, edges '
+                      'recorded, blade_offset 0.0, perimeter_passes not 0 and fill_pattern not concentric, and not '
+                      'for a mower larger than the one the area was recorded with: else planned without it, the '
+                      'plan warns of it', None, ''),
+    'recorded_loop_margin': (0.0, "with recorded_loop: how far inside the recorded line the mower's centre drives "
+                             'that one loop [m]. 0.0: on the line itself, the blade mows half its width past it. '
+                             'Every other loop and margin as it is', lambda v: v >= 0.0, 'must be >= 0'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
                             'outline_overlap_count)', lambda v: 0 <= v <= MAX_PASSES, f'must be 0..{MAX_PASSES}'),
     'lane_overlap_limit': (False, 'the mower gets no further out on the lanes than they reach: the turns between '
@@ -252,6 +264,7 @@ RANGES = {
     'edge_margin': (0.0, 1.0),
     'obstacle_margin': (0.0, 1.0),
     'spin_margin': (0.0, 1.0),
+    'recorded_loop_margin': (0.0, MAX_RECORDED_MARGIN),
     'robot_rear': (-1.0, 5.0),
     'blade_offset': (-1.0, 1.0),
     'blade_ahead': (-1.0, 1.0),
@@ -500,6 +513,9 @@ class NodeCore(PlannerCore):
     def back_out_ignored(self):
         return self.node.back_out_ignored()
 
+    def recorded_loop_ignored(self, recorded):
+        return self.node.recorded_loop_ignored(recorded)
+
     def checked(self, plan):
         return self.node.checked(plan)
 
@@ -709,6 +725,10 @@ class MowbitePlannerNode(Node):
 
     def back_out_ignored(self) -> str:
         return self.drive_ignored()
+
+    def recorded_loop_ignored(self, recorded: bool) -> str:
+        """PlannerCore's recorded_loop_ignored, and for a plan without the map."""
+        return ''
 
     def checked(self, plan: CoveragePlan) -> CoveragePlan:
         """PlannerCore's checked, and of a plan without the map: the robot's own last check (none here)."""
@@ -966,15 +986,19 @@ class MowbitePlannerNode(Node):
         (the plan, it as nav_msgs/Path, what to tell the caller, ~/plan_coverage's code: '' with a plan), the first
         two None if it failed, the path also if it's neither wanted nor published. warnings: about the request, told
         with the plan's."""
-        for w in warnings:
-            self.get_logger().warning(w)
         # (the body each one was recorded with where the map has it)
         data = self.core.current_map() if self.core is not None else None
         rings = [boundary, *obstacles, *drivable]
         bodies = bodies_for(data, rings)
+        cfg = self.config(values, **overrides)
+        off = self.recorded_loop_ignored(body_known(bodies, boundary)) if cfg.recorded_loop else ''
+        if off:
+            cfg, warnings = cfg.with_overrides({'recorded_loop': False}), [*warnings, 'recorded_loop ignored: ' + off]
+        for w in warnings:
+            self.get_logger().warning(w)
         try:
-            plan = self.checked(plan_coverage(boundary, obstacles, self.config(values, **overrides), start, end,
-                                              drivable, **({'bodies': bodies} if bodies else {})))
+            plan = self.checked(plan_coverage(boundary, obstacles, cfg, start, end, drivable,
+                                              **({'bodies': bodies} if bodies else {})))
         except PlanningError as e:
             self.get_logger().warning(f'planning failed: {e}')
             return None, None, with_warnings(str(e), warnings), code_of(e)

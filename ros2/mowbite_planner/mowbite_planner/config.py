@@ -129,6 +129,21 @@ SWEPT_PIECE = 400
 # m, swept_area: on the blade's half width. Loops or lanes exactly the blade's width apart made GEOS buffer a way along
 # them into its outline alone, the holes lost (real-mkay/0@mkay, 0.14 m apart, the blade TRACK narrower each side)
 SWEPT_SLACK = 1e-6
+# m, recorded_loop: recorded_loop_margin at most; the loop's centre this far outside its line at most, its body as far
+# past where it was while the line was recorded (on the line it touches that's edge): an arc of perimeter_corner_radius
+# rounding a kink of the line that turns away from the lawn passes that far outside it (30 degrees: 5 mm; a recorded
+# line's points are a cm off either way, without the arcs the mower would turn on the spot every metre or two)
+MAX_RECORDED_MARGIN = 0.5
+RECORDED_SLACK = 0.005
+RECORDED_OFF = 0.005
+# m, the recorded loop's centre keeps this much more than the body's half width off what the body keeps off inside the
+# area (the obstacles with their margins): it fits across there, as the other loops (levels' RING_EPS)
+RECORDED_KEEP = 0.01
+# recorded_loop_margin: a kink of the line moved in stays one point up to where that would lie this many margins from
+# the recorded one (a turn of 120 degrees)
+RECORDED_MITRE = 2.0
+# m, a body that sticks out of the one an area was recorded with by more than this is larger (Master 10.11.)
+LARGER = 0.02
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
 # all threads: where _fit_body got to (poses, their sections, whether the blade mows on the way to each, [(the furthest
 # pose read, where it got to)]) and the body spaces (_body_space, as WKB), by a hash of what they depend on, the last
@@ -334,6 +349,17 @@ class PlannerConfig:
     # base_link between the drive wheels; negative: behind it). The lanes start and end that much earlier, so the
     # blade mows them where they are
     blade_ahead: float = 0.0
+    # the outermost loop along the outline drives the line the area was recorded on: the mower's centre on that line,
+    # the way it was recorded (the way its points go, whatever perimeter_direction says), recorded_loop_margin m inside
+    # it (0: on the line). In place of the outermost loop, not on top (perimeter_passes counts it): the loops after it
+    # follow a lane spacing further in each, with edge_margin as ever; round the obstacles nothing changes. Its body
+    # stays where the body was while the edges were recorded (space.recorded_space), not edge_margin and spin_margin
+    # off that; where it doesn't fit so the loop runs further in or leaves that piece out. Only with the body checked,
+    # edges recorded, blade_offset 0, loops along the outline and not fill_pattern concentric, and not for a mower
+    # larger than the one the area was recorded with (the map's recorded_body): planned without it then, said in the
+    # warnings (recorded_off)
+    recorded_loop: bool = False
+    recorded_loop_margin: float = 0.0
 
     @property
     def passes(self) -> int:
@@ -343,6 +369,12 @@ class PlannerConfig:
         starts there too (the turn goes level with it), and the blade there is blade_ahead further in."""
         if self.perimeter_passes >= 0:
             return int(self.perimeter_passes)
+        return max(1, int(math.ceil((self._loops_reach - self.blade_loop_offset) / self.lane_spacing - 1e-9)) + 1)
+
+    @property
+    def _loops_reach(self) -> float:
+        """m from the edge in the innermost loop's centre has to run at least (passes -1): where the lanes' blade gets
+        to from the inside, half the mower width further out."""
         half, r, d = 0.5 * self.mower_width, self.turn_radius, self.lane_spacing
         # (the bulb: out the other way by theta, round its loop of turn_radius, its middle 2 r sin(theta) ahead)
         ahead = 2.0 * r * math.sqrt(1.0 - ((d + 2.0 * r) / (4.0 * r)) ** 2) \
@@ -354,7 +386,46 @@ class PlannerConfig:
         else:
             end = self.centre_offset + ahead + r
         strip = end + abs(self.blade_ahead) - half  # from the edge in, what the lanes leave
-        return max(1, int(math.ceil((strip - half - self.blade_loop_offset) / self.lane_spacing - 1e-9)) + 1)
+        return strip - half
+
+    @property
+    def recorded_off(self) -> str:
+        """Why recorded_loop changes nothing with these settings ('' where it does, or it's off)."""
+        if not self.recorded_loop:
+            return ''
+        if not self.body:
+            return 'no mower size set (robot_width, robot_front and robot_rear, or robot_outline)'
+        if self.edges != 'recorded':
+            return 'edges hard (the lines are walls, not where the mower drove)'
+        if self.blade_offset != 0:
+            return 'blade_offset set (the loops go round with the blade on their outer side)'
+        if self.fill_pattern == 'concentric':
+            return 'fill_pattern concentric'
+        if self.passes < 1:
+            return 'no loops along the outline (perimeter_passes 0)'
+        return ''
+
+    @property
+    def loop_recorded(self) -> bool:
+        """Whether the outermost loop along the outline is the recorded one, by the settings (the map: space.py)."""
+        return self.recorded_loop and not self.recorded_off
+
+    @property
+    def outline_first(self) -> float:
+        """m from the outline to the first loop's centre after the recorded one: a lane spacing in from that, no closer
+        than a first loop runs anyway."""
+        return max(self.centre_offset, self.recorded_loop_margin + self.lane_spacing)
+
+    @property
+    def outline_passes(self) -> int:
+        """The loops along the outline after the recorded one, which is the first of passes (-1: as many as the lanes'
+        turns need from where those run, outline_first; none where the recorded one reaches that far itself)."""
+        if self.perimeter_passes >= 0:
+            return max(0, int(self.perimeter_passes) - 1)
+        reach = self._loops_reach
+        if self.recorded_loop_margin >= reach:
+            return 0
+        return max(1, int(math.ceil((reach - self.outline_first) / self.lane_spacing - 1e-9)) + 1)
 
     @property
     def island_passes(self) -> int:
@@ -555,6 +626,7 @@ class PlannerConfig:
         finite('edge_margin', 0.0, MAX_BLADE_OFFSET)
         finite('obstacle_margin', 0.0, MAX_BLADE_OFFSET)
         finite('spin_margin', 0.0, MAX_BLADE_OFFSET)
+        finite('recorded_loop_margin', 0.0, MAX_RECORDED_MARGIN)
         for name in ('lane_spacing_min', 'lane_spacing_max'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, self.mower_width, lo_open=True)
@@ -584,7 +656,8 @@ class PlannerConfig:
                 any(t not in TURN_TYPES for t in self.turn_types):
             raise PlanningError(f'turn_types must be some of {", ".join(TURN_TYPES)}, got {self.turn_types!r}')
         for name in ('turn_radius_auto', 'split_zones', 'skip_outline_loops', 'skip_obstacle_loops', 'skip_lanes', 'nested_areas',
-                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up', 'lane_overlap_limit', 'back_out'):
+                     'turn_on_spot', 'headland_turns', 'body_fit', 'mop_up', 'lane_overlap_limit', 'back_out',
+                     'recorded_loop'):
             if not isinstance(getattr(self, name), bool):
                 raise PlanningError(f'{name} must be true or false, got {getattr(self, name)!r}')
 
@@ -696,13 +769,18 @@ class CoveragePlan:
     # the loop levels (level k: free_space shrunk by the k-th loop's offset), the strips too narrow for lanes,
     # the lanes of every set as cells (lane frame, see Lane), and for every 'loop-<i>' and 'lane-<i>' (index
     # into perimeter_loops, lanes) what it was made from: {'parent': 'level-<k>' | 'middle-<k>' | 'narrow' |
-    # 'cell-<set>-<index>' (into cells), 'kind': ...}
+    # 'cell-<set>-<index>' (into cells) | 'recorded' (the recorded loop) | 'instead' (the first loop in its place),
+    # 'kind': ...}
     levels: List[object] = dataclasses.field(default_factory=list)
     narrow: object = None
     cells: List[Tuple[float, List[List['Lane']]]] = dataclasses.field(default_factory=list)
     origins: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
     # the areas not to mow next to it (plan_coverage's unmowed), the blade kept off them (None: none)
     unmowed: object = None
+    # recorded_loop: where the body may be on the recorded loop (space.recorded_space) and that loop's pieces by name
+    # ('loop-<i>'): their PERIMETER segments are checked in that space (sweep.body_out)
+    recorded_space: object = None
+    recorded_loops: Tuple[str, ...] = ()
 
 
 def _rounded_box(width: float, front: float, rear: float, front_width: Optional[float],

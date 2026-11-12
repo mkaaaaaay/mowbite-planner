@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from shapely.geometry import LineString, Point
 from shapely.prepared import prep
 
-from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan
+from .config import LANE, PERIMETER, RECORDED_OFF, TRANSIT, TURN, CoveragePlan
 from .geometry import inset, polygons, union
 from .mathutil import Pose2D
-from .sweep import blade_over, blade_points, body_out, plan_footprint, swept_area
+from .sweep import blade_over, blade_points, body_out, on_recorded, plan_footprint, recorded_footprint, swept_area
 
 # m2, a piece left unmowed smaller than this is a tuft at a corner, not a mistake
 TUFT = 0.01
@@ -179,11 +179,15 @@ def rules(plan: CoveragePlan) -> Dict[str, Any]:
         if plan.transit_space is not None else inside
     jumps = {s - 1 for s in plan.section_starts[1:]}
     outside = 0
+    # (the recorded loop's, recorded_loop: on the outline, RECORDED_OFF past it)
+    mild = on_recorded(plan.segments, plan.recorded_loops, len(poses))
+    line = prep(plan.area.buffer(RECORDED_OFF + TOLERANCE)) if any(mild) and plan.area is not None else None
     for seg in plan.segments:
         where = drivable if seg.kind == TRANSIT else inside
         if where is None:
             continue
-        outside += sum(1 for p in poses[seg.start:seg.end + 1] if not where.covers(Point(p.x, p.y)))
+        outside += sum(1 for i, p in enumerate(poses[seg.start:seg.end + 1], seg.start)
+                       if not (line if line is not None and mild[i] else where).covers(Point(p.x, p.y)))
     if outside:
         hard.append(f'{outside} poses outside the space the mower may drive in')
     gaps = [i for i, (a, b) in enumerate(zip(poses, poses[1:]))
@@ -195,7 +199,7 @@ def rules(plan: CoveragePlan) -> Dict[str, Any]:
             and (cfg is None or cfg.drive == 'forward'):
         hard.append('drives backwards')
     footprint = plan_footprint(plan, blade=False)
-    body = body_out(poses, plan.segments, plan.section_starts, footprint) \
+    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
         if footprint is not None else []
     if body:
         hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '

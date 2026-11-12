@@ -105,7 +105,7 @@ def _work(route: _Route, parts: list, rings_of: Rings, passes: Passes, narrow) -
 
     def todo(k: int) -> Dict[str, Any]:
         return work.setdefault(k, {'levels': {}, 'middles': {}, 'cells': [[] for _ in passes], 'narrow': None,
-                                   'own': []})
+                                   'own': [], 'recorded': []})
 
     for key, geoms in (('levels', rings_of.drive_levels), ('middles', rings_of.middles)):
         for i, geom in enumerate(geoms):
@@ -122,6 +122,9 @@ def _work(route: _Route, parts: list, rings_of: Rings, passes: Passes, narrow) -
         todo(k)['narrow'] = geom
     for level, ring in rings_of.own_rings:
         todo(part_of(ring[0]))['own'].append((level, ring))
+    for ring in rings_of.recorded:  # (its line lies outside the parts: the one most of which lies in it)
+        inside = Polygon(ring)
+        todo(max(range(len(parts)), key=lambda i: (parts[i].intersection(inside).area, -i)))['recorded'].append(ring)
     return work
 
 
@@ -133,8 +136,9 @@ def _mow_part(route: _Route, w: Dict[str, Any], rings_of: Rings, passes: Passes,
     last, empty = cfg.perimeter_order == 'last', Polygon()
     skip = {'outline': cfg.skip_outline_loops, 'hole': cfg.skip_obstacle_loops}
     spiral = rings_of.ringed and cfg.fill_pattern == 'concentric'
-    loops_here = not spiral and any(not skip[kind] and not route.ring_out(kind, ring, i)
-                                    for i, g in w['levels'].items() if i < rings_of.perimeter for kind, ring in rings(g))
+    loops_here = not spiral and (bool(w['recorded']) and not skip['outline'] or any(
+        not skip[kind] and not route.ring_out(kind, ring, i)
+        for i, g in w['levels'].items() if i < rings_of.perimeter for kind, ring in rings(g)))
     loops_end = loops_here and (last or not any(w['cells']) and w['narrow'] is None) and not rings_of.ringed
 
     def loops() -> None:
@@ -144,7 +148,7 @@ def _mow_part(route: _Route, w: Dict[str, Any], rings_of: Rings, passes: Passes,
             route.concentric(levels, middles, rings_of.most, last, rings_of.loop_spacing, last or not any(w['cells']),
                              cfg.narrow_parts == 'loops')
             return
-        route.perimeter(levels[:rings_of.perimeter], holes, last, loops_end, w['own'])
+        route.perimeter(levels[:rings_of.perimeter], holes, last, loops_end, w['own'], w['recorded'])
         if rings_of.ringed:
             # narrow_parts 'loops': the narrow parts' own loops after the loops along the edges, one after the other
             route.concentric([empty] * rings_of.most + levels[rings_of.most:], middles, rings_of.most, last,

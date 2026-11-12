@@ -123,6 +123,17 @@ A few worth knowing:
 - With the body set (`robot_outline`, a model's contour in the app, or `robot_width`, `robot_front` and
   `robot_rear`) the outermost loop goes the way the edge was recorded (with `auto` and `random`): the body stays where
   it was while recording, a long front gets round the bends of the edge. The other loops go as set.
+- `recorded_loop`: the outermost loop along the outline is the line the area was recorded on itself. The mower's
+  centre drives on that line, the way round it was recorded (whatever `perimeter_direction` says), the body where it
+  was while recording: `edge_margin` and `spin_margin` don't count for this one loop. It takes the outermost loop's
+  place (`perimeter_passes` counts it), the other loops and the ones round obstacles stay as they are.
+  `recorded_loop_margin` (m) moves that one loop in from the recorded line; 0: on the line itself, the blade mows half
+  its width past it (more than half the cutting width: a strip along the line stays unmowed). Where the body doesn't
+  fit on the line (a corner by an obstacle, a sharp corner with a margin set) that stretch runs further in.
+  Only with the body set, `edges: recorded`, `blade_offset` 0, loops along the outline and not `fill_pattern:
+  concentric`, and not for a mower larger than the one the area was recorded with (the map's `recorded_body`):
+  else the area is planned without it, the plan's `warnings` say why (`recorded_loop ignored: ...`) and
+  `planner.settings` says `ignored` with why. Only for areas recorded by driving along their edge, not for drawn ones.
 - `lane_spacing_mode: auto`: the planner picks the lane spacing, `perimeter_passes: -1` the number of loops.
 - `lane_overlap_limit`: on the lanes and the turns between them the mower gets no further out than the lanes reach
   (`lane_overlap_passes`, OpenMower's `outline_overlap_count`), so it keeps further off the edge there. Without it

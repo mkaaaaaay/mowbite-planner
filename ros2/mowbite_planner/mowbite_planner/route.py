@@ -68,6 +68,14 @@ class Route:
         self.owners: Optional[list] = None
         self.ring_counts: Tuple[int, int, int] = (0, 0, 0)
         self.loop_side: Dict[str, float] = {}  # loop -> 1 driven with the mowable side on its left, -1 on its right
+        # recorded_loop (recorded.py): the body's check on the recorded loop, where its centre may go, its pieces (by
+        # name), m driven of it, left out and of the first loop in its place there, recorded_first(): that loop's rings
+        self.recorded_fp: Optional[Footprint] = None
+        self.recorded_room = None
+        self.recorded_loops: set = set()
+        self.recorded_done: Dict[str, Any] = {'m': 0.0, 'left_m': 0.0, 'else_m': 0.0, 'pieces': 0, 'repaired': 0}
+        self.recorded_first: Any = None
+        self._recorded_first: Optional[list] = None
         self.angle = 0.0
         self.lane_ys: Dict[float, List[float]] = {}
         self._rows: Dict[float, List[Tuple[float, List[Tuple[float, float]]]]] = {}

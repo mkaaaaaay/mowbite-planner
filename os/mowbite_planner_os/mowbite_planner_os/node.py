@@ -15,6 +15,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
   - an area's recorded_body (the body it was recorded with, see mowbite_planner's mapfile.recorded_body): the plans and
     the ways (~/plan_transit, arrives) take where the body was while recording from that one, a ring of a request
     found in the map by its outline. planner.plan's body_hints: missing for the areas recorded without one too.
+    recorded_loop only on an area that has one (one without was drawn, not driven: planned without it, the plan's
+    warnings say so), and not where no way gets to all of the plan with it (arrives): planned without it then too.
   - mowbite_logic's events (STATE, JOB_COMPLETE, JOB_RESET) from bridge/publish (events/json): angle_increment,
     perimeter_direction random, finished_mows, the finished mow's planner.drive and timing. The planning's progress
     (mowbite/planner/progress) out on bridge/publish, as api/planner.schema.json says (the planner's part of MowBite OS'
@@ -100,7 +102,7 @@ from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
 from mowbite_planner.starts import _Spent
-from mowbite_planner.sweep import body_out, plan_footprint
+from mowbite_planner.sweep import body_out, plan_footprint, recorded_footprint
 from mowbite_planner_os_interfaces.srv import PlanTransit
 
 from .transit_route import CODES, MAX_OUTSIDE, centre_space, plan_transit
@@ -434,7 +436,8 @@ class OsNode(base.MowbitePlannerNode):
         """plan where the body's check of the tests finds nothing (see the top), else PlanningError with the word
         BODY_OUT, telling where."""
         footprint = plan_footprint(plan, blade=False)
-        out = body_out(plan.poses, plan.segments, plan.section_starts, footprint) if footprint is not None else []
+        out = body_out(plan.poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
+            if footprint is not None else []
         if not out:
             return plan
         places: List[dict] = []
@@ -457,6 +460,11 @@ class OsNode(base.MowbitePlannerNode):
 
     def back_out_ignored(self) -> str:
         return '' if self.backs_up() else self.drive_ignored()
+
+    def recorded_loop_ignored(self, recorded: bool) -> str:
+        """An area without recorded_body wasn't recorded by driving it (drawn: half the mower would be outside it)."""
+        return '' if recorded else 'MowBite OS: only on an area recorded by driving along it (recorded_body in the ' \
+            'map), this one has none'
 
     # how it gets to a plan's sections: ~/plan_transit
 

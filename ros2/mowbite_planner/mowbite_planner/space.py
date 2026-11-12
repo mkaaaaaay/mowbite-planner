@@ -9,10 +9,10 @@ from shapely import wkb
 from shapely.geometry import LineString, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
-from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, MAX_BLADE_OFFSET, ON_EDGE, XY, PlannerConfig,
-                     PlanningError, _keep)
+from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LARGER, MAX_BLADE_OFFSET, ON_EDGE, RECORDED_KEEP,
+                     RECORDED_MITRE, RECORDED_OFF, RECORDED_SLACK, XY, PlannerConfig, PlanningError, _keep)
 from .footprint import TURN_STEP, Blade, Footprint
-from .geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
+from .geometry import JOIN_MITRE, QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .mathutil import normalize_angle
 
 
@@ -164,6 +164,64 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
     return wkb.loads(found[1].wkb), found[2]
 
 
+def recorded_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Sequence[Sequence[float]]],
+                   margin_of: List[float], cfg: PlannerConfig, bodies=()):
+    """Where the body may be on the recorded loop (recorded_loop): where it was while the edges were recorded
+    (_body_space without edge_margin, RECORDED_SLACK past it: on the line the body touches its edge), the obstacles'
+    margins kept. recorded_loop_margin isn't taken off it: the loop runs that far inside its line, its body's corners
+    at a bend of that less far in than where they were (a space that much smaller the loop itself wouldn't fit in).
+    drive reverse: the body turned round went the other way. This thread's kept space stays as it was."""
+    if cfg.drive == 'reverse':
+        outlines, away_from = ([list(ring)[::-1] for ring in rings] for rings in (outlines, away_from))
+        bodies = [(list(ring)[::-1], [(-x, -y) for x, y in corners]) for ring, corners in bodies]
+    last = getattr(_BODY_SPACE, 'last', None)
+    try:
+        return _body_space(outlines, away_from, margin_of, dataclasses.replace(cfg, edge_margin=-RECORDED_SLACK),
+                           None, bodies)[0]
+    finally:
+        _BODY_SPACE.last = last
+
+
+def loop_footprint(space, cfg: PlannerConfig, blade: Optional[Blade] = None) -> Footprint:
+    """The body's check on the recorded loop: in its space (recorded_space), turning on the spot there too (no
+    spin_margin on top: the mower turned there while the line was recorded)."""
+    return Footprint(space, cfg.body_outline, 0.0, blade=blade)
+
+
+def recorded_larger(boundary, cfg: PlannerConfig, bodies) -> bool:
+    """Whether the body is larger than the one the outline was recorded with (bodies: plan_coverage's; none for
+    it: recorded with this one), as mapfile.body_hints has it: not in that one grown by LARGER."""
+    corners = _recorded(bodies).get(tuple((float(p[0]), float(p[1])) for p in boundary))
+    if corners is None:
+        return False
+    if cfg.drive == 'reverse':  # (cfg's body is turned round, see backing.settings)
+        corners = [(-x, -y) for x, y in corners]
+    return not Polygon(cfg.body_outline).within(Polygon(corners).buffer(LARGER, QUAD_SEGS))
+
+
+def _recorded_loop(area, off, centre: float, cfg: PlannerConfig, space) -> 'Recorded':
+    """The recorded loop of area (off: what the loops' centres keep `centre` off, as free has it; space: its
+    recorded_space): the outline recorded_loop_margin in, round what's off like a first loop (further where the margin
+    is more) and where the body fits across by what it keeps off in the area (RECORDED_KEEP), of each part its outer
+    ring; the next loop a lane spacing in from it. A kink of the line turning away from the lawn stays one point moved
+    in (RECORDED_MITRE): as an arc of the margin's radius round it the mower would turn on the spot at each of its
+    points. Past that GEOS may cut the kink off closer than the margin: the arcs then."""
+    m, half = cfg.recorded_loop_margin, 0.5 * cfg.mower_width
+    inside = inset(area, m)
+    if m:
+        kinked = polygonal(area.buffer(-m, join_style=JOIN_MITRE, mitre_limit=RECORDED_MITRE))
+        if inside.buffer(1e-4, 2).covers(kinked):
+            inside = kinked
+    if not off.is_empty:
+        inside = polygonal(inside.difference(off.buffer(max(centre, m), QUAD_SEGS)))
+    kept = polygonal(area.difference(space).buffer(-RECORDED_SLACK, 4))
+    if not kept.is_empty:
+        side = max(abs(y) for _, y in cfg.body_outline)
+        inside = polygonal(inside.difference(kept.buffer(side + RECORDED_KEEP + RECORDED_SLACK, QUAD_SEGS)))
+    found = [ring for p in polygons(inside) if p.area >= half * half for _, ring in rings(Polygon(p.exterior))]
+    return Recorded(found, polygonal(inside.buffer(RECORDED_OFF, 4)), space, max(centre, m + cfg.lane_spacing))
+
+
 def _driven(rings: Sequence[Sequence[Sequence[float]]], bodies: Sequence[Sequence[XY]]):
     """Where a body of each one's corners (bodies, counter-clockwise round its centre, see PlannerConfig.body_outline)
     was while the centre drove along each of the rings the way its points go: along every edge from where it was at the
@@ -223,6 +281,15 @@ def _rows(corners: Sequence[XY]) -> List[List[Tuple[float, float, int]]]:
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
+class Recorded:
+    """The recorded loop of a plan (recorded_loop)."""
+    rings: List[List[XY]]  # the line it drives, a ring a part of the area (as rings() gives them)
+    room: object  # where its centre may go: inside that line, RECORDED_OFF past it
+    space: object  # where its body may be (recorded_space)
+    first: float  # m from the outline in to the next loop's centre
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class Space:
     """A plan's spaces (build_space), the same for the same map and settings."""
     area: object  # the outline
@@ -236,6 +303,8 @@ class Space:
     first: float  # m from the outline in to the blade's first loop
     off: float  # m the centre is further in (blade_offset)
     unmowed: object = None  # the areas not to mow next to it, the blade keeps off them (None: none)
+    recorded: Optional[Recorded] = None  # recorded_loop: the recorded loop
+    recorded_off: str = ''  # why there's none though recorded_loop is set
 
 
 def margins_of(boundary, obstacles, drivable, keep_out, reach_over, margins: Sequence[Optional[float]],
@@ -339,5 +408,16 @@ def build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of: 
         if keep_off is not None:
             extra_space = extra_space.difference(keep_off)
         transit_space = polygonal(union([transit_space, extra_space]))
+    recorded, why = None, cfg.recorded_off
+    if cfg.recorded_loop and not why:
+        if recorded_larger(boundary, cfg, bodies):
+            why = 'the mower is larger than the one the area was recorded with'
+        else:
+            away = union(grown + gaps + slots + [unmowed_space.buffer(max(0.0, half - first), QUAD_SEGS)])
+            recorded = _recorded_loop(area, away, centre, cfg, recorded_space(
+                [boundary] + list(drivable) + list(reach_over), list(obstacles) + list(keep_out), margin_of, cfg,
+                bodies))
+            if not recorded.rings:
+                recorded, why = None, 'the area is too small for it'
     return Space(area, free, robot_space, blade_space, drive_space, transit_space, body_space, slots, first,
-                 off, None if unmowed_space.is_empty else unmowed_space), footprint
+                 off, None if unmowed_space.is_empty else unmowed_space, recorded, why), footprint

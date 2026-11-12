@@ -49,7 +49,7 @@ from mowbite_planner.export import plan_pieces
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import union
 from mowbite_planner.mathutil import Pose2D
-from mowbite_planner.sweep import swept_area
+from mowbite_planner.sweep import on_recorded, recorded_footprint, swept_area
 from mowbite_planner.report import drive_time, left_of
 
 # Move Base Flex's controller loop (move_base_legacy_relay sets move_base's defaults at OpenMower's start): the first
@@ -1063,25 +1063,32 @@ def body_places(plan: CoveragePlan, samples: Sequence[Tuple], modes: Sequence[st
         -> Tuple[List[List[float]], int]:
     """Where the body got out of plan.body_space (the edges less their margins) where the mower really was, looked at
     every BODY_STEP m or BODY_TURN rad: ([[x, y, m], ...] the farthest out (by more than BODY_OFF) within PLACE of each
-    other, farthest first; how many looks found it out by more than that). Nothing without a body outline."""
+    other, farthest first; how many looks found it out by more than that). Following a pose of the recorded loop
+    (recorded_loop) out of that loop's space instead (plan.recorded_space). Nothing without a body outline."""
     cfg = plan.config
     if cfg is None or not cfg.body or plan.body_space is None:
         return [], 0
-    fp = Footprint(plan.body_space, cfg.body_outline)
-    looked, last = [], None
+    spaces, mild = [Footprint(plan.body_space, cfg.body_outline)], []
+    rec = recorded_footprint(plan)
+    if rec is not None:
+        spaces.append(rec[0])
+        mild = on_recorded(plan.segments, rec[1], len(plan.poses))
+    looked, last = [[] for _ in spaces], None
     for s in samples:
         if s[8] not in modes:
             last = None
             continue
         if last is None or math.hypot(s[1] - last[1], s[2] - last[2]) >= BODY_STEP or \
                 abs(_wrap(s[3] - last[3])) >= BODY_TURN:
-            looked.append(Pose2D(s[1], s[2], s[3]))
+            mine = len(s) > 9 and 0 <= s[9] < len(mild) and mild[s[9]]
+            looked[int(mine)].append(Pose2D(s[1], s[2], s[3]))
             last = s
-    bad = [p for p, ok in zip(looked, fp.fit(looked)) if not ok] if looked else []
     found = []
-    for i in range(0, len(bad), 200):
-        part = bad[i:i + 200]
-        found += [(d, xy) for d, xy in fp.out_by([(None, p) for p in part]) if xy is not None and d > BODY_OFF]
+    for fp, seen in zip(spaces, looked):
+        bad = [p for p, ok in zip(seen, fp.fit(seen)) if not ok] if seen else []
+        for i in range(0, len(bad), 200):
+            part = bad[i:i + 200]
+            found += [(d, xy) for d, xy in fp.out_by([(None, p) for p in part]) if xy is not None and d > BODY_OFF]
     places: List[List[float]] = []
     for d, (x, y) in sorted(found, key=lambda f: -f[0]):
         if all(math.hypot(x - px, y - py) > PLACE for px, py, _ in places):

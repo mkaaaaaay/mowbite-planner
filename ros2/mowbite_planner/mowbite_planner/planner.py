@@ -27,19 +27,21 @@ from .lanes import lane_angle
 from .objective import LEFT_GAIN
 from .pool import _pool, later, result, set_workers, stops_pool  # noqa: F401 (planner.set_workers as before)
 from .progress import Progress, Report, check
-from .levels import Rings, narrow_left, ring_levels
+from .levels import Rings, body_levels, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
-from .space import _check_coordinates, build_space, margins_of
+from .space import _check_coordinates, build_space, loop_footprint, margins_of
 from .starts import Arrives, backed_out, reached_starts
 from .spacing import left_alone, left_whole, strip_between_lanes, turn_places
 from .sweep import plan_footprint, swept_area
-from .swaths import lane_sets
+from .swaths import lane_sets, narrow_left
 from .transit import TransitPlanner
 from .footprint import Blade, Footprint
 
 # a plan this big is a mistake (a lane spacing in mm, a waypoint every mm), not a lawn: about 200 km of path
 MAX_POSES = 2000000
+# a plan's warning: a robot that drives to its plans itself (arrives) didn't get to all of the plan with the recorded loop
+RECORDED_UNREACHED = 'recorded_loop ignored: no way gets to all of the plan with it'
 
 
 def _point(p: Optional[Sequence[float]]) -> Optional[XY]:
@@ -124,9 +126,35 @@ def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, kee
     else:
         plan = _auto(area, cfg)
     back = cfg.back_out and cfg.drive == 'forward'
-    plan = reached_starts(plan, arrives, back) if arrives is not None else backed_out(plan) if back else plan
+    done = None
+    try:
+        done = reached_starts(plan, arrives, back) if arrives is not None else backed_out(plan) if back else plan
+        # (not where the ways it may ask about ran out: none are left for a second plan)
+        lost = bool(plan.recorded_loops) and _left_out(done) > 0 and not done.stats['starts']['untried']
+    except PlanningError:
+        if not plan.recorded_loops:
+            raise
+        lost = True
+    if lost:
+        # (a way onto the recorded loop starts out by the edge, where the robot may not get to: a section left out or
+        # nothing got to, the area is planned without the loop and that plan taken where it leaves out less)
+        try:
+            plain = _coverage(boundary, obstacles, dataclasses.replace(cfg, recorded_loop=False), start, end, drivable,
+                              keep_out, margins, mowed, reach_over, unmowed, arrives, progress, bodies)
+        except PlanningError:
+            if done is None:
+                raise
+            plain = None
+        if plain is not None and (done is None or _left_out(plain) < _left_out(done)):
+            return dataclasses.replace(plain, warnings=plain.warnings + [RECORDED_UNREACHED])
     area.progress.at('done', area.progress.of)
-    return plan
+    return done
+
+
+def _left_out(plan: CoveragePlan) -> int:
+    """The sections reached_starts left out of plan (none where it wasn't asked)."""
+    starts = plan.stats.get('starts') or {}
+    return sum(len(starts.get(k) or ()) for k in ('dropped', 'untried', 'trapped'))
 
 
 class _Area:
@@ -327,7 +355,7 @@ def _completed(area: _Area, plan: CoveragePlan) -> CoveragePlan:
     field = polygonal(_lanes_field(plan.cells, 2.0 * cfg.turn_radius, 0.5 * cfg.lane_spacing).intersection(
         plan.remaining)) if cfg.headland_turns and plan.cells else None
     poses, segments, done = complete(cfg, fp, transit, plan.robot_space, plan.transit_space, lawn, plan.poses,
-                                     plan.segments, field, _point(area.end))
+                                     plan.segments, field, _point(area.end), plan.recorded_loops)
     poses, segments = _turn_at(types.SimpleNamespace(body=fp.poses_fit), poses, segments)
     took = time.perf_counter() - t0
     stats = dict(plan.stats, mop_up=done, planning_time=plan.stats['planning_time'] + took,
@@ -369,7 +397,7 @@ class _Timer:
 
 
 def _narrow(rings_of: Rings, passes, cfg: PlannerConfig):
-    """The strips too narrow for lanes that get a loop: those the lanes leave something of (levels.narrow_left)."""
+    """The strips too narrow for lanes that get a loop: those the lanes leave something of (swaths.narrow_left)."""
     narrow = rings_of.narrow
     if not narrow.is_empty and passes and not (cfg.skip_outline_loops or cfg.skip_obstacle_loops):
         narrow = narrow_left(narrow, passes, rings_of.remaining, 0.5 * cfg.mower_width)
@@ -433,6 +461,8 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     if isinstance(probe, dict):  # (what _left_alone needs: plan_coverage may ask for this spacing's later)
         probe['alone'] = (space.free, loop_rings, passes, 0.5 * cfg.mower_width)
     route, start_xy = _new_route(cfg, space, footprint, rings_of, passes, start, end, boundary)
+    if space.recorded_off:
+        route.warnings.append('recorded_loop ignored: ' + space.recorded_off)
     if mowed is None:
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)
@@ -446,7 +476,9 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
         lane_region=rings_of.lane_region, remaining=rings_of.remaining, angles=[a for a, _ in passes] or [angle],
         transit_space=space.transit_space, body_space=space.body_space, config=cfg,
         section_starts=[s.start for i, s in enumerate(segments) if i == 0 or s.section != segments[i - 1].section],
-        levels=rings_of.levels, narrow=narrow, cells=passes, origins=route.origins, unmowed=space.unmowed)
+        levels=rings_of.levels, narrow=narrow, cells=passes, origins=route.origins, unmowed=space.unmowed,
+        recorded_space=space.recorded.space if space.recorded is not None else None,
+        recorded_loops=tuple(sorted(route.recorded_loops)))
 
 
 def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, start, end,
@@ -470,6 +502,11 @@ def _new_route(cfg: PlannerConfig, space, footprint, rings_of: Rings, passes, st
             (cfg.drive == 'reverse')
     if not cfg.body:
         route.warnings.append(cfg.no_body)
+    if space.recorded is not None:
+        route.recorded_fp = loop_footprint(space.recorded.space, cfg, footprint.blade)
+        route.recorded_room = space.recorded.room
+        route.recorded_first = lambda: [ring for kind, ring in rings(
+            body_levels(space, cfg, footprint.plain, 1, True)[0][0]) if kind == 'outline']
     route.loop_counts = (rings_of.count, rings_of.islands) if rings_of.islands != rings_of.count else None
     route.owners, route.ring_counts = rings_of.owners, (rings_of.count, rings_of.islands, rings_of.most)
     # headland_turns: the lanes' field, where they lie but for what the loops mow and 2 turn_radius at their ends (where

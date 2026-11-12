@@ -139,6 +139,7 @@ SETTING_VALUES: Dict[Any, Tuple[Any, ...]] = {
     'crosshatch_angle': (1.5708, 0.7854),
     'perimeter_order': ('first', 'last'),
     'perimeter_direction': ('auto', 'ccw', 'cw', 'random'),
+    ('recorded_loop', 'recorded_loop_margin'): ((False, 0.0), (True, 0.0), (True, 0.03)),
     'angle': (None, 0.0, 1.2),
     'angle_strategy': ('longest_edge', 'min_width', 'optimal'),
     'angle_offset': (0.0, 0.5),

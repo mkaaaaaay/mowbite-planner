@@ -85,6 +85,8 @@ All in `config/mowbite_planner.yaml` (doubles need a decimal point there).
 | `perimeter_offset` | -1.0 | first loop's distance from the outline (m), negative: half the blade |
 | `perimeter_order` | `first` | loops `first` or `last` |
 | `perimeter_direction` | `auto` | `ccw`, `cw`, `auto` (the way the mower faces) or `random` (`ccw` or `cw`, drawn again after every finished mow); with the body set the outermost loop of `auto` and `random` goes the way the outline was recorded |
+| `recorded_loop` | false | the outermost loop along the outline is the line the area was recorded on itself: the mower's centre on that line, the way round it was recorded (whatever `perimeter_direction` says), the body where it was while recording (`edge_margin` and `spin_margin` don't count for this one loop). It takes the outermost loop's place, the others and the ones round obstacles as ever. Only with the body set, `edges: recorded`, `blade_offset` 0, `perimeter_passes` not 0, `fill_pattern` not `concentric`, and not for a mower larger than the one the area was recorded with; else planned without it and the plan warns of it |
+| `recorded_loop_margin` | 0.0 | with `recorded_loop`: how far inside the recorded line the mower's centre drives that one loop (m); 0: on the line itself, the blade mows half its width past it |
 | `lane_overlap_passes` | 0 | lanes reach this many loops further out (OpenMower's `outline_overlap_count`) |
 | `lane_overlap_limit` | false | on the lanes and their turns the mower gets no further out than the lanes reach |
 | `fill_pattern` | `lanes` | `lanes`, `crosshatch` or `concentric` |
