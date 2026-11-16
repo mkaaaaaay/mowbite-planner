@@ -583,8 +583,9 @@ def test_arrives_as_mowbite_logic_asks(make, monkeypatch):
     asked = []
     end = []  # (the goal's stretch outside: these poses, the last the goal's)
 
-    def spy(start, goal, areas, away, cfg, max_outside):
+    def spy(start, goal, areas, away, cfg, max_outside, margins):
         asked.append((len(areas), max_outside))
+        assert margins == [cfg.obstacle_margin] * len(away)
         poses = end or [Pose2D(start[0], start[1], start[2]), Pose2D(goal[0], goal[1], goal[2])]
         return Transit(poses, 1.0, [], 0.0, 0.2 if end else 0.0, [])
     monkeypatch.setattr(os_module, 'plan_transit', spy)

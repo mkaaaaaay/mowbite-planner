@@ -735,7 +735,7 @@ class PlannerCore:
             with self.lock:
                 data, text = self.map, self.map_text
             if data is None:
-                raise PlanningError('no map from OpenMower yet')
+                raise PlanningError('no map yet')
             before, data = data, json.loads(json.dumps(data))
             area = next((a for a in data.get('areas', []) if isinstance(a, dict) and a.get('id') == area_id), None)
             if area is None:
@@ -959,6 +959,8 @@ class PlannerCore:
             out['remote_planning']['ignored'] = why
         for name, why_not in self.cannot.items():
             out[name].update(settable=False, ignored=why_not)
+            if name in FIXED:  # (not mower_logic's where there's none)
+                out[name].pop('from', None)
         for name, where in self.given_by.items():
             out[name].update({'settable': False, 'from': where})
         # angle_increment: the steps turned so far and the finished mows towards the next one (and all of them)

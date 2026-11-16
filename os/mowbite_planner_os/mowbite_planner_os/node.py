@@ -97,7 +97,7 @@ from mowbite_planner import node as base
 from mowbite_planner.config import INTERNAL, RETIRED, CoveragePlan, PlannerConfig, PlanningError
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import polygons
-from mowbite_planner.mapfile import bodies_for
+from mowbite_planner.mapfile import bodies_for, margins_for
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
@@ -162,7 +162,8 @@ class OsNode(base.MowbitePlannerNode):
               'remote_planning': 'MowBite OS: no house computer',
               'body_fit': 'MowBite OS: always on, the body never sticks out (G6)',
               'robot_front_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)',
-              'robot_rear_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)'}
+              'robot_rear_width': 'MowBite OS: the body is robot.geometry\'s (its robot_outline for another shape)',
+              'skip_outline_loops': 'MowBite OS: always off', 'skip_obstacle_loops': 'MowBite OS: always off'}
     given_by = {n: FROM_GEOMETRY for n in GEOMETRY_KEYS}
     background = base.MowbitePlannerNode.background + ('planner.calib.evaluate',)
     answers_unknown = False
@@ -488,13 +489,14 @@ class OsNode(base.MowbitePlannerNode):
         parts = []  # (the parts of the room a way may take)
         body = []  # (the plan's body space's Footprint, when a goal first lies outside)
         ways = [0]
+        # (each obstacle's and area to keep out of's margin, as the plan has them)
+        margin_of = margins_of(boundary, obstacles, drivable, keep_out, list(reach_over) + list(unmowed), margins, cfg)
 
         def fits(t) -> bool:  # (the goal's straight stretch outside, the pose before it too)
             if t.goal_outside <= 0.0 or not t.poses:
                 return True
             if not body:
                 over = list(reach_over) + list(unmowed)
-                margin_of = margins_of(boundary, obstacles, drivable, keep_out, over, margins, cfg)
                 got, _ = build_space(boundary, obstacles, drivable, keep_out, over, margin_of, cfg, False, unmowed,
                                      bodies)
                 body.append(Footprint(got.body_space, cfg.body_outline, cfg.spin_margin))
@@ -508,14 +510,14 @@ class OsNode(base.MowbitePlannerNode):
             ways[0] += 1
             goal = (p.x, p.y) if p.yaw is None else (p.x, p.y, p.yaw)
             try:
-                return fits(plan_transit(start, goal, areas, away, cfg, max_outside=max_outside,
+                return fits(plan_transit(start, goal, areas, away, cfg, max_outside=max_outside, margins=margin_of,
                                          **({'bodies': bodies} if bodies else {})))
             except PlanningError:
                 return False
 
         def part(q: Pose2D) -> set:
             if not parts:
-                parts.extend(polygons(centre_space(areas, away, cfg, bodies)[0]))
+                parts.extend(polygons(centre_space(areas, away, cfg, bodies, margin_of)[0]))
             point = Point(q.x, q.y)
             return {i for i, a in enumerate(parts) if a.distance(point) <= ARRIVE_OUTSIDE + 1e-9}
 
@@ -526,7 +528,7 @@ class OsNode(base.MowbitePlannerNode):
                     return False
                 return way((came_from.x, came_from.y, came_from.yaw), p, ARRIVE_OUTSIDE)
             if not space:
-                space.append(centre_space(areas, away, cfg, bodies)[0])
+                space.append(centre_space(areas, away, cfg, bodies, margin_of)[0])
             froms: List[tuple] = []
             far = ARRIVE_FROM
             while not froms and far >= ARRIVE_NEAREST - 1e-9:
@@ -579,13 +581,15 @@ class OsNode(base.MowbitePlannerNode):
             self.get_logger().warning(w)
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         limit = self.search_limit()
-        # (the body each one was recorded with, from the map by its outline)
-        bodies = bodies_for(self.core.current_map() if self.core is not None else None, drivable + obstacles)
+        # (the body each one was recorded with, drawn or not, and each obstacle's own margin, from the map by its
+        # outline)
+        data = self.core.current_map() if self.core is not None else None
+        bodies, margins = bodies_for(data, drivable + obstacles), margins_for(data, obstacles)
         try:
             # (the limit looked at where the search checks the body, progress.check: it ends there with Stopped)
             with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
                 transit = plan_transit(start, goal, drivable, obstacles, cfg, float(request.goal_straight_length),
-                                       max_outside, **({'bodies': bodies} if bodies else {}))
+                                       max_outside, margins=margins, **({'bodies': bodies} if bodies else {}))
         except Stopped:
             return no('SEARCH_LIMIT', base.with_warnings(
                 f'planning the transit failed: no way found in {limit:g} s (transit_search_limit)', warnings))

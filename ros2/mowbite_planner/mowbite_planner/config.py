@@ -144,6 +144,11 @@ RECORDED_KEEP = 0.01
 RECORDED_MITRE = 2.0
 # m, a body that sticks out of the one an area was recorded with by more than this is larger (Master 10.11.)
 LARGER = 0.02
+# a ring of the map that was drawn, not driven (its properties drawn true, mapfile.bodies_for): in plan_coverage's
+# bodies in place of the corners of the body it was recorded with. DRAWN_HARD (drawn_edge hard, or none): its line is
+# its real edge, as with edges hard; DRAWN_CENTRE (drawn_edge centre): its line is where this mower's centre may go,
+# either way
+DRAWN_HARD, DRAWN_CENTRE = 'hard', 'centre'
 # kept for planning the same area again (another angle or setting, lane_spacing_mode 'auto'), the last KEPT of each for
 # all threads: where _fit_body got to (poses, their sections, whether the blade mows on the way to each, [(the furthest
 # pose read, where it got to)]) and the body spaces (_body_space, as WKB), by a hash of what they depend on, the last
@@ -359,7 +364,7 @@ class PlannerConfig:
     # larger than the one the area was recorded with (the map's recorded_body): planned without it then, said in the
     # warnings (recorded_off)
     recorded_loop: bool = False
-    recorded_loop_margin: float = 0.0
+    recorded_loop_margin: float = 0.03
 
     @property
     def passes(self) -> int:

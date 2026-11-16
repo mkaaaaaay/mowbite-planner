@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import backing
 from .backing import CORNER_STEP
 from .calibread import _constant, _float, _int
-from .config import LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, Lane, PlannerConfig, PlanningError, SegmentInfo
+from .config import (DRAWN_CENTRE, DRAWN_HARD, LANE, PERIMETER, TRANSIT, TURN, CoveragePlan, Lane, PlannerConfig,
+                     PlanningError, SegmentInfo)
 from .levels import ring_levels
 from .mathutil import Pose2D, angle_diff
 from .planner import _fixed, _narrow, _spacings, _turning
@@ -148,11 +149,13 @@ def request_from(form: Any) -> Tuple[tuple, tuple, tuple]:
 
 
 def bodies_from(form: Any) -> tuple:
-    """plan_coverage's bodies of a request's form ((ring, corners), ...). RemoteError where they aren't."""
+    """plan_coverage's bodies of a request's form ((ring, corners or DRAWN_HARD or DRAWN_CENTRE), ...). RemoteError
+    where they aren't."""
     pairs = _list(_object(form, 'the request').get('bodies') or [], 'bodies')
     if not all(isinstance(p, list) and len(p) == 2 for p in pairs):
         raise RemoteError('bodies: each [ring, corners]')
-    return tuple((canon(_nested(r, 'bodies', 2)), canon(_nested(c, 'bodies', 2))) for r, c in pairs)
+    return tuple((canon(_nested(r, 'bodies', 2)),
+                  c if c in (DRAWN_HARD, DRAWN_CENTRE) else canon(_nested(c, 'bodies', 2))) for r, c in pairs)
 
 
 def _config(values: Any) -> PlannerConfig:

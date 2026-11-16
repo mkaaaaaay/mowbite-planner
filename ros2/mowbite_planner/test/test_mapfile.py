@@ -11,8 +11,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 
 from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
-from mowbite_planner.mapfile import (area_job, area_settings, bodies_for, body_hints, body_warnings,  # noqa: E402
-                                     find_area, margins_for, match_area, mow_areas, openmower_angle,
+from mowbite_planner.mapfile import (MAP_FIELDS, area_job, area_settings, bodies_for, body_hints,  # noqa: E402
+                                     body_known, body_warnings, drawn, find_area, margins_for, match_area, mow_areas, openmower_angle,
                                      openmower_settings, recorded_body, settings_for)
 from stubplan import stub_plan_coverage  # noqa: E402
 
@@ -184,6 +184,25 @@ def test_bodies_for_and_body_hints():
     assert body_warnings({'front': 'larger', 'bed': 'larger', 'tree': 'missing', 'pond': 'unreadable'}) == [
         'areas bed, front: recorded with a smaller body than this one, record again for the exact edge',
         'area pond: recorded_body unreadable, planned with this body']
+
+
+def test_drawn_rings():
+    """drawn: an area drawn (drawn true) is hard, centre only with drawn_edge centre (anything else hard), not drawn
+    without drawn true whatever drawn_edge says. bodies_for has it as drawn whatever recorded_body it has, body_known
+    not, body_hints none for it (not missing either)."""
+    lawn = area('lawn', 'mow', rect(0, 0, 10, 6), drawn=True, drawn_edge='centre')
+    data = {'areas': [lawn, area('bed', 'obstacle', rect(4, 2, 5, 3), drawn=True, recorded_body=RECORDED),
+                      area('pond', 'obstacle', rect(1, 1, 2, 2), drawn=True, drawn_edge='wavy'),
+                      area('tree', 'obstacle', rect(6, 2, 7, 3), drawn='yes', drawn_edge='centre'),
+                      area('rose', 'obstacle', rect(7.5, 2, 8, 3), drawn_edge='hard')]}
+    assert [drawn(a) for a in data['areas']] == ['centre', 'hard', 'hard', None, None]
+    outlines = [rect(0, 0, 10, 6), rect(4, 2, 5, 3), rect(1, 1, 2, 2), rect(6, 2, 7, 3), rect(7.5, 2, 8, 3)]
+    got = bodies_for(data, outlines)
+    assert got == ((outlines[0], 'centre'), (outlines[1], 'hard'), (outlines[2], 'hard'))
+    assert not body_known(got, outlines[1]) and body_known(((outlines[1], ((0.1, 0.0),)),), outlines[1])
+    body = PlannerConfig(robot_width=0.6, robot_front=0.6, robot_rear=0.2).body_outline
+    assert body_hints(data, outlines, body, missing=True) == {'tree': 'missing', 'rose': 'missing'}
+    assert {'recorded_body', 'drawn', 'drawn_edge'} <= set(MAP_FIELDS)
 
 
 def test_area_job_without_dock_or_properties():

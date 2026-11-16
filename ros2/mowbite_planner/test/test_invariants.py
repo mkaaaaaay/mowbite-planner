@@ -91,7 +91,7 @@ SETTINGS = {
     # (backing.py: the body turned round, every pose turned round after; without the body forwards)
     'reverse': dict(drive='reverse'),
     # (the outermost loop on the outline itself, in its own space; without the body as ever)
-    'recorded': dict(recorded_loop=True),
+    'recorded': dict(recorded_loop=True, recorded_loop_margin=0.0),
     'recorded_in': dict(recorded_loop=True, recorded_loop_margin=0.03),
 }
 CASES = [(s, b, '') for s in SHAPES for b in BODIES if (s, b) != ('keep', 'bare')] + \

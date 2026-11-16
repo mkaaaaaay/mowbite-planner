@@ -40,7 +40,7 @@ SPIKED = LAWN + [(3.9, 0.0), (4.0, 0.5), (4.1, 0.0)]
 BED = [(3.0, 2.0), (4.0, 2.0), (4.0, 3.0), (3.0, 3.0)]
 NX60I = dict(robot_width=0.40, robot_front=0.43, robot_rear=0.14)
 CFG = PlannerConfig(mower_width=0.18, overlap=1 - 0.13 / 0.18, blade_ahead=0.17, perimeter_passes=3,
-                    lane_order='skip', **NX60I)
+                    lane_order='skip', recorded_loop_margin=0.0, **NX60I)
 _plans = {}
 
 

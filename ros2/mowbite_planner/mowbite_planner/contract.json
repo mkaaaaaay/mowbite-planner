@@ -13,7 +13,9 @@
     "mowbite_planner_os_interfaces/srv/PlanTransit": "29440d8b6e3e01fde70c41ccb1cdf7fe8776293a66c613421cb5c9ffa86d3ab6"
   },
   "map_fields": [
-    "recorded_body"
+    "recorded_body",
+    "drawn",
+    "drawn_edge"
   ],
   "methods": {
     "mowbite-os": [

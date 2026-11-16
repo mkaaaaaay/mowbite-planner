@@ -7,7 +7,9 @@ with turn_on_spot), the body checked all along as on a plan (mowbite_planner.spa
 keeps a drive's distance from the edges where a way does, and is never one along the very edge (TransitPlanner's
 off_edge: the body touches the edge there); into a stretch the body just fits it's lined up with the stretch before it
 (plan_transit's lined_up). A start or goal by the edge (the dock) may lie a little outside: the stretch from there
-straight to where the body fits isn't checked, there's no turning on the spot on it.
+straight to where the body fits isn't checked, there's no turning on the spot on it. A start or goal closer to an edge
+than its margins (the mower right by a line it recorded) gets a way out where the body stays where it was while the
+edges were recorded (leave_edge), every pose checked.
 """
 
 import dataclasses
@@ -15,18 +17,18 @@ import math
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 
-from mowbite_planner.config import XY, PlannerConfig, PlanningError
+from mowbite_planner.config import RECORDED_SLACK, XY, PlannerConfig, PlanningError
 from mowbite_planner.drive import Drive
 from mowbite_planner.footprint import SPIN, Footprint
-from mowbite_planner.geometry import QUAD_SEGS, clean_polygon, inset, polygonal, union
+from mowbite_planner.geometry import QUAD_SEGS, clean_polygon, inset, polygonal, polygons, union
 from mowbite_planner.maneuvers import (closest_on_polyline, dubins, join, path_length, same_position, sample_arc,
                                        sample_straight)
 from mowbite_planner.mathutil import Pose2D, angle_diff, normalize_angle
 from mowbite_planner.planner import _turning
-from mowbite_planner.space import _body_space, _check_coordinates
+from mowbite_planner.space import _body_space, _check_coordinates, margins_of
 from mowbite_planner.transit import TransitPlanner
 
 # m, how far the start or the goal may lie outside of where the body fits by default
@@ -42,6 +44,15 @@ SPIN_TRIES = 4
 TIGHT = 0.01
 # places a way is led by at most, lined up before a bend the body sticks out at (see plan_transit's lined_up)
 VIAS = 6
+# m, how deep the body may stick out of where it was while the edges were recorded (the recording room, see leave_edge)
+# at a start or goal closer to an edge than its margins: further, the mower and the map don't go together
+START_DEPTH = 0.05
+# m along the line it stands by at most the way out of such a start goes first, where turning there sticks out
+ALONG = 3.0
+# the headings the way out of such a start tries turning to on the spot, this far apart
+OUT_STEP = math.radians(15.0)
+# why leave_edge has no way where nothing sticks out too far
+NO_WAY_OUT = 'no way out fits'
 # the last request's areas, obstacles and settings with their space, body and planners: this thread's next one with the
 # same takes them (a plan's sections, the ways home: the same map again and again)
 _ROOM = threading.local()
@@ -67,17 +78,28 @@ class Transit:
     warnings: List[str]
 
 
+def _margins(obstacles, margins: Sequence[Optional[float]], cfg: PlannerConfig) -> List[float]:
+    """Each obstacle's margin: its own (margins), else obstacle_margin."""
+    try:
+        return margins_of([], obstacles, [], [], [], margins, cfg)
+    except PlanningError as e:
+        e.word = 'BAD_REQUEST'
+        raise
+
+
 def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-                 cfg: PlannerConfig, bodies=()) -> Tuple[Any, Optional[Footprint]]:
+                 cfg: PlannerConfig, bodies=(),
+                 margins: Sequence[Optional[float]] = ()) -> Tuple[Any, Optional[Footprint]]:
     """Where the mower's centre may go on a transit (cfg as plan_transit takes it): with the body set where it fits
     sideways driving straight (and its Footprint there, see plan_transit), without it half the mower_width off the
-    obstacles (and None). Raises PlanningError where that's nowhere."""
+    obstacles (and None). margins: each obstacle's own (None: obstacle_margin). Raises PlanningError where that's
+    nowhere."""
     areas = union(clean_polygon(d) for d in drivable)
     if areas.is_empty:
         raise PlanningError('no drivable areas', word='BAD_REQUEST')
     footprint: Optional[Footprint] = None
     if cfg.body:
-        body_space, footprint = _body_space(list(drivable), list(obstacles), [cfg.obstacle_margin] * len(obstacles),
+        body_space, footprint = _body_space(list(drivable), list(obstacles), _margins(obstacles, margins, cfg),
                                             cfg, bodies=bodies)
         space = polygonal(inset(body_space, footprint.half).intersection(areas))
     else:
@@ -90,19 +112,124 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
 
 
 def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-          cfg: PlannerConfig, bodies=()) -> Tuple[Any, Optional[Footprint], Dict[tuple, TransitPlanner]]:
+          cfg: PlannerConfig, bodies=(), margins: Sequence[Optional[float]] = ()
+          ) -> Tuple[Any, Optional[Footprint], Dict[Any, Any]]:
     """centre_space() and the planners made in that space so far ({what it's made with: one}, their graphs as far as
-    they got, the ways they kept forgotten), the last request's where this one's areas, obstacles and settings are the
-    same (_ROOM)."""
+    they got, the ways they kept forgotten; and the recording room under 'recorded' once worked out), the last
+    request's where this one's areas, obstacles and settings are the same (_ROOM)."""
     key = ([[(float(p[0]), float(p[1])) for p in ring] for ring in drivable],
-           [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg) + ((tuple(bodies),) if bodies else ())
+           [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg,
+           tuple(None if m is None else float(m) for m in margins)) + ((tuple(bodies),) if bodies else ())
     last = getattr(_ROOM, 'last', None)
     if last is None or last[0] != key:
-        space, footprint = centre_space(drivable, obstacles, cfg, bodies)
+        space, footprint = centre_space(drivable, obstacles, cfg, bodies, margins)
         last = _ROOM.last = ((key[0], key[1], dataclasses.replace(cfg)) + key[3:], space, footprint, {})
     for tp in last[3].values():
-        tp.forget()
+        if isinstance(tp, TransitPlanner):
+            tp.forget()
     return last[1], last[2], last[3]
+
+
+def recording_room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
+                   cfg: PlannerConfig, bodies=()) -> Any:
+    """Where the body was while the edges were recorded (space._body_space with no margins, RECORDED_SLACK past the
+    real edges: on the line the body touches its edge): the room of a way out of a start or goal closer to an edge
+    than its margins (leave_edge)."""
+    loose = dataclasses.replace(cfg, edge_margin=-RECORDED_SLACK)
+    return _body_space(list(drivable), list(obstacles), [-RECORDED_SLACK] * len(obstacles), loose, bodies=bodies)[0]
+
+
+def _said(why: str) -> str:
+    """why (plan_transit's by_the_edge's) after the start or goal it's of."""
+    return (' ' if why.startswith('lies') else ': ') + why
+
+
+def _depth(room: Any, body: Polygon) -> float:
+    """m the body sticks out of room at most (0: in it)."""
+    out = body.difference(room)
+    if out.is_empty or out.area < 1e-8:
+        return 0.0
+    return max(room.distance(Point(q)) for g in polygons(out) for q in g.exterior.coords)
+
+
+def leave_edge(at: Pose2D, room: Any, fits: Footprint, clear, rings: Sequence[Sequence[XY]], max_outside: float,
+               step: float) -> Tuple[Optional[List[Pose2D]], str]:
+    """(the poses from at to where the body fits as ever, clear: the last one, ''), or (None, why not): for a start
+    closer to an edge than its margins, the body staying where it was while the edges were recorded (room; at most as
+    deep out of it as at at, START_DEPTH at most), turning on the spot without spin_margin. On the spot turning
+    (OUT_STEP apart, the closest to its heading first) then straight on, max_outside m at most (as far as the body
+    fits as ever from where it first does); where none of those fits, first along the line of rings closest to at (the
+    way at faces along it, as far beside it as at), ALONG m at most, from each of its points so. fits: the body's
+    Footprint of the ways (room no matter, its corners)."""
+    deep = _depth(room, fits.body(at.x, at.y, at.yaw))
+    if deep > START_DEPTH:
+        return None, f'the body is {deep:.2f} m inside an obstacle or past an edge of the map'
+    loose = Footprint(room.buffer(deep + 1e-4, QUAD_SEGS) if deep > 0 else room, fits.corners)
+
+    def straight(x: float, y: float, yaw: float) -> Optional[List[Pose2D]]:
+        turns = sorted((normalize_angle(yaw + k * OUT_STEP) for k in range(int(round(2.0 * math.pi / OUT_STEP)))),
+                       key=lambda h: angle_diff(h, yaw))
+        for h in turns:
+            if angle_diff(h, yaw) > 1e-9 and not loose.fits_turn(x, y, yaw, h):
+                continue
+            last = None  # (the furthest place it fits as ever, max_outside at most: room to go on from there)
+            for k in range(int(max_outside / step + 1e-9) + 1):
+                q = (x + k * step * math.cos(h), y + k * step * math.sin(h))
+                if not loose.fits_pose(q[0], q[1], h):
+                    break
+                if clear(q, h):
+                    last = k, q
+                elif last is not None:
+                    break
+            if last is not None:
+                k, q = last
+                on = sample_straight(x, y, q[0], q[1], h, step) if k else [Pose2D(x, y, h)]
+                return ([Pose2D(x, y, yaw)] if angle_diff(h, yaw) > 1e-9 else []) + on
+        return None
+
+    got = straight(at.x, at.y, at.yaw)
+    if got is not None:
+        return got, ''
+    # along the line closest to at: from the stretch closest to it on, the way at faces along it
+    best = None
+    for ring in rings:
+        n = len(ring)
+        for i in range(n):
+            a, b = ring[i], ring[(i + 1) % n]
+            d = LineString([a, b]).distance(Point(at.x, at.y)) if a != b else math.inf
+            if best is None or d < best[0]:
+                best = (d, ring, i)
+    if best is None:
+        return None, NO_WAY_OUT
+    _, ring, i = best
+    n = len(ring)
+    a, b = ring[i], ring[(i + 1) % n]
+    ahead = math.cos(math.atan2(b[1] - a[1], b[0] - a[0]) - at.yaw) >= 0.0
+    order = [ring[(i + 1 + k) % n] for k in range(n)] if ahead else [ring[(i - k) % n] for k in range(n)]
+    side = (at.x - a[0]) * math.sin(at.yaw) - (at.y - a[1]) * math.cos(at.yaw)  # (m to the right of its heading)
+    poses, went, here = [Pose2D(at.x, at.y, at.yaw)], 0.0, Pose2D(at.x, at.y, at.yaw)
+    for p, q in zip(order, order[1:]):
+        if math.hypot(q[0] - p[0], q[1] - p[1]) < 1e-6:
+            continue
+        h = math.atan2(q[1] - p[1], q[0] - p[0])
+        to = (p[0] + side * math.sin(h), p[1] - side * math.cos(h))
+        far = math.hypot(to[0] - here.x, to[1] - here.y)
+        if far < 1e-6:
+            continue
+        went += far
+        if went > ALONG:
+            break
+        d = math.atan2(to[1] - here.y, to[0] - here.x)
+        leg = sample_straight(here.x, here.y, to[0], to[1], d, step)
+        if not (loose.fits_turn(here.x, here.y, here.yaw, d) and loose.all_fit(leg) and
+                loose.fits_turn(to[0], to[1], d, h)):
+            return None, f'no way out fits ({went:.2f} m along the line it stands by the body would stick out)'
+        poses = join(poses, leg)
+        here = Pose2D(to[0], to[1], h)
+        got = straight(here.x, here.y, here.yaw)
+        if got is not None:
+            return join(poses, got), ''
+    return None, NO_WAY_OUT
 
 
 def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
@@ -134,7 +261,8 @@ def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Seq
 
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
-                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=()) -> Transit:
+                 goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=(),
+                 margins: Sequence[Optional[float]] = ()) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -143,13 +271,16 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     centre keeps half the mower_width off the obstacles. Where the start or the goal lies outside (the centre, or the
     body sticking out), it drives straight from there to where it fits, max_outside m at most: straight ahead from the
     start (where that doesn't get there and the body fits turning at the start, towards the closest point of the
-    areas), on the goal's heading to the goal (without one, from the closest point). The same request gives the same
-    poses, after the same number of ways tried (see search below: no time in it). An empty way where it's at the goal
-    already (closer than waypoint_spacing, facing its way; with turn_on_spot whatever way it faces, turning there is
-    up to whoever drives it). Raises PlanningError where there's no way (a goal by the edge no arc of turn_radius gets
-    to facing its heading, where the body sticks out turning into it there too, says so), or the input is out of
-    range; its word what ~/plan_transit's code says (CODES). bodies: the body a ring was recorded with where it's
-    another (space._body_space)."""
+    areas), on the goal's heading to the goal (without one, from the closest point). Where none of that fits and
+    the body is closer to an edge than its margins (the mower right by a line it recorded), the way out of there
+    (leave_edge; the goal's mirrored, with a heading and no goal_straight) keeps the body where it was while the edges
+    were recorded, every pose checked. The same request gives the same poses, after the same number of ways tried
+    (see search below: no time in it). An empty way where it's at the goal already (closer than waypoint_spacing,
+    facing its way; with turn_on_spot whatever way it faces, turning there is up to whoever drives it). Raises
+    PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its heading, where the
+    body sticks out turning into it there too, says so), or the input is out of range; its word what ~/plan_transit's
+    code says (CODES). bodies: the body a ring was recorded with where it's another, or drawn (space._body_space).
+    margins: each obstacle's own (None: obstacle_margin)."""
     cfg = config or PlannerConfig()
     try:
         heading = _asked(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
@@ -158,7 +289,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         raise
     cfg = _turning(cfg)  # (as in plan_coverage)
     step = cfg.waypoint_spacing
-    space, footprint, planners = _room(drivable, obstacles, cfg, bodies)
+    space, footprint, planners = _room(drivable, obstacles, cfg, bodies, margins)
     warnings: List[str] = [] if footprint is not None else [cfg.no_body or '']
 
     def planner(clearance: float, edge: float = 0.0, cost: float = 0.0, off_edge: float = 0.0) -> TransitPlanner:
@@ -185,6 +316,36 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         q = nearest_points(space, Point(p))[0]
         return math.hypot(q.x - p[0], q.y - p[1]), math.atan2(q.y - p[1], q.x - p[0])
 
+    def by_the_edge(at: Pose2D, goal: bool) -> Tuple[Optional[List[Pose2D]], str]:
+        # where the body doesn't fit at a start or goal (at), the way out of there (leave_edge; to the goal mirrored: at
+        # turned round, the body too, the way back the other way round), or None and why not (as before where the
+        # centre lies further out than max_outside)
+        far, _ = closest((at.x, at.y))
+        if footprint is None or far > max_outside:
+            what = 'on its heading before it' if goal else 'straight ahead'
+            return None, (f'lies {far:.2f} m outside the drivable areas' if far > 0 else
+                          f'lies where the body sticks out of the drivable areas, {what} too') + \
+                f' (max_outside {max_outside} m)'
+        if 'recorded' not in planners:
+            planners['recorded'] = recording_room(drivable, obstacles, cfg, bodies)
+        fits = footprint if not goal else \
+            Footprint(footprint.space, tuple((-x, -y) for x, y in footprint.corners), footprint.spin_margin)
+        if goal:
+            at = Pose2D(at.x, at.y, normalize_angle(at.yaw + math.pi))
+
+        def test(p: XY, yaw: float) -> bool:
+            return transit.is_free([p]) and fits.fits_pose(p[0], p[1], yaw)
+        rings = [[(float(p[0]), float(p[1])) for p in r] for r in list(drivable) + list(obstacles)]
+        got, why = leave_edge(at, planners['recorded'], fits, test, rings, max_outside, step)
+        if got is None:
+            if why.startswith('the body is'):
+                return None, f'{why}, no way out is planned from there'
+            return None, f'the body is closer to an obstacle or an edge than its margin and {why} ' \
+                f'(max_outside {max_outside} m)'
+        if goal:
+            got = [Pose2D(p.x, p.y, normalize_angle(p.yaw + math.pi)) for p in reversed(got)]
+        return got, ''
+
     # the start: where the body fits, straight ahead or towards the closest point (turning there, the body checked)
     s, s_yaw = (float(start[0]), float(start[1])), normalize_angle(float(start[2]))
     way_in, in_yaw = first_clear(s, s_yaw, 1.0), s_yaw
@@ -193,12 +354,14 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         if far > 0 and (footprint is None or footprint.fits_pose(s[0], s[1], s_yaw) and footprint.fits_turn(
                 s[0], s[1], s_yaw, yaw)):
             way_in, in_yaw = first_clear(s, yaw, 1.0), yaw
-        if way_in is None:
-            where = f'{far:.2f} m outside the drivable areas' if far > 0 else \
-                'where the body sticks out of the drivable areas, straight ahead too'
-            raise PlanningError(f'the start ({s[0]:.2f}, {s[1]:.2f}) lies {where} (max_outside {max_outside} m)',
-                                word='START_OUTSIDE')
-    entry = (s[0] + way_in * math.cos(in_yaw), s[1] + way_in * math.sin(in_yaw))
+    head_out: List[Pose2D] = []
+    if way_in is None:
+        head_out, why = by_the_edge(Pose2D(s[0], s[1], s_yaw), False)
+        if head_out is None:
+            raise PlanningError(f'the start ({s[0]:.2f}, {s[1]:.2f}){_said(why)}', word='START_OUTSIDE')
+        way_in, in_yaw = 0.0, head_out[-1].yaw
+    entry = (s[0] + way_in * math.cos(in_yaw), s[1] + way_in * math.sin(in_yaw)) if not head_out else \
+        (head_out[-1].x, head_out[-1].y)
 
     # the goal: arriving straight on its heading (from the closest point without one), goal_straight at least
     g = (float(goal[0]), float(goal[1]))
@@ -210,15 +373,22 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         far, yaw = closest(g)
         out_yaw = normalize_angle(yaw + math.pi)
         way_out = first_clear(g, out_yaw, -1.0)
+    tail_in: List[Pose2D] = []
     if way_out is None:
-        far, _ = closest(g)
-        where = f'{far:.2f} m outside the drivable areas' if far > 0 else \
-            'where the body sticks out of the drivable areas, on its heading before it too'
-        raise PlanningError(f'the goal ({g[0]:.2f}, {g[1]:.2f}) lies {where} (max_outside {max_outside} m)',
-                            word='GOAL_OUTSIDE')
-    exit_ = (g[0] - way_out * math.cos(out_yaw), g[1] - way_out * math.sin(out_yaw)) if way_out > 0 else g
+        if g_yaw is None or goal_straight > 0:
+            far, _ = closest(g)
+            where = f'{far:.2f} m outside the drivable areas' if far > 0 else \
+                'where the body sticks out of the drivable areas, on its heading before it too'
+            raise PlanningError(f'the goal ({g[0]:.2f}, {g[1]:.2f}) lies {where} (max_outside {max_outside} m)',
+                                word='GOAL_OUTSIDE')
+        tail_in, why = by_the_edge(Pose2D(g[0], g[1], g_yaw), True)
+        if tail_in is None:
+            raise PlanningError(f'the goal ({g[0]:.2f}, {g[1]:.2f}){_said(why)}', word='GOAL_OUTSIDE')
+        way_out, out_yaw = 0.0, tail_in[0].yaw
+    exit_ = (g[0] - way_out * math.cos(out_yaw), g[1] - way_out * math.sin(out_yaw)) if way_out > 0 else \
+        (tail_in[0].x, tail_in[0].y) if tail_in else g
     straight = max(goal_straight, way_out)
-    before = (g[0] - straight * math.cos(out_yaw), g[1] - straight * math.sin(out_yaw)) if straight > 0 else g
+    before = (g[0] - straight * math.cos(out_yaw), g[1] - straight * math.sin(out_yaw)) if straight > 0 else exit_
 
     if math.hypot(g[0] - s[0], g[1] - s[1]) < step:
         off = 0.0 if g_yaw is None else angle_diff(g_yaw, s_yaw)
@@ -229,8 +399,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
                 f'at the goal already, {math.degrees(off):.0f} deg off its heading: turning on the spot there is up to '
                 'whoever drives it'])
 
-    head = sample_straight(s[0], s[1], entry[0], entry[1], in_yaw, step)[:-1] if way_in > 0 else []
-    tail = sample_straight(exit_[0], exit_[1], g[0], g[1], out_yaw, step)[1:] if way_out > 0 else []
+    head = sample_straight(s[0], s[1], entry[0], entry[1], in_yaw, step)[:-1] if way_in > 0 else head_out[:-1]
+    tail = sample_straight(exit_[0], exit_[1], g[0], g[1], out_yaw, step)[1:] if way_out > 0 else tail_in[1:]
     approach = sample_straight(before[0], before[1], exit_[0], exit_[1], out_yaw, step) \
         if straight > way_out else []
     if approach and not (transit.is_free([before, exit_]) and (footprint is None or footprint.all_fit(approach))):
@@ -481,9 +651,13 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     if spins and not cfg.turn_on_spot:
         warnings.append(f'turns on the spot at {len(spins)} places, no arc of turn_radius {cfg.turn_radius} m fits '
                         'there')
-    start_out = math.hypot(entry[0] - s[0], entry[1] - s[1])
-    goal_out = math.hypot(g[0] - exit_[0], g[1] - exit_[1])
+    start_out = 0.0 if head_out else math.hypot(entry[0] - s[0], entry[1] - s[1])
+    goal_out = 0.0 if tail_in else math.hypot(g[0] - exit_[0], g[1] - exit_[1])
     for what, out in (('start', start_out), ('goal', goal_out)):
         if out > 0:
             warnings.append(f'the {what} lies outside of where the body fits, {out:.2f} m straight to it unchecked')
+    for what, way in (('start', head_out), ('goal', tail_in)):
+        if way:
+            warnings.append(f'the {what} lies closer to an edge than its margin, {path_length(way):.2f} m '
+                            f'{"from" if what == "start" else "to"} it where the body was while recording the edges')
     return Transit(poses, path_length(poses), spins, start_out, goal_out, warnings)

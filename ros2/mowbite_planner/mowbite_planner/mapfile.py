@@ -13,13 +13,13 @@ from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tup
 from shapely.geometry import Polygon
 
 from .geometry import QUAD_SEGS, clean_polygon
-from .config import LARGER, MAX_BLADE_OFFSET, PlannerConfig, PlanningError
+from .config import DRAWN_CENTRE, DRAWN_HARD, LARGER, MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
 # a mowing area lies in another (is nested) with this share of it in there at least
 NESTED_SHARE = 0.9
 # what the planner reads of an area's properties that the robot or the app writes for it (contract.json)
-MAP_FIELDS = ('recorded_body',)
+MAP_FIELDS = ('recorded_body', 'drawn', 'drawn_edge')
 
 
 @dataclass
@@ -176,15 +176,26 @@ def recorded_body(area: Mapping[str, Any]) -> Optional[Tuple[XY, ...]]:
         raise ValueError(f'recorded_body: {e}') from None
 
 
+def drawn(area: Mapping[str, Any]) -> Optional[str]:
+    """DRAWN_HARD or DRAWN_CENTRE where the area was drawn, not driven (its properties' drawn true; drawn_edge centre,
+    anything else hard), else None."""
+    props = _props(area)
+    if props.get('drawn') is not True:
+        return None
+    return DRAWN_CENTRE if props.get('drawn_edge') == DRAWN_CENTRE else DRAWN_HARD
+
+
 def bodies_for(data: Optional[Mapping[str, Any]], outlines: Any,
                tolerance: float = 1e-3) -> Tuple[Tuple[Any, Tuple[XY, ...]], ...]:
     """((outline, corners), ...): of these outlines (as OpenMower sends them to its planner, float32) those of an area
-    of the map that was recorded with a body (recorded_body), the corners of that body (plan_coverage's bodies). One
-    that's unreadable counts as none (body_hints tells of it)."""
+    of the map that was recorded with a body (recorded_body), the corners of that body (plan_coverage's bodies); of
+    one drawn (drawn), DRAWN_HARD or DRAWN_CENTRE whatever body it has. One that's unreadable counts as none
+    (body_hints tells of it)."""
     own = []
     for a in _areas(data):
+        corners = drawn(a)
         try:
-            corners = recorded_body(a)
+            corners = corners or recorded_body(a)
         except ValueError:
             continue
         if corners is not None:
@@ -199,23 +210,23 @@ def bodies_for(data: Optional[Mapping[str, Any]], outlines: Any,
 
 
 def body_known(bodies: Sequence[Tuple[Any, Any]], outline: Any) -> bool:
-    """Whether bodies (bodies_for's) has the body this outline was recorded with."""
+    """Whether bodies (bodies_for's) has the body this outline was recorded with (not where it was drawn)."""
     pts = [(float(p[0]), float(p[1])) for p in outline]
-    return any([(float(p[0]), float(p[1])) for p in ring] == pts for ring, _ in bodies)
+    return any([(float(p[0]), float(p[1])) for p in ring] == pts for ring, c in bodies if not isinstance(c, str))
 
 
 def body_hints(data: Optional[Mapping[str, Any]], outlines: Any, corners: Optional[Sequence[XY]],
                missing: bool = False, tolerance: float = 1e-3) -> Dict[str, str]:
     """{area id: why} of the map's areas with one of these outlines (a plan's) where the body planning (corners, None:
     none checked) gets a hint: larger (its outline not in the one recorded with grown by LARGER), unreadable
-    (recorded_body no body), missing (none recorded, only where missing: MowBite OS)."""
+    (recorded_body no body), missing (none recorded, only where missing: MowBite OS); none for one drawn (drawn)."""
     if corners is None:
         return {}
     body = Polygon(corners)
     shapes = [pts for pts in (_outline(o, tolerance) for o in outlines) if pts]
     out = {}
     for a in _areas(data):
-        if not any(_same(a, pts, tolerance) for pts in shapes):
+        if not any(_same(a, pts, tolerance) for pts in shapes) or drawn(a):
             continue
         try:
             recorded = recorded_body(a)

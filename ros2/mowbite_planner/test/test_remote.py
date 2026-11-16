@@ -100,6 +100,8 @@ def test_the_request_with_bodies():
     assert remote.plan_key('c', form) != remote.plan_key('c', plain)
     sent = json.loads(json.dumps(form))
     assert remote.bodies_from(sent) == bodies and remote.bodies_from(json.loads(json.dumps(plain))) == ()
+    drawn = ((remote.canon(LAWN), 'hard'), (remote.canon(TREE), 'centre'))
+    assert remote.bodies_from(json.loads(json.dumps(remote.request_json(args, (), (), drawn)))) == drawn
     for bad in ([[LAWN]], [[LAWN, 'x']], 'x', [[LAWN, [[0, 'a']]]]):
         with pytest.raises(RemoteError):
             remote.bodies_from(dict(sent, bodies=bad))

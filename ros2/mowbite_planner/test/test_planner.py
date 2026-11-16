@@ -1366,6 +1366,28 @@ def test_recorded_body():
         plan_coverage(lawn, [bed], hard, start=(1, 1, 0.0)).poses
 
 
+def test_drawn_rings():
+    """bodies DRAWN_HARD: the ring's line is its edge, every ring drawn so plans as with hard edges; DRAWN_CENTRE: the
+    line is the centre's track either way (the front past a corner both ways round), the plan inside that; no recorded
+    loop on a drawn area."""
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0, perimeter_passes=2))
+    lawn, bed = rect(0, 0, 6, 4), rect(2.5, 1.5, 3.5, 2.5)
+    hard = plan_coverage(lawn, [bed], cfg, start=(1, 1, 0.0), bodies=((lawn, 'hard'), (bed, 'hard')))
+    assert hard.poses == plan_coverage(lawn, [bed], cfg.with_overrides({'edges': 'hard'}), start=(1, 1, 0.0)).poses
+    assert hard.body_space.within(Polygon(lawn).buffer(1e-9)) and check_plan(hard)['body_out'] == []
+    loose = cfg.with_overrides({'edge_margin': 0.0})
+    plain = plan_coverage(lawn, [bed], loose, start=(1, 1, 0.0))
+    centre = plan_coverage(lawn, [bed], loose, start=(1, 1, 0.0), bodies=((lawn, 'centre'),))
+    # past the corner at (6, 0): ahead going +x and going -y round it
+    ahead, below = Point(6.4, -0.1), Point(6.1, -0.4)
+    assert centre.body_space.contains(ahead) and centre.body_space.contains(below)
+    assert plain.body_space.contains(ahead) != plain.body_space.contains(below)
+    assert plain.body_space.difference(centre.body_space).area < 1e-6 and check_plan(centre)['body_out'] == []
+    loop = plan_coverage(lawn, [], cfg.with_overrides({'recorded_loop': True}), bodies=((lawn, 'centre'),))
+    assert 'recorded_loop ignored: the area is drawn, not recorded by driving along it' in loop.warnings
+    assert loop.recorded_loops == ()
+
+
 def test_robot_outline_settings():
     """robot_outline: [[x, y], ...] (JSON) as tuples, the body checked without robot_width, robot_front and robot_rear
     (it beats them), counter-clockwise whichever way round it's given, a closing point once; None: the rectangle again.

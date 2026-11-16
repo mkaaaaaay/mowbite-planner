@@ -512,7 +512,7 @@ def test_settings_over_rpc(make, tmp_path):
     # (recorded_loop: ignored with why while what else is set keeps it from doing anything, here no body)
     loop, margin = got['settings']['recorded_loop'], got['settings']['recorded_loop_margin']
     assert loop['type'] == 'boolean' and loop['value'] is False and loop['ignored'].startswith('no mower size set')
-    assert (margin['value'], margin['min'], margin['max'], margin['unit']) == (0.0, 0.0, 0.5, 'm')
+    assert (margin['value'], margin['min'], margin['max'], margin['unit']) == (0.03, 0.0, 0.5, 'm')
     got, _ = rpc(node, 'planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14}, 'r1a')
     assert 'ignored' not in got['settings']['recorded_loop']
     got, _ = rpc(node, 'planner.settings.set', {'edges': 'hard', 'recorded_loop': True}, 'r1b')
@@ -618,7 +618,7 @@ def test_area_set_one_place_for_each_value(make):
     planner property in place of it; both there (OpenMower's set again): OpenMower's counts. Without a way to write
     the map: an error."""
     assert rpc(make(), 'planner.area.set', {'area_id': 'a', 'settings': {'turn_radius': 0.3}})[1] == (
-        -32602, 'no map from OpenMower yet')
+        -32602, 'no map yet')
     plain = make()
     send_map(plain, the_map())
     assert rpc(plain, 'planner.area.set', {'area_id': 'a', 'settings': {'turn_radius': 0.3}})[1] == (

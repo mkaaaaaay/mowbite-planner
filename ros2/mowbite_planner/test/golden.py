@@ -25,7 +25,8 @@ PLANS = {
     'garden': (AREA, [BED], {}),
     'garden-sim': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18)),
     'garden-sim-body': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18, **BODY)),
-    'garden-sim-loop': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18, recorded_loop=True, **BODY)),
+    'garden-sim-loop': (AREA, [BED], dict(mower_width=0.18, blade_ahead=0.18, recorded_loop=True,
+                                          recorded_loop_margin=0.0, **BODY)),
 }
 SPACES = ('area', 'free_space', 'robot_space', 'lane_region', 'remaining', 'transit_space', 'body_space', 'narrow',
           'unmowed', 'recorded_space')

@@ -152,7 +152,7 @@ def test_start_a_little_outside():
 @pytest.mark.parametrize('start, goal, why, word', [
     ((25.0, 4.0, 0.0), (2.0, 2.0), 'the start (25.00, 4.00) lies 5.05 m outside', 'START_OUTSIDE'),
     # facing out of the lawn
-    ((19.9, 4.0, 0.0), (2.0, 2.0), 'sticks out of the drivable areas, straight ahead too', 'START_OUTSIDE'),
+    ((19.9, 4.0, 0.0), (2.0, 2.0), 'the start (19.90, 4.00): the body is 0.2', 'START_OUTSIDE'),
     ((2.0, 2.0, 0.0), (5.0, 3.0), 'the goal (5.00, 3.00) lies', 'GOAL_OUTSIDE'),  # in the tree
     ((2.0, 2.0, 0.0), (19.0, 4.0, 0.0), 'goal_straight needs a goal yaw', 'BAD_REQUEST'),
     ((2.0, 2.0), (19.0, 4.0, 0.0), 'the start needs x, y and yaw', 'BAD_REQUEST'),
@@ -165,6 +165,83 @@ def test_refused(start, goal, why, word):
     with pytest.raises(PlanningError, match=why.replace('(', r'\(').replace(')', r'\)')) as e:
         transit(start, goal[:2] if kw else goal, **kw)
     assert e.value.word == word and word in transit_route.CODES
+
+
+# a bed recorded the way its points go (the bed on the left), on the first lawn
+BED = [(3.0, 2.0), (7.0, 2.0), (7.0, 4.0), (3.0, 4.0)]
+
+
+def by_the_bed(t, start, goal):
+    """A way from or to a pose on BED's line: every body inside where it was while recording, as deep out of it as at
+    the start or goal at most; from where it fits with the margins on, as any way's (the body in, keeping them)."""
+    cfg = PlannerConfig(**TRON)
+    room = transit_route.recording_room(AREAS, [BED], cfg)
+    fp = Footprint(room, cfg.body_outline)
+    deep = max(transit_route._depth(room, fp.body(*start)), transit_route._depth(room, fp.body(*goal)))
+    loose = Footprint(room.buffer(deep + 1e-3), cfg.body_outline)
+    assert t.poses[0].x == pytest.approx(start[0]) and (t.poses[-1].x, t.poses[-1].y) == pytest.approx(goal[:2])
+    assert loose.all_fit(t.poses) and t.start_outside == t.goal_outside == 0.0
+    space, _ = _body_space(AREAS, [BED], [cfg.obstacle_margin], cfg)
+    margins = Footprint(space, cfg.body_outline, cfg.spin_margin)
+    fits = [margins.fits_pose(p.x, p.y, p.yaw) for p in t.poses]
+    first, last = fits.index(True), len(fits) - 1 - fits[::-1].index(True)
+    assert 0 < first or last < len(fits) - 1
+    assert margins.bad_poses(t.poses[first:last + 1]) == []
+    assert [w for w in t.warnings if 'closer to an edge than its margin' in w]
+
+
+@pytest.mark.parametrize('start', [(5.0, 2.0, 0.0), (5.0, 1.97, 0.0), (5.0, 2.0, math.pi), (7.0, 3.0, 0.5 * math.pi),
+                                   (5.0, 4.0, math.pi)],
+                         ids=['on_the_line', 'beside_it', 'the_other_way', 'round_the_corner', 'far_side'])
+def test_start_on_a_recorded_line(start):
+    # the mower right by an obstacle it recorded, closer than obstacle_margin (15.11.): a way out, turning or along the
+    # line first where the body stays where it was while recording
+    goal = (1.0, 1.0, math.pi)
+    with pytest.raises(PlanningError, match=r'^the start \('):  # (with a far wider margin none)
+        transit(start, goal, obstacles=[BED], max_outside=0.3, cfg={'obstacle_margin': 0.6})
+    t = transit(start, goal, obstacles=[BED], max_outside=0.3)
+    by_the_bed(t, start, goal)
+
+
+def test_goal_on_a_recorded_line():
+    # the way to such a pose the other way round: driven backwards out of it (the body turned round), the way turned
+    # back; the Tron's nose reaching far ahead finds none by the bed within max_outside (it says so), one as long behind
+    # as ahead does
+    goal = (5.0, 2.0, 0.0)
+    with pytest.raises(PlanningError, match=r'the goal \(5.00, 2.00\): the body is closer to an obstacle or an edge '
+                       'than its margin and no way out fits') as e:
+        transit((1.0, 1.0, 0.0), goal, obstacles=[BED], max_outside=0.3)
+    assert e.value.word == 'GOAL_OUTSIDE'
+    even = {'robot_front': 0.3, 'robot_rear': 0.3}
+    t = transit((1.0, 1.0, 0.0), goal, even, obstacles=[BED], max_outside=0.3)
+    assert (t.poses[-1].x, t.poses[-1].y) == pytest.approx(goal[:2]) and angle_diff(t.poses[-1].yaw, 0.0) < 1e-9
+    assert [w for w in t.warnings if w.startswith('the goal lies closer to an edge than its margin')]
+    cfg = PlannerConfig(**dict(TRON, **even))
+    room = Footprint(transit_route.recording_room(AREAS, [BED], cfg).buffer(1e-3), cfg.body_outline)
+    assert room.all_fit(t.poses) and t.goal_outside == 0.0
+
+
+def test_start_too_deep():
+    # the body further into the bed than where it was while recording (START_DEPTH): no way, the start out of the map
+    with pytest.raises(PlanningError, match=r'the start \(5.00, 2.15\): the body is 0.1[45] m inside an obstacle or '
+                       'past an edge of the map, no way out is planned from there') as e:
+        transit((5.0, 2.15, 0.0), (1.0, 1.0), obstacles=[BED], max_outside=0.3)
+    assert e.value.word == 'START_OUTSIDE'
+    with pytest.raises(PlanningError, match=r'the goal \(5.00, 2.15\): the body is') as e:
+        transit((1.0, 1.0, 0.0), (5.0, 2.15, 0.0), obstacles=[BED], max_outside=0.3)
+    assert e.value.word == 'GOAL_OUTSIDE'
+
+
+def test_each_obstacles_own_margin():
+    # margins: an obstacle's own instead of obstacle_margin (None: that one), the room the centre has goes by them
+    cfg = PlannerConfig(**TRON)
+    plain = transit_route.centre_space(AREAS, [TREE, BED], cfg)[0]
+    assert transit_route.centre_space(AREAS, [TREE, BED], cfg, margins=[None, None])[0].equals(plain)
+    wide = transit_route.centre_space(AREAS, [TREE, BED], cfg, margins=[None, 0.4])[0]
+    assert wide.area < plain.area and wide.covers(plain.difference(Polygon(BED).buffer(1.2)))
+    with pytest.raises(PlanningError, match='a margin must be a number') as e:
+        transit((1.0, 1.0, 0.0), (8.0, 5.0), obstacles=[TREE], margins=[-1.0])
+    assert e.value.word == 'BAD_REQUEST'
 
 
 def test_bad_requests():

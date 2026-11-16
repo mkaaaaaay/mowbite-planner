@@ -9,8 +9,9 @@ from shapely import wkb
 from shapely.geometry import LineString, Polygon
 from shapely.ops import clip_by_rect, nearest_points
 
-from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, LARGER, MAX_BLADE_OFFSET, ON_EDGE, RECORDED_KEEP,
-                     RECORDED_MITRE, RECORDED_OFF, RECORDED_SLACK, XY, PlannerConfig, PlanningError, _keep)
+from .config import (_BODY_SPACE, _BODY_SPACES, _KEPT_LOCK, DRAWN_CENTRE, DRAWN_HARD, LARGER, MAX_BLADE_OFFSET,
+                     ON_EDGE, RECORDED_KEEP, RECORDED_MITRE, RECORDED_OFF, RECORDED_SLACK, XY, PlannerConfig,
+                     PlanningError, _keep)
 from .footprint import TURN_STEP, Blade, Footprint
 from .geometry import JOIN_MITRE, QUAD_SEGS, clean_polygon, inset, polygonal, polygons, rings, subtract, union
 from .mathutil import normalize_angle
@@ -105,21 +106,48 @@ def _edge_gaps(area, drivable: Sequence[Sequence[Sequence[float]]], shapes: List
 
 
 def _recorded(bodies: Sequence[Tuple[Sequence[Sequence[float]], Sequence[XY]]]) -> Dict[tuple, Tuple[XY, ...]]:
-    """{ring: the body's corners} of bodies ((ring, corners), ...), the rings as _body_space has them."""
-    return {tuple((float(p[0]), float(p[1])) for p in ring): tuple((float(x), float(y)) for x, y in corners)
+    """{ring: the body's corners, or DRAWN_HARD or DRAWN_CENTRE} of bodies ((ring, corners), ...), the rings as
+    _body_space has them."""
+    return {tuple((float(p[0]), float(p[1])) for p in ring):
+            corners if isinstance(corners, str) else tuple((float(x), float(y)) for x, y in corners)
             for ring, corners in bodies}
+
+
+def drawn_ring(bodies, ring) -> Optional[str]:
+    """DRAWN_HARD or DRAWN_CENTRE where bodies (plan_coverage's) have ring as drawn, else None."""
+    got = _recorded(bodies).get(tuple((float(p[0]), float(p[1])) for p in ring))
+    return got if isinstance(got, str) else None
+
+
+def _bands(rings, corners_of, own: Tuple[XY, ...]):
+    """The rings and the bodies _driven takes of rings with each one's corners (corners_of, _recorded's): none of a
+    ring drawn hard, a ring drawn as the centre track with this body (own) both ways."""
+    out_rings, out_bodies = [], []
+    for ring, corners in zip(rings, corners_of):
+        if corners == DRAWN_HARD:
+            continue
+        if corners == DRAWN_CENTRE:
+            out_rings += [ring, list(ring)[::-1]]
+            out_bodies += [own, own]
+        else:
+            out_rings.append(ring)
+            out_bodies.append(corners)
+    return out_rings, out_bodies
 
 
 def _walls(boundary, away_from: List[Sequence[Sequence[float]]], cfg: PlannerConfig,
            bodies) -> Tuple[float, List[float]]:
     """m the loops keep further off the outline, and off each obstacle or area to keep out of, recorded with a narrower
-    body than this one (bodies): half the body's extra width, as with hard edges for one of none (wall_half)."""
+    body than this one (bodies): half the body's extra width, as with hard edges for one of none (wall_half); off one
+    drawn hard half the body's width."""
     own = _recorded(bodies) if cfg.body and cfg.edges != 'hard' else {}
     side = max(abs(y) for _, y in cfg.body_outline) if own else 0.0
 
     def wall(ring) -> float:
         corners = own.get(tuple((float(p[0]), float(p[1])) for p in ring))
-        return 0.0 if corners is None else max(0.0, side - max(abs(y) for _, y in corners))
+        if corners is None or corners == DRAWN_CENTRE:
+            return 0.0
+        return side if corners == DRAWN_HARD else max(0.0, side - max(abs(y) for _, y in corners))
     return wall(boundary), [wall(w) for w in away_from]
 
 
@@ -131,8 +159,10 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
     and areas to keep out of, each the way its points go), into an obstacle or an area to keep out of only along its own
     edge (hard edges: the lines themselves; one too small to have been driven round, of which that leaves less than
     DRAWN, its line), edge_margin and each one's margin off that. bodies ((ring, corners), ...): the body a ring was
-    recorded with where it's another (the map's recorded_body), the Footprint's is this one's. The last ones worked out
-    are kept (_BODY_SPACES), the last one of this thread with its Footprint (_BODY_SPACE), the plan gets a copy."""
+    recorded with where it's another (the map's recorded_body), the Footprint's is this one's; DRAWN_HARD in place of
+    the corners: the ring's line is its edge (as with hard edges, no other's band taken off an obstacle drawn so),
+    DRAWN_CENTRE: the body was where this one's would be with its centre on the line either way. The last ones worked
+    out are kept (_BODY_SPACES), the last one of this thread with its Footprint (_BODY_SPACE), the plan gets a copy."""
     outlines, away_from = ([[(float(p[0]), float(p[1])) for p in ring] for ring in rings]
                            for rings in (outlines, away_from))
     hard = cfg.edges == 'hard'
@@ -149,12 +179,12 @@ def _body_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Seque
             space = _BODY_SPACES.get(shared)
         if space is None:
             outer = union([clean_polygon(o) for o in outlines] +
-                          ([] if hard else [_driven(outlines, out_bodies)]))
-            band = None if hard else _driven(away_from, away_bodies)
+                          ([] if hard else [_driven(*_bands(outlines, out_bodies, cfg.body_outline))]))
+            band = None if hard else _driven(*_bands(away_from, away_bodies, cfg.body_outline))
             inner = []
-            for w in away_from:
+            for w, corners in zip(away_from, away_bodies):
                 w = clean_polygon(w)
-                rest = w if band is None else w.difference(band)
+                rest = w if band is None or corners == DRAWN_HARD else w.difference(band)
                 inner.append(rest if rest.area >= DRAWN else w)
             space = subtract(inset(outer, cfg.edge_margin), [inset(w, -m) for w, m in zip(inner, margin_of)]).wkb
             _keep(_BODY_SPACES, shared, space)
@@ -173,7 +203,8 @@ def recorded_space(outlines: List[Sequence[Sequence[float]]], away_from: List[Se
     drive reverse: the body turned round went the other way. This thread's kept space stays as it was."""
     if cfg.drive == 'reverse':
         outlines, away_from = ([list(ring)[::-1] for ring in rings] for rings in (outlines, away_from))
-        bodies = [(list(ring)[::-1], [(-x, -y) for x, y in corners]) for ring, corners in bodies]
+        bodies = [(list(ring)[::-1], corners if isinstance(corners, str) else [(-x, -y) for x, y in corners])
+                  for ring, corners in bodies]
     last = getattr(_BODY_SPACE, 'last', None)
     try:
         return _body_space(outlines, away_from, margin_of, dataclasses.replace(cfg, edge_margin=-RECORDED_SLACK),
@@ -192,7 +223,7 @@ def recorded_larger(boundary, cfg: PlannerConfig, bodies) -> bool:
     """Whether the body is larger than the one the outline was recorded with (bodies: plan_coverage's; none for
     it: recorded with this one), as mapfile.body_hints has it: not in that one grown by LARGER."""
     corners = _recorded(bodies).get(tuple((float(p[0]), float(p[1])) for p in boundary))
-    if corners is None:
+    if corners is None or isinstance(corners, str):
         return False
     if cfg.drive == 'reverse':  # (cfg's body is turned round, see backing.settings)
         corners = [(-x, -y) for x, y in corners]
@@ -410,7 +441,9 @@ def build_space(boundary, obstacles, drivable, keep_out, reach_over, margin_of: 
         transit_space = polygonal(union([transit_space, extra_space]))
     recorded, why = None, cfg.recorded_off
     if cfg.recorded_loop and not why:
-        if recorded_larger(boundary, cfg, bodies):
+        if drawn_ring(bodies, boundary):
+            why = 'the area is drawn, not recorded by driving along it'
+        elif recorded_larger(boundary, cfg, bodies):
             why = 'the mower is larger than the one the area was recorded with'
         else:
             away = union(grown + gaps + slots + [unmowed_space.buffer(max(0.0, half - first), QUAD_SEGS)])

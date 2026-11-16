@@ -185,7 +185,7 @@ PARAMETERS = {
                       'recorded, blade_offset 0.0, perimeter_passes not 0 and fill_pattern not concentric, and not '
                       'for a mower larger than the one the area was recorded with: else planned without it, the '
                       'plan warns of it', None, ''),
-    'recorded_loop_margin': (0.0, "with recorded_loop: how far inside the recorded line the mower's centre drives "
+    'recorded_loop_margin': (0.03, "with recorded_loop: how far inside the recorded line the mower's centre drives "
                              'that one loop [m]. 0.0: on the line itself, the blade mows half its width past it. '
                              'Every other loop and margin as it is', lambda v: v >= 0.0, 'must be >= 0'),
     'lane_overlap_passes': (0, "lanes reach this many perimeter loops further out (OpenMower's "
