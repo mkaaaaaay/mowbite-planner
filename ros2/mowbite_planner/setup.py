@@ -23,7 +23,7 @@ setup(
     maintainer='mkaaaaaay',
     maintainer_email='mkaaaaaay@users.noreply.github.com',
     description='MowBite Planner: coverage path planner for robot mowers (perimeter loops, lanes, gentle turns)',
-    license='GPL-3.0-only',
+    license='PolyForm-Noncommercial-1.0.0',
     extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [

@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>The MowBite Planner on MowBite OS: mowbite_planner's node with mowbite_bridge, mowbite_map and mowbite_logic, its ~/plan_transit</description>
   <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
-  <license>GPL-3.0-only</license>
+  <license>PolyForm-Noncommercial-1.0.0</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>

@@ -10,8 +10,8 @@ MowerModel() is an ideal mower (OpenMower knows where it is, the wheels do what 
 own errors, a bit better than OpenMower's simulator), MowerModel.omsim() like OpenMower's simulator, and
 MowerModel.realistic(seed) like a real one with RTK (its errors calibrated on the user's tracks)."""
 
-# Ported from OpenMower (https://github.com/ClemensElflein/open_mower_ros, licensed GPLv3 like this repository; the
-# upstream commit where it's named below): the FTC controller (src/lib/ftc_local_planner, ftc_planner.cpp),
+# Ported from OpenMower (https://github.com/ClemensElflein/open_mower_ros, licensed GPLv3 like this folder, sim/LICENSE;
+# the upstream commit where it's named below): the FTC controller (src/lib/ftc_local_planner, ftc_planner.cpp),
 # mower_logic's ways of driving a path (src/mower_logic, MowingBehavior.cpp), the EKF of xbot_positioning
 # (src/lib/xbot_positioning) and the position history of xbot_monitoring (src/lib/xbot_monitoring, PositionHistory.h).
 # xbot_positioning and xbot_monitoring carry this notice of their own:

@@ -17,7 +17,7 @@ setup(
     maintainer='mkaaaaaay',
     maintainer_email='mkaaaaaay@users.noreply.github.com',
     description='The MowBite Planner on MowBite OS',
-    license='GPL-3.0-only',
+    license='PolyForm-Noncommercial-1.0.0',
     extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [

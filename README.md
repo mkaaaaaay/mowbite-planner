@@ -108,4 +108,12 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install shapely pytest
 
 ## License
 
-GPL-3.0, see [LICENSE](LICENSE).
+Copyright (C) 2026 mkay
+
+[PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0), see [LICENSE](LICENSE).
+You may use, change and pass on the planner for any noncommercial purpose. Commercial use needs a separate license
+from the licensor. The planner comes without any warranty. Versions released before this license (up to v0.5.0-beta.1)
+stay under GPL-3.0.
+
+Two folders stay under GPL-3.0, each with its own LICENSE: `ros1/` (the ROS 1 node, built on OpenMower) and `sim/`
+(the simulation, with code ported from OpenMower).

@@ -5,7 +5,7 @@
   <version>0.5.0</version>
   <description>MowBite Planner: coverage path planner for robot mowers (perimeter loops, boustrophedon lanes with gentle turns, nav_msgs/Path out)</description>
   <maintainer email="mkaaaaaay@users.noreply.github.com">mkaaaaaay</maintainer>
-  <license>GPL-3.0-only</license>
+  <license>PolyForm-Noncommercial-1.0.0</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
