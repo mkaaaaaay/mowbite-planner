@@ -19,6 +19,7 @@ from shapely.ops import nearest_points
 from shapely.prepared import prep
 
 from .geometry import JOIN_MITRE, polygonal, polygons
+from .progress import check
 
 try:  # shapely 2 makes a line of an array much quicker than of points with its class, and tests many at once
     import numpy
@@ -209,6 +210,7 @@ class TransitPlanner:
     def _build_graphs(self) -> List[_Graph]:
         graphs = []
         for clearance in sorted({self._clearance, min(self._clearance, NARROW_CLEARANCE)}, reverse=True):
+            check()  # (a planning stopped from outside ends here, progress.stoppable; nothing kept half made)
             if clearance <= 0:
                 continue
             shrunk = self._space.buffer(-clearance, 4, join_style=JOIN_MITRE, mitre_limit=3.0)
@@ -218,6 +220,7 @@ class TransitPlanner:
             nodes = [n for n in reflex_nodes(shrunk, MIN_REFLEX) if self.is_free([n[0]])]
             if nodes:
                 graphs.append(_Graph(nodes, prep(shrunk), clearance))
+        check()
         if self._off_edge > 0:
             # every corner of the space shrunk by off_edge (simplified: still inside)
             shrunk = self._space.buffer(-self._off_edge, 4, join_style=JOIN_MITRE, mitre_limit=3.0)
@@ -342,6 +345,7 @@ class TransitPlanner:
     def _neighbours(self, gi: int, graph: _Graph, i: int) -> List[Tuple[int, float]]:
         out = graph.neighbours.get(i)
         if out is None:
+            check()
             node = graph.nodes[i]
             xi, yi = node[0]
             if graph.corners is not None:
@@ -375,6 +379,7 @@ class TransitPlanner:
         def goal(j: int) -> Optional[float]:
             # (worked out where the search gets to, and from the closest corner on till one sees b)
             if j not in to_goal:
+                check()
                 to_goal[j] = h(j) if (not tb or _tangent(nodes[j], b)) and self.is_free([nodes[j][0], b]) else None
             return to_goal[j]
 
@@ -395,6 +400,7 @@ class TransitPlanner:
         best_len, best_last = math.inf, None
         closed = set()
         while heap:
+            check()
             f, gj, j = heapq.heappop(heap)
             if f >= best_len:
                 break

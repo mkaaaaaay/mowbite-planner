@@ -13,7 +13,7 @@ sys.path[:0] = [os.path.join(HERE, '..'), os.path.join(HERE, '..', '..', '..', '
 
 from mowbite_planner import PlannerConfig, PlanningError, progress  # noqa: E402
 from mowbite_planner.footprint import SPIN, Footprint  # noqa: E402
-from mowbite_planner.mathutil import angle_diff  # noqa: E402
+from mowbite_planner.mathutil import Pose2D, angle_diff  # noqa: E402
 from mowbite_planner.planner import plan_coverage  # noqa: E402
 from mowbite_planner.space import _body_space  # noqa: E402
 from mowbite_planner_os import transit_route  # noqa: E402
@@ -221,6 +221,30 @@ def test_goal_on_a_recorded_line():
     assert room.all_fit(t.poses) and t.goal_outside == 0.0
 
 
+def test_leave_edge_at_a_slant():
+    # standing at a slant by the line: along it as far beside it as the mower is (not as far as the corner is ahead
+    # of it), where a way straight out fits only by the next stretch
+    square = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+    room = Polygon([(-5.0, -5.0), (7.0, -5.0), (7.0, 7.0), (-5.0, 7.0)])
+    fits = Footprint(room, ((0.1, 0.1), (-0.1, 0.1), (-0.1, -0.1), (0.1, -0.1)))
+    got, why = transit_route.leave_edge(Pose2D(1.0, 0.1, math.radians(45)), room, fits, lambda p, yaw: p[1] > 1.0,
+                                        [square], 0.3, 0.1)
+    assert why == '' and got[-1].y > 1.0
+    line = LineString(square + square[:1])
+    assert max(line.distance(Point(p.x, p.y)) for p in got) == pytest.approx(0.1)
+
+
+def test_backwards():
+    # a way out turned round to be a way in: each pose facing the next, on the spot its own turned round, the last
+    # one as given (where the way out began facing another way)
+    out = [Pose2D(0.0, 0.0, 0.5 * math.pi), Pose2D(0.1, 0.0, 0.0), Pose2D(0.2, 0.0, 0.5 * math.pi),
+           Pose2D(0.2, 0.1, 0.5 * math.pi), Pose2D(0.2, 0.1, math.pi)]
+    back = transit_route._backwards(out, 1.0)
+    assert [(p.x, p.y) for p in back] == [(p.x, p.y) for p in reversed(out)]
+    assert [round(p.yaw, 9) for p in back] == [round(y, 9) for y in (0.0, -0.5 * math.pi, math.pi, math.pi, 1.0)]
+    assert transit_route._backwards([], 1.0) == []
+
+
 def test_start_too_deep():
     # the body further into the bed than where it was while recording (START_DEPTH): no way, the start out of the map
     with pytest.raises(PlanningError, match=r'the start \(5.00, 2.15\): the body is 0.1[45] m inside an obstacle or '
@@ -368,7 +392,7 @@ def test_the_same_answers_from_a_kept_room():
 
 
 def test_stopped_anywhere_the_room_stays_good():
-    # a search stopped from outside (the node's transit_search_limit) at any of its checks of the body: what's kept of
+    # a search stopped from outside (the node's transit_search_limit) at any of its checks: what's kept of
     # the map is as good as new, the same request and another answered as made anew
     lawn = [(0.0, 0.0), (12.0, 0.0), (12.0, 6.0), (0.0, 6.0)]
     beds = [[(5.0, 3.15), (8.0, 3.15), (8.0, 6.5), (5.0, 6.5)], [(5.0, -0.5), (8.0, -0.5), (8.0, 2.85), (5.0, 2.85)]]

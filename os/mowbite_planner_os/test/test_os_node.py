@@ -18,7 +18,7 @@ from osfake import HERE, REAL_ROS
 
 import rclpy  # noqa: E402
 from geometry_msgs.msg import Point32, Polygon, Pose  # noqa: E402
-from mowbite_msgs.msg import MapStatus, MqttPublish, RpcRequest  # noqa: E402
+from mowbite_msgs.msg import MapStatus, MqttPublish, RpcRequest, RpcResponse  # noqa: E402
 from mowbite_msgs.srv import ReplaceMap  # noqa: E402
 from mowbite_planner_interfaces.srv import PlanCoverage  # noqa: E402
 from mowbite_planner_os_interfaces.srv import PlanTransit  # noqa: E402
@@ -993,6 +993,30 @@ def test_body_from_robot_geometry(make, planned, tmp_path):
 
 
 @fake_only
+def test_stored_before_the_geometry(make, tmp_path):
+    """Settings stored that go with the mower's own blade but not yet with the node's mower_width (robot.geometry
+    comes after the start): kept, taken once it's there; a change before that takes them as well."""
+    stored = {'lane_spacing_max': 0.25, 'perimeter_passes': 4, 'angle': 30.0}
+    path = tmp_path / 'data' / 'planner' / 'mowbite_planner_settings.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(stored))
+    node = make(body=None)
+    assert node.core.current.stored == {}
+    geometry(node, mower_width=0.281)
+    assert node.core.current.stored == stored and node.core.current.base.perimeter_passes == 4
+    assert json.loads(path.read_text()) == stored
+    path.write_text(json.dumps(stored))
+    later = make(body=None)
+    refused = rpc(later, 'planner.settings.set', {'overlap': 0.1}, 'r2')[1]  # (0.25 is more than 0.22 still)
+    assert refused[1].startswith('the settings stored before (angle, lane_spacing_max, perimeter_passes) don\'t go '
+                                 'with the mower: ')
+    assert json.loads(path.read_text()) == stored
+    geometry(later, mower_width=0.281)
+    assert rpc(later, 'planner.settings.set', {'overlap': 0.1}, 'r3')[1] is None
+    assert json.loads(path.read_text()) == dict(stored, overlap=0.1)
+
+
+@fake_only
 def test_margins_as_set(make, planned, tmp_path):
     """edge_margin, obstacle_margin and spin_margin as set, no floors (mkay 10.11.): stored, an area's, an obstacle's
     and a transit's own taken as they are."""
@@ -1021,13 +1045,18 @@ def test_margins_as_set(make, planned, tmp_path):
 @fake_only
 def test_plan_transit_in_a_group_of_its_own(make, monkeypatch):
     """~/plan_transit in a callback group of its own (answered while ~/plan_coverage waits for its plan, see
-    test_plan_transit_while_a_plan_is_held), the other callbacks in the node's own; the executor runs both. Planned in
+    test_plan_transit_while_a_plan_is_held), ~/plan_coverage and ~/plan_from_parameters in one of theirs, the other
+    callbacks in the node's own; the executor runs all three. Planned in
     the node's transit thread whichever thread takes the request: what it keeps of the map is made once."""
     node = make()
     group = node.service_groups['~/plan_transit']
     assert isinstance(group, os_module.MutuallyExclusiveCallbackGroup)
-    assert all(g is None for name, g in node.service_groups.items() if name != '~/plan_transit')
-    assert os_module.THREADS >= 2
+    planning = node.service_groups['~/plan_coverage']
+    assert isinstance(planning, os_module.MutuallyExclusiveCallbackGroup) and planning is not group
+    assert node.service_groups['~/plan_from_parameters'] is planning
+    assert all(g is None for name, g in node.service_groups.items() if name not in (
+        '~/plan_transit', '~/plan_coverage', '~/plan_from_parameters'))
+    assert os_module.THREADS >= 3
     real, where, rooms = os_module.plan_transit, [], []
 
     def spy(*args, **kw):
@@ -1049,7 +1078,8 @@ def test_plan_transit_in_a_group_of_its_own(make, monkeypatch):
 @pytest.mark.skipif(not REAL_ROS, reason='a real executor')
 def test_plan_transit_while_a_plan_is_held(make, monkeypatch):
     """On MowBite OS' executor (main's) ~/plan_transit answers at once while a ~/plan_coverage waits for its plan (held
-    here till the transit is answered): mowbite_logic's next approach never waits for a planner.plan of another."""
+    here till the transit is answered): mowbite_logic's next approach never waits for a planner.plan of another. An RPC
+    is answered meanwhile too."""
     from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     node = make()
     node._on_map(String(data=json.dumps(the_map())))
@@ -1084,6 +1114,15 @@ def test_plan_transit_while_a_plan_is_held(make, monkeypatch):
         took = time.monotonic() - t0
         assert answer.done() and answer.result().success, answer.result()
         assert took < 1.0 and not planning.done()
+        # (and an RPC: the node's other callbacks go on too)
+        answers = []
+        caller.create_subscription(RpcResponse, '/bridge/rpc/response', answers.append, 10)
+        asks = caller.create_publisher(RpcRequest, '/bridge/rpc/request', 10)
+        t0 = time.monotonic()
+        while not any(a.id == 'held' for a in answers) and time.monotonic() - t0 < 10.0:
+            asks.publish(RpcRequest(method='planner.settings', params='', id='held'))
+            side.spin_once(timeout_sec=0.2)
+        assert any(a.id == 'held' for a in answers) and not planning.done()
         go.set()
         side.spin_until_future_complete(planning, timeout_sec=60.0)
         assert planning.result().success, planning.result().message

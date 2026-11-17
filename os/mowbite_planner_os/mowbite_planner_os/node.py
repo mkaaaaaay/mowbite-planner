@@ -46,7 +46,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     there the way mowbite_logic asks for (max_outside ARRIVE_OUTSIDE); none got to from there: refused with
     START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
     ~/plan_transit in a callback group of its own on a MultiThreadedExecutor: answered while a ~/plan_coverage waits for
-    its plan (the other callbacks one after another as before). It plans in a thread of its own, the node's one for
+    its plan. ~/plan_coverage and ~/plan_from_parameters in one of theirs: while one waits for its plan (in the core's
+    worker, like a plan ahead) the other callbacks go on (RPCs, the map, events, map/replace's answer). It plans in a thread of its own, the node's one for
     all its requests whichever of the executor's takes them (what a transit keeps of the map for the next one,
     transit_route._ROOM, is its thread's: made once for a map), on geometries of its own (space._body_space: the kept
     ones as WKB, each thread its own; mowbite_planner's GEOS rule).
@@ -137,13 +138,14 @@ GEOMETRY = '/mowbite_geometry'
 GEOMETRY_KEYS = ('robot_width', 'robot_front', 'robot_rear', 'robot_outline', 'mower_width', 'blade_ahead',
                  'blade_offset')
 FROM_GEOMETRY = 'robot.geometry (/mowbite_geometry)'
-# the executor's threads: the node's callbacks and ~/plan_transit's
-THREADS = 2
+# the executor's threads: the node's callbacks, ~/plan_coverage's and ~/plan_transit's
+THREADS = 3
 # role: the planner, or a second instance only for ~/plan_transit (see the top); the planner's settings under data_dir
 ROLES = ('planner', 'transit')
 TRANSIT = 'transit'
 SETTINGS_FILE = os.path.join('planner', 'mowbite_planner_settings.json')
-# s ~/plan_transit looks for a way at most by default (transit_search_limit; mowbite_logic waits 10 s for its answer)
+# s ~/plan_transit looks for a way at most by default (transit_search_limit; mowbite_logic waits plan_timeout, 30 s,
+# for its answer)
 SEARCH_LIMIT = 6.0
 # a plan refused for the body sticking out (checked) tells of this many places at most, poses this many m apart, each
 # with what the pose is part of (sweep.body_out's kind)
@@ -209,6 +211,9 @@ class OsNode(base.MowbitePlannerNode):
 
     def plans_coverage(self) -> bool:
         return self.role() != TRANSIT
+
+    def planning_group(self):
+        return MutuallyExclusiveCallbackGroup()  # (asked once, both services in it: see the top)
 
     def _core_setup(self):
         """As MowbitePlannerNode's; role transit: TransitCore, only the map and bridge/params (see the top)."""

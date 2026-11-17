@@ -558,10 +558,14 @@ class PlannerCore:
             self.logwarn('MowBite Planner: stored settings not known, left out (%s): %s', self.file,
                          ', '.join(unknown))
             stored = {n: v for n, v in stored.items() if n not in unknown}
+        # (the stored settings left out at the start, as they were: the robot's given values that come later may
+        # take them, given_again(); a change of settings takes them first)
+        self.left_out = {}
         if stored:
             try:
                 self.current = self.setup(self.launch_width, self.launch, stored)
             except PlanningError as e:  # the launch file changed since, its settings still work
+                self.left_out = stored
                 self.logwarn('MowBite Planner: stored settings left out (%s): %s', self.file, e)
         self.map, self.map_text = None, None  # (as the robot sent it)
         self.lock = threading.Lock()
@@ -839,6 +843,13 @@ class PlannerCore:
         (nothing changed then)."""
         with self.set_lock:
             current = self.setup(self.launch_width, self.launch, self.current.stored)
+            if self.left_out:
+                try:
+                    current = self.setup(self.launch_width, self.launch, self.left_out)
+                    self.left_out = {}
+                    self.loginfo('MowBite Planner: stored settings taken after all (%s)', self.file)
+                except PlanningError:
+                    pass
             self.defaults = self.setup(self.launch_width, self.launch, {})
             self.current = current
             self.armed = None
@@ -1088,13 +1099,21 @@ class PlannerCore:
         if unknown:
             raise PlanningError('unknown planner settings: %s' % ', '.join(unknown))
         with self.set_lock:
-            stored = dict(self.current.stored)
+            # (on the ones left out at the start where there are: they'd be gone from the file else)
+            stored = dict(self.left_out or self.current.stored)
             for name, value in params.items():
                 if value is None:
                     stored.pop(name, None)
                 else:
                     stored[name] = value
-            current = self.setup(self.launch_width, self.launch, stored)
+            try:
+                current = self.setup(self.launch_width, self.launch, stored)
+            except PlanningError as e:
+                if self.left_out:
+                    raise PlanningError('the settings stored before (%s) don\'t go with the mower: %s' % (
+                        ', '.join(sorted(self.left_out)), e))
+                raise
+            self.left_out = {}
             self.write_stored(current.stored)
             # (leftovers_auto changes no plan, the rest of stored is in the others)
             changed = current._replace(stored=None, leftovers_auto=None) != \

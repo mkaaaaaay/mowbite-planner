@@ -28,6 +28,7 @@ from mowbite_planner.maneuvers import (closest_on_polyline, dubins, join, path_l
                                        sample_straight)
 from mowbite_planner.mathutil import Pose2D, angle_diff, normalize_angle
 from mowbite_planner.planner import _turning
+from mowbite_planner.progress import check
 from mowbite_planner.space import _body_space, _check_coordinates, margins_of
 from mowbite_planner.transit import TransitPlanner
 
@@ -152,6 +153,17 @@ def _depth(room: Any, body: Polygon) -> float:
     return max(room.distance(Point(q)) for g in polygons(out) for q in g.exterior.coords)
 
 
+def _backwards(poses: Sequence[Pose2D], last: float) -> List[Pose2D]:
+    """poses the other way round, each facing the way it's left (the next one; on the spot: its own turned round),
+    the last one last (its heading where they began)."""
+    back = list(reversed(poses))
+    out = []
+    for p, q in zip(back, back[1:]):
+        same = math.hypot(q.x - p.x, q.y - p.y) < 1e-6
+        out.append(Pose2D(p.x, p.y, normalize_angle(p.yaw + math.pi) if same else math.atan2(q.y - p.y, q.x - p.x)))
+    return out + [Pose2D(back[-1].x, back[-1].y, last)] if back else []
+
+
 def leave_edge(at: Pose2D, room: Any, fits: Footprint, clear, rings: Sequence[Sequence[XY]], max_outside: float,
                step: float) -> Tuple[Optional[List[Pose2D]], str]:
     """(the poses from at to where the body fits as ever, clear: the last one, ''), or (None, why not): for a start
@@ -170,6 +182,7 @@ def leave_edge(at: Pose2D, room: Any, fits: Footprint, clear, rings: Sequence[Se
         turns = sorted((normalize_angle(yaw + k * OUT_STEP) for k in range(int(round(2.0 * math.pi / OUT_STEP)))),
                        key=lambda h: angle_diff(h, yaw))
         for h in turns:
+            check()  # (a planning stopped from outside ends here, progress.stoppable)
             if angle_diff(h, yaw) > 1e-9 and not loose.fits_turn(x, y, yaw, h):
                 continue
             last = None  # (the furthest place it fits as ever, max_outside at most: room to go on from there)
@@ -204,11 +217,15 @@ def leave_edge(at: Pose2D, room: Any, fits: Footprint, clear, rings: Sequence[Se
     _, ring, i = best
     n = len(ring)
     a, b = ring[i], ring[(i + 1) % n]
-    ahead = math.cos(math.atan2(b[1] - a[1], b[0] - a[0]) - at.yaw) >= 0.0
+    along = math.atan2(b[1] - a[1], b[0] - a[0])
+    ahead = math.cos(along - at.yaw) >= 0.0
     order = [ring[(i + 1 + k) % n] for k in range(n)] if ahead else [ring[(i - k) % n] for k in range(n)]
-    side = (at.x - a[0]) * math.sin(at.yaw) - (at.y - a[1]) * math.cos(at.yaw)  # (m to the right of its heading)
+    if not ahead:
+        along += math.pi
+    side = (at.x - a[0]) * math.sin(along) - (at.y - a[1]) * math.cos(along)  # (m to the right of the line, its way)
     poses, went, here = [Pose2D(at.x, at.y, at.yaw)], 0.0, Pose2D(at.x, at.y, at.yaw)
     for p, q in zip(order, order[1:]):
+        check()
         if math.hypot(q[0] - p[0], q[1] - p[1]) < 1e-6:
             continue
         h = math.atan2(q[1] - p[1], q[0] - p[0])
@@ -343,7 +360,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
             return None, f'the body is closer to an obstacle or an edge than its margin and {why} ' \
                 f'(max_outside {max_outside} m)'
         if goal:
-            got = [Pose2D(p.x, p.y, normalize_angle(p.yaw + math.pi)) for p in reversed(got)]
+            got = _backwards(got, normalize_angle(at.yaw + math.pi))
         return got, ''
 
     # the start: where the body fits, straight ahead or towards the closest point (turning there, the body checked)

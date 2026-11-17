@@ -568,8 +568,10 @@ class MowbitePlannerNode(Node):
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
         if self.plans_coverage():
             self._path_pub = self.create_publisher(Path, '~/coverage_path', self.latched)
-            self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage)
-            self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters)
+            group = self.planning_group()
+            self.create_service(PlanCoverage, '~/plan_coverage', self._on_plan_coverage, callback_group=group)
+            self.create_service(Trigger, '~/plan_from_parameters', self._on_plan_from_parameters,
+                                callback_group=group)
         self.core = None
         self.rpc_on = False
         if self._param('rpc') or self._param('use_map'):
@@ -655,6 +657,11 @@ class MowbitePlannerNode(Node):
     def plans_coverage(self) -> bool:
         """Whether it offers ~/plan_coverage, ~/plan_from_parameters and ~/coverage_path (asked before the core)."""
         return True
+
+    def planning_group(self):
+        """The callback group of ~/plan_coverage and ~/plan_from_parameters (None: the node's own, with the other
+        callbacks)."""
+        return None
 
     def more_methods(self) -> dict:
         """The robot's own RPC methods: name -> callback(params)."""

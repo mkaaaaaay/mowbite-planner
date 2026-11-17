@@ -285,6 +285,8 @@ MASTER_CHECK = 5.0
 # the settings page (WebPage): its folder, the most a request may send (bytes)
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'web')
 WEB_MAX_REQUEST = 10 * 1024 * 1024
+# s a client of the web page may take to send or read what's on its way (its own thread held that long at most)
+WEB_TIMEOUT = 10.0
 # planner.calib.* (Calibration): OpenMower's topics recorded, its parameters the values in use (old), s to wait for a
 # topic's first message at the start, between two steps of the recording, between two evaluations of it while it's
 # recorded (once there are enough runs and turns, by mode), the most an evaluation may take and its niceness; the
@@ -374,6 +376,8 @@ class WebPage:
         page = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            timeout = WEB_TIMEOUT
+
             def do_GET(self):
                 page.get(self)
 
