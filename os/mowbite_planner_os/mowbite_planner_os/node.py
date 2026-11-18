@@ -47,15 +47,20 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     START_UNREACHABLE first (mowbite_planner.starts, the message "area <id>: start unreachable: ...").
     ~/plan_transit in a callback group of its own on a MultiThreadedExecutor: answered while a ~/plan_coverage waits for
     its plan. ~/plan_coverage and ~/plan_from_parameters in one of theirs: while one waits for its plan (in the core's
-    worker, like a plan ahead) the other callbacks go on (RPCs, the map, events, map/replace's answer). It plans in a thread of its own, the node's one for
-    all its requests whichever of the executor's takes them (what a transit keeps of the map for the next one,
-    transit_route._ROOM, is its thread's: made once for a map), on geometries of its own (space._body_space: the kept
-    ones as WKB, each thread its own; mowbite_planner's GEOS rule).
+    worker, like a plan ahead) the other callbacks go on (RPCs, the map, events, map/replace's answer).
+    ~/plan_transit plans in a thread of its own, the node's one for all its requests whichever of the executor's takes
+    them (what a transit keeps of the map for the next one, transit_route._ROOM, is its thread's: made once for a map),
+    on geometries of its own (space._body_space: the kept ones as WKB, each thread its own; mowbite_planner's GEOS
+    rule).
     Without a way its code says why as a word (transit_route.CODES, see the .srv; the message is to show): NOT_READY
     without the body, BAD_REQUEST, START_OUTSIDE, GOAL_OUTSIDE, NO_WAY, INTERNAL, and SEARCH_LIMIT once
     transit_search_limit s (6.0; 0: none) have passed since it took the request: looked at in the search itself, at
     every check of the body, never from outside. The ways arrives plans for a ~/plan_coverage have no such limit (the
-    same plan on any computer).
+    same plan on any computer). temporary_obstacles (interface 3): seen by the robot, for that request only, hard lines
+    with no margin of their own, taken off the room kept for the map (transit_route.temporary_polygons).
+  - ~/cut_plan (CutPlan, interface 3; not with role transit): a plan cut by temporary obstacles, the pieces the robot
+    goes on with and a way checked to each one after poses left out (transit_route.cut_plan), in ~/plan_transit's group
+    and thread, each way with transit_search_limit.
   - every plan checked once more before it's kept or given out (checked: ~/plan_coverage with and without the map,
     planner.plan, what a mow left): the body's check of the tests (report.rules: sweep.body_out with the plan's
     Footprint, the blade aside). Where the body sticks out the plan is refused, ~/plan_coverage's code BODY_OUT, the
@@ -104,9 +109,9 @@ from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
 from mowbite_planner.starts import _Spent
 from mowbite_planner.sweep import body_out, plan_footprint, recorded_footprint
-from mowbite_planner_os_interfaces.srv import PlanTransit
+from mowbite_planner_os_interfaces.srv import CutPlan, PlanTransit
 
-from .transit_route import CODES, MAX_OUTSIDE, centre_space, plan_transit
+from .transit_route import CODES, CUT_CODES, MAX_OUTSIDE, centre_space, cut_plan, plan_transit
 
 # the node's name at mowbite_bridge, s the empty list of methods may take to be delivered as the node ends,
 # mowbite_logic's events
@@ -190,8 +195,10 @@ class OsNode(base.MowbitePlannerNode):
         # ~/plan_transit's thread (see the top)
         self._transit = core.Worker()
         self._transit.thread.name = 'planner transit'
-        self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit,
-                            callback_group=MutuallyExclusiveCallbackGroup())
+        transits = MutuallyExclusiveCallbackGroup()
+        self.create_service(PlanTransit, '~/plan_transit', self._on_plan_transit, callback_group=transits)
+        if self.role() != TRANSIT:
+            self.create_service(CutPlan, '~/cut_plan', self._on_cut_plan, callback_group=transits)
         if self.role() == TRANSIT:
             self.get_logger().info('MowBite Planner ready (role transit): service ~/plan_transit only')
         mine = [n for n in GEOMETRY_KEYS if n != 'mower_width' and self._param(n) is not None and (
@@ -552,6 +559,65 @@ class OsNode(base.MowbitePlannerNode):
     def _on_plan_transit(self, request, response):
         return self._transit.run(core.MOWER, self._plan_transit, request, response, time.monotonic())
 
+    def _on_cut_plan(self, request, response):
+        return self._transit.run(core.MOWER, self._cut_plan, request, response)
+
+    def _cut_plan(self, request, response):
+        """~/cut_plan's answer (transit_route.cut_plan): each way it checks gets transit_search_limit s."""
+        def no(code: str, why: str, log=self.get_logger().warning):
+            response.success, response.code, response.message = False, code, why
+            log(why)
+            return response
+
+        try:
+            values = self.values(request.overrides)
+        except ValueError as e:
+            return no('BAD_REQUEST', f'bad override: {e}')
+        why = self.no_body()
+        if why:
+            return no('NOT_READY', f'cutting the plan failed: {why}')
+        try:
+            cfg = self.transit_config(values)
+        except ValueError as e:
+            return no('BAD_REQUEST', f'bad override: {e}')
+        q = request.start.orientation
+        start = (float(request.start.position.x), float(request.start.position.y),
+                 quaternion_to_yaw(q.x, q.y, q.z, q.w))
+        poses = [Pose2D(float(p.pose.position.x), float(p.pose.position.y), quaternion_to_yaw(
+            p.pose.orientation.x, p.pose.orientation.y, p.pose.orientation.z, p.pose.orientation.w))
+            for p in request.path.poses]
+        drivable = [base.xy(poly) for poly in request.drivable_areas]
+        obstacles = [base.xy(poly) for poly in request.obstacles]
+        temporary = [base.xy(poly) for poly in request.temporary_obstacles]
+        max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
+        limit = self.search_limit()
+        data = self.core.current_map() if self.core is not None else None
+        bodies, margins = bodies_for(data, drivable + obstacles), margins_for(data, obstacles)
+
+        def way(a, b):
+            began = time.monotonic()
+            with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
+                return plan_transit(a, b, drivable, obstacles, cfg, 0.0, max_outside, margins=margins,
+                                    temporary=temporary, **({'bodies': bodies} if bodies else {}))
+        try:
+            if not drivable:
+                raise PlanningError('no drivable area', word='BAD_REQUEST')
+            cut = cut_plan(start, poses, list(request.section_start), int(request.from_pose), temporary, cfg, way)
+        except Stopped:
+            return no('SEARCH_LIMIT', f'cutting the plan failed: no way found in {limit:g} s (transit_search_limit)')
+        except PlanningError as e:
+            return no(base.code_of(e, CUT_CODES, 'BAD_REQUEST'), f'cutting the plan failed: {e}')
+        except Exception as e:  # noqa: BLE001 - a broken geometry must not take the node down
+            return no(base.code_of(e), f'cutting the plan failed: {type(e).__name__}: {e}', self.get_logger().error)
+        response.success = True
+        response.piece_first = [int(f) for f, _ in cut.pieces]
+        response.piece_last = [int(t) for _, t in cut.pieces]
+        response.left_out_from = int(cut.left_out_from)
+        response.message = base.with_warnings(f'{len(cut.pieces)} pieces of the plan from pose {request.from_pose}',
+                                              cut.warnings)
+        self.get_logger().info(response.message)
+        return response
+
     def _plan_transit(self, request, response, began: float):
         """~/plan_transit's answer, began: when the request was taken (transit_search_limit counts from there)."""
         if isinstance(self.core, TransitCore):
@@ -581,6 +647,7 @@ class OsNode(base.MowbitePlannerNode):
             ((quaternion_to_yaw(q.x, q.y, q.z, q.w),) if request.use_goal_heading else ())
         drivable = [base.xy(poly) for poly in request.drivable_areas]
         obstacles = [base.xy(poly) for poly in request.obstacles]
+        temporary = [base.xy(poly) for poly in request.temporary_obstacles]
         warnings = base.float32_warnings([*drivable, *obstacles])
         for w in warnings:
             self.get_logger().warning(w)
@@ -594,7 +661,8 @@ class OsNode(base.MowbitePlannerNode):
             # (the limit looked at where the search checks the body, progress.check: it ends there with Stopped)
             with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
                 transit = plan_transit(start, goal, drivable, obstacles, cfg, float(request.goal_straight_length),
-                                       max_outside, margins=margins, **({'bodies': bodies} if bodies else {}))
+                                       max_outside, margins=margins, temporary=temporary,
+                                       **({'bodies': bodies} if bodies else {}))
         except Stopped:
             return no('SEARCH_LIMIT', base.with_warnings(
                 f'planning the transit failed: no way found in {limit:g} s (transit_search_limit)', warnings))

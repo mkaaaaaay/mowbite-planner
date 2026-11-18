@@ -14,6 +14,10 @@ float64 goal_straight_length 0.0
 geometry_msgs/Polygon[] drivable_areas
 # no-go zones (flower beds, trees)
 geometry_msgs/Polygon[] obstacles
+# kept out of for this request only (seen by the robot, not in the map): hard lines whatever the map's edges are read
+# as, no margin of their own (the robot's clearance in them), the body checked against them like against any edge.
+# 16 at most, 3 to 64 points each, each within 3 m of its centre, else BAD_REQUEST
+geometry_msgs/Polygon[] temporary_obstacles
 # m, how far the start or the goal may lie outside of where the body fits (by the edge, the dock), the way from or to
 # there runs straight and unchecked. < 0: 0.5
 float64 max_outside -1.0

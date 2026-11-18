@@ -1,0 +1,35 @@
+# Cuts a coverage plan by temporary obstacles (MowBite Planner, mowbite_planner): the pieces of it the robot can go on
+# with, the body kept out of them, and checked that a way gets to each piece after a stretch left out (interface 3).
+# Coordinates are metres in the planner's frame (frame_id), poses of base_link.
+
+# where the mower is and the way it faces: the first piece checked to be got to from here
+geometry_msgs/Pose start
+# the plan as ~/plan_coverage gave it: its poses and where its sections start
+nav_msgs/Path path
+uint32[] section_start
+# cut from this pose of path on (the ones before it are mowed already)
+uint32 from_pose 0
+# as ~/plan_transit's: where the mower may drive, the map's obstacles, the temporary obstacles (hard lines, no margin
+# of their own, 16 at most, 3 to 64 points each, each within 3 m of its centre), how far a way's start or goal may lie
+# outside of where the body fits, overrides of the node's parameters
+geometry_msgs/Polygon[] drivable_areas
+geometry_msgs/Polygon[] obstacles
+geometry_msgs/Polygon[] temporary_obstacles
+float64 max_outside -1.0
+rcl_interfaces/Parameter[] overrides
+---
+bool success
+# a summary and any warnings, or why it failed: to show, not to go by
+string message
+# empty with success, else why not, to go by: NOT_READY, BAD_REQUEST, SEARCH_LIMIT (a way not found in the node's
+# transit_search_limit s), INTERNAL (see PlanTransit.srv)
+string code
+# the pieces to drive as they are, in order: first and last pose of path (both in), at least 3 poses each, none across
+# the start of a section. The body (and turning on the spot where the heading jumps by more than 15 deg) stays out of
+# the temporary obstacles all along them (against the map it was checked when planned). A way to each piece after
+# poses left out (and to the first one from start) was found by ~/plan_transit with the temporary obstacles, arriving
+# facing the pose's way: the robot plans it again with ~/plan_transit to drive it
+uint32[] piece_first
+uint32[] piece_last
+# the first pose of the rest of path no way gets to: len(path.poses) where there's none
+uint32 left_out_from

@@ -43,11 +43,12 @@ def test_the_services_codes():
     """service_codes: the words each service's code says where it fails, the code's own lists."""
     codes = contract.service_codes()  # (os/'s package on the path from here on)
     from mowbite_planner.config import COVERAGE_CODES
-    from mowbite_planner_os.transit_route import CODES
+    from mowbite_planner_os.transit_route import CODES, CUT_CODES
     assert contract.read()['service_codes'] == codes == {
         'mowbite_planner_interfaces/srv/PlanCoverage': sorted(COVERAGE_CODES),
-        'mowbite_planner_os_interfaces/srv/PlanTransit': sorted(CODES)}
-    assert contract.read()['interface'] >= 2  # (1: before code)
+        'mowbite_planner_os_interfaces/srv/PlanTransit': sorted(CODES),
+        'mowbite_planner_os_interfaces/srv/CutPlan': sorted(CUT_CODES)}
+    assert contract.read()['interface'] >= 3  # (1: before code, 3: temporary obstacles and ~/cut_plan)
 
 
 def test_no_interface_without_os(tmp_path, monkeypatch):

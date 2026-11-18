@@ -34,6 +34,13 @@ from mowbite_planner.transit import TransitPlanner
 
 # m, how far the start or the goal may lie outside of where the body fits by default
 MAX_OUTSIDE = 0.5
+# temporary_obstacles (seen by the robot, kept out of for a while: hard lines, no margin of their own, the robot's
+# clearance in them): this many at most, of this many points at most, each within this many m of its centre
+TEMPORARY_MAX, TEMPORARY_POINTS, TEMPORARY_REACH = 16, 64, 3.0
+# cut_plan: after a piece the next ones tried at most, no way getting to them, before the rest is left out
+CUT_TRIES = 4
+# cut_plan: m along a piece after poses left out where a way to it is tried, one after the other
+CUT_ENTRIES = (0.0, 0.5, 1.0, 1.5, 2.5)
 # (m, rad): onto the line through the goal from that far beside it, or off the start's that far, on an S of two arcs
 # turning by that much each way (as wide as that takes, none tighter than turn_radius)
 MERGES = ((0.3, math.radians(25.0)), (0.3, math.radians(15.0)), (0.5, math.radians(25.0)))
@@ -61,6 +68,8 @@ _ROOM = threading.local()
 # START_OUTSIDE, GOAL_OUTSIDE), NO_WAY for one without, INTERNAL for any other error; NOT_READY and SEARCH_LIMIT are
 # the node's
 CODES = ('NOT_READY', 'NO_WAY', 'START_OUTSIDE', 'GOAL_OUTSIDE', 'BAD_REQUEST', 'SEARCH_LIMIT', 'INTERNAL')
+# ~/cut_plan's (see the .srv)
+CUT_CODES = ('NOT_READY', 'BAD_REQUEST', 'SEARCH_LIMIT', 'INTERNAL')
 
 
 # (m straight on, ((radius, turn), ...) arcs): a way onto the goal or off the start, see plan_transit's drive
@@ -88,13 +97,35 @@ def _margins(obstacles, margins: Sequence[Optional[float]], cfg: PlannerConfig) 
         raise
 
 
+def temporary_polygons(temporary: Sequence[Sequence[Sequence[float]]]) -> List[Polygon]:
+    """temporary_obstacles as polygons, PlanningError (BAD_REQUEST) where there are too many, one is too big or broken
+    (TEMPORARY_MAX, TEMPORARY_POINTS, TEMPORARY_REACH)."""
+    if len(temporary) > TEMPORARY_MAX:
+        raise PlanningError(f'{len(temporary)} temporary obstacles, {TEMPORARY_MAX} at most', word='BAD_REQUEST')
+    out = []
+    for t in temporary:
+        _check_coordinates('a temporary obstacle', t)
+        if not 3 <= len(t) <= TEMPORARY_POINTS:
+            raise PlanningError(f'a temporary obstacle needs 3 to {TEMPORARY_POINTS} points, got {len(t)}',
+                                word='BAD_REQUEST')
+        poly = clean_polygon(t)
+        if poly.is_empty:
+            raise PlanningError('a temporary obstacle has no area', word='BAD_REQUEST')
+        c = poly.centroid
+        if max(math.hypot(p[0] - c.x, p[1] - c.y) for p in t) > TEMPORARY_REACH:
+            raise PlanningError(f'a temporary obstacle reaches more than {TEMPORARY_REACH} m from its centre',
+                                word='BAD_REQUEST')
+        out.append(poly)
+    return out
+
+
 def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-                 cfg: PlannerConfig, bodies=(),
-                 margins: Sequence[Optional[float]] = ()) -> Tuple[Any, Optional[Footprint]]:
+                 cfg: PlannerConfig, bodies=(), margins: Sequence[Optional[float]] = (),
+                 temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Tuple[Any, Optional[Footprint]]:
     """Where the mower's centre may go on a transit (cfg as plan_transit takes it): with the body set where it fits
     sideways driving straight (and its Footprint there, see plan_transit), without it half the mower_width off the
-    obstacles (and None). margins: each obstacle's own (None: obstacle_margin). Raises PlanningError where that's
-    nowhere."""
+    obstacles (and None). margins: each obstacle's own (None: obstacle_margin); temporary: temporary obstacles, hard
+    lines with no margin (taken off the map's body space as it's kept). Raises PlanningError where that's nowhere."""
     areas = union(clean_polygon(d) for d in drivable)
     if areas.is_empty:
         raise PlanningError('no drivable areas', word='BAD_REQUEST')
@@ -102,9 +133,12 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
     if cfg.body:
         body_space, footprint = _body_space(list(drivable), list(obstacles), _margins(obstacles, margins, cfg),
                                             cfg, bodies=bodies)
+        if temporary:
+            body_space = polygonal(body_space.difference(union(temporary_polygons(temporary))))
+            footprint = Footprint(body_space, footprint.corners, footprint.spin_margin)
         space = polygonal(inset(body_space, footprint.half).intersection(areas))
     else:
-        blocked = union(clean_polygon(o) for o in obstacles)
+        blocked = union([clean_polygon(o) for o in obstacles] + temporary_polygons(temporary))
         keep = max(cfg.centre_offset, 0.5 * cfg.mower_width)
         space = polygonal(areas.difference(blocked.buffer(keep, QUAD_SEGS))) if not blocked.is_empty else areas
     if space.is_empty:
@@ -113,17 +147,18 @@ def centre_space(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Seque
 
 
 def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-          cfg: PlannerConfig, bodies=(), margins: Sequence[Optional[float]] = ()
-          ) -> Tuple[Any, Optional[Footprint], Dict[Any, Any]]:
+          cfg: PlannerConfig, bodies=(), margins: Sequence[Optional[float]] = (),
+          temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Tuple[Any, Optional[Footprint], Dict[Any, Any]]:
     """centre_space() and the planners made in that space so far ({what it's made with: one}, their graphs as far as
     they got, the ways they kept forgotten; and the recording room under 'recorded' once worked out), the last
     request's where this one's areas, obstacles and settings are the same (_ROOM)."""
     key = ([[(float(p[0]), float(p[1])) for p in ring] for ring in drivable],
            [[(float(p[0]), float(p[1])) for p in ring] for ring in obstacles], cfg,
-           tuple(None if m is None else float(m) for m in margins)) + ((tuple(bodies),) if bodies else ())
+           tuple(None if m is None else float(m) for m in margins)) + ((tuple(bodies),) if bodies else ()) + \
+        ((('temporary', tuple(tuple((float(p[0]), float(p[1])) for p in t) for t in temporary)),) if temporary else ())
     last = getattr(_ROOM, 'last', None)
     if last is None or last[0] != key:
-        space, footprint = centre_space(drivable, obstacles, cfg, bodies, margins)
+        space, footprint = centre_space(drivable, obstacles, cfg, bodies, margins, temporary)
         last = _ROOM.last = ((key[0], key[1], dataclasses.replace(cfg)) + key[3:], space, footprint, {})
     for tp in last[3].values():
         if isinstance(tp, TransitPlanner):
@@ -132,12 +167,13 @@ def _room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Seq
 
 
 def recording_room(drivable: Sequence[Sequence[Sequence[float]]], obstacles: Sequence[Sequence[Sequence[float]]],
-                   cfg: PlannerConfig, bodies=()) -> Any:
+                   cfg: PlannerConfig, bodies=(), temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Any:
     """Where the body was while the edges were recorded (space._body_space with no margins, RECORDED_SLACK past the
     real edges: on the line the body touches its edge): the room of a way out of a start or goal closer to an edge
     than its margins (leave_edge)."""
     loose = dataclasses.replace(cfg, edge_margin=-RECORDED_SLACK)
-    return _body_space(list(drivable), list(obstacles), [-RECORDED_SLACK] * len(obstacles), loose, bodies=bodies)[0]
+    room = _body_space(list(drivable), list(obstacles), [-RECORDED_SLACK] * len(obstacles), loose, bodies=bodies)[0]
+    return polygonal(room.difference(union(temporary_polygons(temporary)))) if temporary else room
 
 
 def _said(why: str) -> str:
@@ -279,7 +315,8 @@ def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Seq
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
                  goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=(),
-                 margins: Sequence[Optional[float]] = ()) -> Transit:
+                 margins: Sequence[Optional[float]] = (),
+                 temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -297,16 +334,19 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its heading, where the
     body sticks out turning into it there too, says so), or the input is out of range; its word what ~/plan_transit's
     code says (CODES). bodies: the body a ring was recorded with where it's another, or drawn (space._body_space).
-    margins: each obstacle's own (None: obstacle_margin)."""
+    margins: each obstacle's own (None: obstacle_margin). temporary: temporary obstacles (seen by the robot, not in the
+    map): hard lines whatever edges says, no margin of their own (the robot's clearance in them), the body checked
+    against them as against any edge; TEMPORARY_MAX at most (temporary_polygons)."""
     cfg = config or PlannerConfig()
     try:
         heading = _asked(start, goal, drivable, obstacles, cfg, goal_straight, max_outside)
+        temporary_polygons(temporary)
     except PlanningError as e:
         e.word = 'BAD_REQUEST'
         raise
     cfg = _turning(cfg)  # (as in plan_coverage)
     step = cfg.waypoint_spacing
-    space, footprint, planners = _room(drivable, obstacles, cfg, bodies, margins)
+    space, footprint, planners = _room(drivable, obstacles, cfg, bodies, margins, temporary)
     warnings: List[str] = [] if footprint is not None else [cfg.no_body or '']
 
     def planner(clearance: float, edge: float = 0.0, cost: float = 0.0, off_edge: float = 0.0) -> TransitPlanner:
@@ -344,7 +384,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
                           f'lies where the body sticks out of the drivable areas, {what} too') + \
                 f' (max_outside {max_outside} m)'
         if 'recorded' not in planners:
-            planners['recorded'] = recording_room(drivable, obstacles, cfg, bodies)
+            planners['recorded'] = recording_room(drivable, obstacles, cfg, bodies, temporary)
         fits = footprint if not goal else \
             Footprint(footprint.space, tuple((-x, -y) for x, y in footprint.corners), footprint.spin_margin)
         if goal:
@@ -352,7 +392,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
 
         def test(p: XY, yaw: float) -> bool:
             return transit.is_free([p]) and fits.fits_pose(p[0], p[1], yaw)
-        rings = [[(float(p[0]), float(p[1])) for p in r] for r in list(drivable) + list(obstacles)]
+        rings = [[(float(p[0]), float(p[1])) for p in r] for r in list(drivable) + list(obstacles) + list(temporary)]
         got, why = leave_edge(at, planners['recorded'], fits, test, rings, max_outside, step)
         if got is None:
             if why.startswith('the body is'):
@@ -678,3 +718,117 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
             warnings.append(f'the {what} lies closer to an edge than its margin, {path_length(way):.2f} m '
                             f'{"from" if what == "start" else "to"} it where the body was while recording the edges')
     return Transit(poses, path_length(poses), spins, start_out, goal_out, warnings)
+
+
+@dataclasses.dataclass
+class Cut:
+    pieces: List[Tuple[int, int]]  # (first, last) of the plan's poses, each driven as it is, at least 3 poses
+    left_out_from: int  # the first pose of the rest no way gets to (len(poses): none)
+    warnings: List[str]
+
+
+def _entries(poses: Sequence[Pose2D], first: int, last: int) -> List[int]:
+    """The poses of a piece (first to last) cut_plan tries to get to: CUT_ENTRIES m along it, 3 poses left at least."""
+    out, along, k = [], 0.0, 0
+    for i in range(first, last - 1):
+        if i > first:
+            along += math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y)
+        if k < len(CUT_ENTRIES) and along >= CUT_ENTRIES[k] - 1e-9:
+            out.append(i)
+            while k < len(CUT_ENTRIES) and along >= CUT_ENTRIES[k] - 1e-9:
+                k += 1
+    return out
+
+
+def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Sequence[int], from_pose: int,
+             temporary: Sequence[Sequence[Sequence[float]]], cfg: PlannerConfig, way) -> Cut:
+    """A plan (poses, its sections starting at section_start) from from_pose on, the robot at start (x, y, yaw), cut
+    by temporary obstacles (temporary_polygons: hard lines, no margin): the pieces of it where the body (and turning on
+    the spot where the heading jumps) stays out of them, at least 3 poses each, none across the start of a section
+    (the plan's body was checked against the map before). Where a piece comes after poses left out (and the first
+    one, from start), way(from (x, y, yaw), to (x, y, yaw)) must get there (plan_transit with the temporary obstacles,
+    arriving facing the pose's way; PlanningError: none), from the last pose of the piece before where the body turns
+    round on the spot clear of them (it ends there), to one CUT_ENTRIES m on from the first such pose of the piece (it
+    starts there);
+    none: the next piece (CUT_TRIES at most), none: the rest left out from the first piece no way gets to. Stopped
+    and other errors of way go through."""
+    n = len(poses)
+    if not 0 <= from_pose <= n:
+        raise PlanningError(f'from_pose {from_pose} is not a pose of the plan ({n})', word='BAD_REQUEST')
+    starts = sorted({int(i) for i in section_start if 0 <= int(i) < n} | {0})
+    polys = temporary_polygons(temporary)
+    if polys:
+        blocked = union(polys)
+        reach = 1.0 + max(math.hypot(x, y) for x, y in cfg.body_outline)  # (round every pose: only blocked is out)
+        xs, ys = [p.x for p in poses] + [blocked.bounds[0], blocked.bounds[2]], \
+            [p.y for p in poses] + [blocked.bounds[1], blocked.bounds[3]]
+        box = Polygon([(min(xs) - reach, min(ys) - reach), (max(xs) + reach, min(ys) - reach),
+                       (max(xs) + reach, max(ys) + reach), (min(xs) - reach, max(ys) + reach)])
+        fp = Footprint(polygonal(box.difference(blocked)), cfg.body_outline, cfg.spin_margin)
+    section = [0] * n
+    for k, s in enumerate(starts):
+        for i in range(s, starts[k + 1] if k + 1 < len(starts) else n):
+            section[i] = k
+    free = [True] * n
+    if polys:
+        for k, s in enumerate(starts):
+            e = starts[k + 1] if k + 1 < len(starts) else n
+            lo = max(s, from_pose)
+            if lo < e:
+                for i in fp.bad_poses(poses[lo:e]):
+                    free[lo + i] = False
+    runs: List[Tuple[int, int]] = []
+    i = from_pose
+    while i < n:
+        if not free[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and free[j + 1] and section[j + 1] == section[i]:
+            j += 1
+        if j - i + 1 >= 3:
+            runs.append((i, j))
+        i = j + 1
+    def turns(p: Pose2D) -> bool:  # (round on the spot either way there, clear of them)
+        return not polys or fp.fits_turn(p.x, p.y, p.yaw, p.yaw + 0.99 * math.pi) and \
+            fp.fits_turn(p.x, p.y, p.yaw, p.yaw - 0.99 * math.pi)
+
+    pieces: List[Tuple[int, int]] = []
+    warnings: List[str] = []
+    at = (float(start[0]), float(start[1]), float(start[2]))
+    gap, tried, left_out = True, 0, n  # (gap: a way to be checked to the next piece; tried: ways none got to since)
+    for first, last in runs:
+        if pieces and not gap:
+            gap = any(not free[i] for i in range(pieces[-1][1] + 1, first))
+        if gap:
+            if pieces:  # (the piece before it ends where the body turns round on the spot clear of them, as far on)
+                f, t = pieces[-1]
+                t = next((i for i in range(t, f + 1, -1) if turns(poses[i])), t)
+                pieces[-1] = (f, t)
+                at = (poses[t].x, poses[t].y, poses[t].yaw)
+            got, why = None, ''
+            on = next((i for i in range(first, last - 1) if turns(poses[i])), first)
+            for c in _entries(poses, on, last):
+                p = poses[c]
+                try:
+                    way(at, (p.x, p.y, p.yaw))
+                    got = c
+                    break
+                except PlanningError as e:
+                    why = why or str(e)
+            if got is None:
+                if not tried:
+                    left_out = first
+                tried += 1
+                warnings.append(f'no way to poses {first} to {last}: {why}')
+                if tried >= CUT_TRIES:
+                    break
+                continue
+            first = got
+        pieces.append((first, last))
+        q = poses[last]
+        at, gap, tried, left_out = (q.x, q.y, q.yaw), False, 0, n
+    if left_out < n:
+        warnings.append(f'from pose {left_out} on no way gets to the plan' +
+                        (f' ({CUT_TRIES} places of it tried)' if tried >= CUT_TRIES else ''))
+    return Cut(pieces, left_out, warnings)

@@ -245,6 +245,87 @@ def test_backwards():
     assert transit_route._backwards([], 1.0) == []
 
 
+def circle(x, y, r, n=12):
+    return [(x + r * math.cos(2 * math.pi * k / n), y + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+
+
+def test_temporary_obstacles():
+    # one the robot saw (not in the map): a hard line whatever edges says, no margin of its own (the robot's clearance
+    # in it); the same as an obstacle of the map is read as the line its centre drove (half the body further in)
+    seen = circle(5.0, 1.5, 0.6)
+    start, goal = (1.0, 1.5, 0.0), (9.0, 1.5, 0.0)
+    t = transit(start, goal, obstacles=[], temporary=[seen])
+    check(t, start, goal, obstacles=[])
+    out = Footprint(Polygon([(-5, -5), (25, -5), (25, 15), (-5, 15)]).difference(Polygon(seen)),
+                    PlannerConfig(**TRON).body_outline)
+    assert out.all_fit(t.poses)
+    near = transit(start, goal, obstacles=[seen])
+    assert not out.all_fit(near.poses)
+    # kept as the room of the map less them: the map's room made once
+    plain = transit_route._ROOM.last[1]
+    transit(start, goal, obstacles=[], temporary=[circle(5.0, 4.0, 0.5)])
+    assert transit_route._ROOM.last[1].area < transit_route.centre_space(AREAS, [], PlannerConfig(**TRON))[0].area
+    assert plain is not None
+    for bad, why in (([circle(5.0, 1.5, 0.3)] * 17, '17 temporary obstacles, 16 at most'),
+                     ([[(1.0, 1.0), (2.0, 1.0)]], 'a temporary obstacle needs 3 to 64 points, got 2'),
+                     ([circle(5.0, 1.5, 3.5)], 'a temporary obstacle reaches more than 3.0 m from its centre')):
+        with pytest.raises(PlanningError, match=why) as e:
+            transit(start, goal, obstacles=[], temporary=bad)
+        assert e.value.word == 'BAD_REQUEST'
+
+
+def test_start_by_a_temporary_obstacle():
+    # stopped facing one, closer to it than the margins of the map's: turned away on the spot (the body checked against
+    # it, the line itself), then on
+    seen = circle(5.0, 3.0, 0.5)
+    start = (3.6, 3.0, 0.0)  # (the nose 0.4 m before it)
+    t = transit(start, (1.0, 1.0, math.pi), obstacles=[], temporary=[seen])
+    out = Footprint(Polygon([(-5, -5), (25, -5), (25, 15), (-5, 15)]).difference(Polygon(seen)),
+                    PlannerConfig(**TRON).body_outline)
+    assert out.all_fit(t.poses) and t.start_outside == 0.0
+
+
+def test_cut_plan():
+    # a plan's lanes cut where the body would get into one seen on them: pieces of at least 3 poses, none across a
+    # section, a way checked to the piece after it; none getting there: the rest left out from there
+    lane = [Pose2D(1.0 + 0.1 * i, 1.5, 0.0) for i in range(81)]  # (x 1 .. 9)
+    back = [Pose2D(9.0 - 0.1 * i, 4.5, math.pi) for i in range(81)]
+    poses, starts = lane + back, [0, len(lane)]
+    seen = circle(5.0, 1.5, 0.4)
+    asked = []
+
+    def way(a, b):
+        asked.append((a, b))
+        return transit(a, b, obstacles=[], temporary=[seen])
+    cut = transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 0, [seen], PlannerConfig(**TRON), way)
+    assert len(cut.pieces) == 3 and cut.left_out_from == len(poses)
+    (a0, a1), (b0, b1), (c0, c1) = cut.pieces
+    assert a0 == 0 and 15 <= a1 <= 31 and 44 <= b0 <= 75 and b1 == len(lane) - 1
+    assert (c0, c1) == (len(lane), len(poses) - 1)
+    out = Footprint(Polygon([(-5, -5), (25, -5), (25, 15), (-5, 15)]).difference(Polygon(seen)),
+                    PlannerConfig(**TRON).body_outline, PlannerConfig(**TRON).spin_margin)
+    for f, t in cut.pieces:
+        assert out.bad_poses(poses[f:t + 1]) == []
+    # (from start, then past it: the first pose along the piece a way gets to)
+    assert asked[0][0] == (1.0, 1.5, 0.0) and asked[-1][1] == (poses[b0].x, poses[b0].y, poses[b0].yaw)
+    # from a pose on: the ones before left out of it
+    later = transit_route.cut_plan((9.0, 4.5, math.pi), poses, starts, len(lane) + 5, [seen], PlannerConfig(**TRON),
+                                   way)
+    assert later.pieces == [(len(lane) + 5, len(poses) - 1)]
+    # no way past it: the rest left out
+
+    def nowhere(a, b):
+        raise PlanningError('no way', word='NO_WAY')
+    gone = transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 0, [seen], PlannerConfig(**TRON),
+                                  lambda a, b: None if b[0] < 2.0 else nowhere(a, b))
+    first = min(i for i in range(a1 + 1, len(lane)) if out.bad_poses(poses[i:len(lane)]) == [])
+    assert gone.pieces == [(a0, a1)] and gone.left_out_from == first
+    assert [w for w in gone.warnings if w.startswith(f'from pose {first} on no way gets to the plan')]
+    with pytest.raises(PlanningError, match='from_pose 999 is not a pose of the plan') as e:
+        transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 999, [seen], PlannerConfig(**TRON), way)
+    assert e.value.word == 'BAD_REQUEST'
+
+
 def test_start_too_deep():
     # the body further into the bed than where it was while recording (START_DEPTH): no way, the start out of the map
     with pytest.raises(PlanningError, match=r'the start \(5.00, 2.15\): the body is 0.1[45] m inside an obstacle or '

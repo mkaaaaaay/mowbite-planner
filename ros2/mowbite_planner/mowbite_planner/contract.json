@@ -7,10 +7,11 @@
     "SUPERSEDED": -32003
   },
   "files_version": 1,
-  "interface": 2,
+  "interface": 3,
   "interfaces": {
     "mowbite_planner_interfaces/srv/PlanCoverage": "0bbf84236b6af324eaab8b8f100ca02d839f1e0666ebe8b05ee154ab97b70b2f",
-    "mowbite_planner_os_interfaces/srv/PlanTransit": "29440d8b6e3e01fde70c41ccb1cdf7fe8776293a66c613421cb5c9ffa86d3ab6"
+    "mowbite_planner_os_interfaces/srv/CutPlan": "91a6bb51398fbb6e76710111e2ab6cab2147fb928bc8dafd058a7611ec5f481e",
+    "mowbite_planner_os_interfaces/srv/PlanTransit": "afa8643221d335db2f524909a0acdf370a18cce2b93b833888d6b5cdc9a7bf97"
   },
   "map_fields": [
     "recorded_body",
@@ -62,6 +63,12 @@
       "NOT_READY",
       "NO_PLAN",
       "START_UNREACHABLE"
+    ],
+    "mowbite_planner_os_interfaces/srv/CutPlan": [
+      "BAD_REQUEST",
+      "INTERNAL",
+      "NOT_READY",
+      "SEARCH_LIMIT"
     ],
     "mowbite_planner_os_interfaces/srv/PlanTransit": [
       "BAD_REQUEST",

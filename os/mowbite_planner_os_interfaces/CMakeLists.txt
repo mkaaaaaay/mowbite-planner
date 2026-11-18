@@ -9,6 +9,7 @@ find_package(rcl_interfaces REQUIRED)
 
 # MowBite OS' own services of the planner (mowbite_planner_os), next to mowbite_planner_interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/CutPlan.srv"
   "srv/PlanTransit.srv"
   DEPENDENCIES geometry_msgs nav_msgs rcl_interfaces
 )

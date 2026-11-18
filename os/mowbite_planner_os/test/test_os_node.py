@@ -13,6 +13,7 @@ import threading
 import time
 
 import pytest
+from shapely.geometry import Polygon as Shapely
 
 from osfake import HERE, REAL_ROS
 
@@ -21,7 +22,7 @@ from geometry_msgs.msg import Point32, Polygon, Pose  # noqa: E402
 from mowbite_msgs.msg import MapStatus, MqttPublish, RpcRequest, RpcResponse  # noqa: E402
 from mowbite_msgs.srv import ReplaceMap  # noqa: E402
 from mowbite_planner_interfaces.srv import PlanCoverage  # noqa: E402
-from mowbite_planner_os_interfaces.srv import PlanTransit  # noqa: E402
+from mowbite_planner_os_interfaces.srv import CutPlan, PlanTransit  # noqa: E402
 from rcl_interfaces.msg import Parameter as ParameterMsg, ParameterValue  # noqa: E402
 from rclpy.parameter import Parameter  # noqa: E402
 from std_msgs.msg import String  # noqa: E402
@@ -197,6 +198,46 @@ def transit(node, start, goal, drivable=(GARDEN,), obstacles=(BED,), **fields):
     for k, v in fields.items():
         setattr(request, k, v)
     return node._on_plan_transit(request, PlanTransit.Response())
+
+
+def seen_circle(x, y, r, n=12):
+    return [(x + r * math.cos(2 * math.pi * k / n), y + r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+
+
+def test_temporary_obstacles_and_cut_plan(make):
+    """interface 3: ~/plan_transit around temporary obstacles (hard lines, no margin), ~/cut_plan cutting a plan by them
+    (pieces, the rest no way gets to), BAD_REQUEST past their limits, NOT_READY without the body."""
+    node = make()
+    seen = seen_circle(3.0, 1.2, 0.35)
+    t = transit(node, (1.0, 1.2, 0.0), (6.5, 1.2, 0.0), obstacles=(), temporary_obstacles=[polygon(seen)])
+    assert t.success, t.message
+    body = tron_cfg().body_outline
+    for p in t.path.poses:
+        x, y = p.pose.position.x, p.pose.position.y
+        q = p.pose.orientation
+        yaw = 2.0 * math.atan2(q.z, q.w)
+        corners = [(x + c * math.cos(yaw) - d * math.sin(yaw), y + c * math.sin(yaw) + d * math.cos(yaw))
+                   for c, d in body]
+        assert not Shapely(corners).intersects(Shapely(seen))
+    many = transit(node, (1.0, 1.2, 0.0), (6.5, 1.2, 0.0), obstacles=(),
+                   temporary_obstacles=[polygon(seen)] * 17)
+    assert (many.success, many.code) == (False, 'BAD_REQUEST')
+    lane = [(1.0 + 0.1 * i, 1.2, 0.0) for i in range(56)]
+    path = node_module.to_path_msg([Pose2D(*p) for p in lane], 'map', node.get_clock().now().to_msg())
+    cut = node._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0], from_pose=0,
+                                            drivable_areas=[polygon(GARDEN)], obstacles=[],
+                                            temporary_obstacles=[polygon(seen)]), CutPlan.Response())
+    assert cut.success, cut.message
+    assert list(cut.piece_first)[0] == 0 and len(cut.piece_first) == len(cut.piece_last) >= 1
+    assert all(t - f >= 2 for f, t in zip(cut.piece_first, cut.piece_last))
+    assert cut.left_out_from in (len(lane), *cut.piece_first) or cut.left_out_from > cut.piece_last[-1]
+    bad = node._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0], from_pose=99,
+                                            drivable_areas=[polygon(GARDEN)]), CutPlan.Response())
+    assert (bad.success, bad.code) == (False, 'BAD_REQUEST') and 'from_pose 99' in bad.message
+    bare = make(body=None)
+    early = bare._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0],
+                                              drivable_areas=[polygon(GARDEN)]), CutPlan.Response())
+    assert (early.success, early.code) == (False, 'NOT_READY')
 
 
 @fake_only
@@ -1054,8 +1095,9 @@ def test_plan_transit_in_a_group_of_its_own(make, monkeypatch):
     planning = node.service_groups['~/plan_coverage']
     assert isinstance(planning, os_module.MutuallyExclusiveCallbackGroup) and planning is not group
     assert node.service_groups['~/plan_from_parameters'] is planning
+    assert node.service_groups['~/cut_plan'] is group  # (in plan_transit's thread)
     assert all(g is None for name, g in node.service_groups.items() if name not in (
-        '~/plan_transit', '~/plan_coverage', '~/plan_from_parameters'))
+        '~/plan_transit', '~/cut_plan', '~/plan_coverage', '~/plan_from_parameters'))
     assert os_module.THREADS >= 3
     real, where, rooms = os_module.plan_transit, [], []
 

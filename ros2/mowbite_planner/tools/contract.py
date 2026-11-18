@@ -55,7 +55,8 @@ def service_codes() -> dict:
         sys.path.insert(0, where)
     from mowbite_planner_os import transit_route
     return {'mowbite_planner_interfaces/srv/PlanCoverage': sorted(config.COVERAGE_CODES),
-            'mowbite_planner_os_interfaces/srv/PlanTransit': sorted(transit_route.CODES)}
+            'mowbite_planner_os_interfaces/srv/PlanTransit': sorted(transit_route.CODES),
+            'mowbite_planner_os_interfaces/srv/CutPlan': sorted(transit_route.CUT_CODES)}
 
 
 def added(path: str) -> set:
