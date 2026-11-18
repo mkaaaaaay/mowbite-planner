@@ -40,7 +40,9 @@ TEMPORARY_MAX, TEMPORARY_POINTS, TEMPORARY_REACH = 16, 64, 3.0
 # cut_plan: after a piece the next ones tried at most, no way getting to them, before the rest is left out
 CUT_TRIES = 4
 # cut_plan: m along a piece after poses left out where a way to it is tried, one after the other
-CUT_ENTRIES = (0.0, 0.5, 1.0, 1.5, 2.5)
+CUT_ENTRIES = (0.0, 0.2, 0.4, 0.7, 1.0, 1.5, 2.5)
+# cut_plan: the ways tried at most (from and to which of CUT_ENTRIES) after poses left out, before the next piece
+CUT_PAIRS = 12
 # (m, rad): onto the line through the goal from that far beside it, or off the start's that far, on an S of two arcs
 # turning by that much each way (as wide as that takes, none tighter than turn_radius)
 MERGES = ((0.3, math.radians(25.0)), (0.3, math.radians(15.0)), (0.5, math.radians(25.0)))
@@ -727,12 +729,14 @@ class Cut:
     warnings: List[str]
 
 
-def _entries(poses: Sequence[Pose2D], first: int, last: int) -> List[int]:
-    """The poses of a piece (first to last) cut_plan tries to get to: CUT_ENTRIES m along it, 3 poses left at least."""
+def _entries(poses: Sequence[Pose2D], first: int, last: int, back: bool = False) -> List[int]:
+    """The poses of a piece (first to last) cut_plan tries to get to: CUT_ENTRIES m along it, 3 poses left at least
+    (back: to leave from, as far back from its last)."""
     out, along, k = [], 0.0, 0
-    for i in range(first, last - 1):
-        if i > first:
-            along += math.hypot(poses[i].x - poses[i - 1].x, poses[i].y - poses[i - 1].y)
+    for i in (range(last, first + 1, -1) if back else range(first, last - 1)):
+        if i != (last if back else first):
+            j = i + 1 if back else i - 1
+            along += math.hypot(poses[i].x - poses[j].x, poses[i].y - poses[j].y)
         if k < len(CUT_ENTRIES) and along >= CUT_ENTRIES[k] - 1e-9:
             out.append(i)
             while k < len(CUT_ENTRIES) and along >= CUT_ENTRIES[k] - 1e-9:
@@ -747,9 +751,9 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
     the spot where the heading jumps) stays out of them, at least 3 poses each, none across the start of a section
     (the plan's body was checked against the map before). Where a piece comes after poses left out (and the first
     one, from start), way(from (x, y, yaw), to (x, y, yaw)) must get there (plan_transit with the temporary obstacles,
-    arriving facing the pose's way; PlanningError: none), from the last pose of the piece before where the body turns
-    round on the spot clear of them (it ends there), to one CUT_ENTRIES m on from the first such pose of the piece (it
-    starts there);
+    arriving facing the pose's way; PlanningError: none), from the last pose of the piece before to the first of it,
+    where none does from and to CUT_ENTRIES m further back and on (CUT_PAIRS of them, the closest first), then from
+    and to where the body turns round on the spot clear of them (the pieces end and start where the way does);
     none: the next piece (CUT_TRIES at most), none: the rest left out from the first piece no way gets to. Stopped
     and other errors of way go through."""
     n = len(poses)
@@ -801,21 +805,29 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
         if pieces and not gap:
             gap = any(not free[i] for i in range(pieces[-1][1] + 1, first))
         if gap:
-            if pieces:  # (the piece before it ends where the body turns round on the spot clear of them, as far on)
-                f, t = pieces[-1]
-                t = next((i for i in range(t, f + 1, -1) if turns(poses[i])), t)
-                pieces[-1] = (f, t)
-                at = (poses[t].x, poses[t].y, poses[t].yaw)
+            # (from the last pose of the piece before, to the first of this one; where no way does, from and to
+            # CUT_ENTRIES m further back and on, the closest first, CUT_PAIRS at most)
+            ends = _entries(poses, pieces[-1][0], pieces[-1][1], back=True) if pieces else [-1]
+            ons = _entries(poses, first, last)
             got, why = None, ''
+            pairs = sorted(((i, j) for i in range(len(ends)) for j in range(len(ons))), key=lambda q: (sum(q), q[1]))
+            tries = [(ends[i], ons[j]) for i, j in pairs[:CUT_PAIRS]]
+            # (then as far back and on as the body turns round on the spot clear of them, from there on as before)
+            end = next((i for i in range(ends[0], pieces[-1][0] + 1, -1) if turns(poses[i])), ends[0]) \
+                if pieces else -1
             on = next((i for i in range(first, last - 1) if turns(poses[i])), first)
-            for c in _entries(poses, on, last):
+            tries += [(end, c) for c in _entries(poses, on, last) if (end, c) not in tries]
+            for e, c in tries:
+                a = at if e < 0 else (poses[e].x, poses[e].y, poses[e].yaw)
                 p = poses[c]
                 try:
-                    way(at, (p.x, p.y, p.yaw))
-                    got = c
+                    way(a, (p.x, p.y, p.yaw))
+                    got = e, c
                     break
-                except PlanningError as e:
-                    why = why or str(e)
+                except PlanningError as err:
+                    why = why or str(err)
+            if got is not None and got[0] >= 0:
+                pieces[-1] = (pieces[-1][0], got[0])
             if got is None:
                 if not tried:
                     left_out = first
@@ -824,7 +836,7 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
                 if tried >= CUT_TRIES:
                     break
                 continue
-            first = got
+            first = got[1]
         pieces.append((first, last))
         q = poses[last]
         at, gap, tried, left_out = (q.x, q.y, q.yaw), False, 0, n

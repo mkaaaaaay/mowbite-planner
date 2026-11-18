@@ -319,7 +319,8 @@ def test_cut_plan():
     gone = transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 0, [seen], PlannerConfig(**TRON),
                                   lambda a, b: None if b[0] < 2.0 else nowhere(a, b))
     first = min(i for i in range(a1 + 1, len(lane)) if out.bad_poses(poses[i:len(lane)]) == [])
-    assert gone.pieces == [(a0, a1)] and gone.left_out_from == first
+    assert len(gone.pieces) == 1 and gone.pieces[0][0] == a0 and gone.pieces[0][1] >= a1  # (up to the last free one)
+    assert gone.left_out_from == first
     assert [w for w in gone.warnings if w.startswith(f'from pose {first} on no way gets to the plan')]
     with pytest.raises(PlanningError, match='from_pose 999 is not a pose of the plan') as e:
         transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 999, [seen], PlannerConfig(**TRON), way)
