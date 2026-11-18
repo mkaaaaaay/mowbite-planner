@@ -15,6 +15,11 @@ uint32 from_pose 0
 geometry_msgs/Polygon[] drivable_areas
 geometry_msgs/Polygon[] obstacles
 geometry_msgs/Polygon[] temporary_obstacles
+# the ones to drive past instead (none: the temporary obstacles themselves), else one for each of them, in their order,
+# smaller (the robot's smaller clearance in them): a pose of the plan is kept where the body (and turning on the spot
+# where the heading jumps) stays out of these; a piece ends and starts where it's out of the temporary obstacles (the
+# ways from and to there keep out of those)
+geometry_msgs/Polygon[] temporary_passing
 float64 max_outside -1.0
 rcl_interfaces/Parameter[] overrides
 ---

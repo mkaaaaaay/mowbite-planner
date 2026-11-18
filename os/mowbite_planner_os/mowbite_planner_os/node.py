@@ -589,6 +589,7 @@ class OsNode(base.MowbitePlannerNode):
         drivable = [base.xy(poly) for poly in request.drivable_areas]
         obstacles = [base.xy(poly) for poly in request.obstacles]
         temporary = [base.xy(poly) for poly in request.temporary_obstacles]
+        passing = [base.xy(poly) for poly in request.temporary_passing]
         max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         limit = self.search_limit()
         data = self.core.current_map() if self.core is not None else None
@@ -602,7 +603,8 @@ class OsNode(base.MowbitePlannerNode):
         try:
             if not drivable:
                 raise PlanningError('no drivable area', word='BAD_REQUEST')
-            cut = cut_plan(start, poses, list(request.section_start), int(request.from_pose), temporary, cfg, way)
+            cut = cut_plan(start, poses, list(request.section_start), int(request.from_pose), temporary, cfg, way,
+                           passing)
         except Stopped:
             return no('SEARCH_LIMIT', f'cutting the plan failed: no way found in {limit:g} s (transit_search_limit)')
         except PlanningError as e:

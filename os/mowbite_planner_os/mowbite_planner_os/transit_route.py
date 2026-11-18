@@ -745,7 +745,8 @@ def _entries(poses: Sequence[Pose2D], first: int, last: int, back: bool = False)
 
 
 def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Sequence[int], from_pose: int,
-             temporary: Sequence[Sequence[Sequence[float]]], cfg: PlannerConfig, way) -> Cut:
+             temporary: Sequence[Sequence[Sequence[float]]], cfg: PlannerConfig, way,
+             passing: Sequence[Sequence[Sequence[float]]] = ()) -> Cut:
     """A plan (poses, its sections starting at section_start) from from_pose on, the robot at start (x, y, yaw), cut
     by temporary obstacles (temporary_polygons: hard lines, no margin): the pieces of it where the body (and turning on
     the spot where the heading jumps) stays out of them, at least 3 poses each, none across the start of a section
@@ -755,20 +756,28 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
     where none does from and to CUT_ENTRIES m further back and on (CUT_PAIRS of them, the closest first), then from
     and to where the body turns round on the spot clear of them (the pieces end and start where the way does);
     none: the next piece (CUT_TRIES at most), none: the rest left out from the first piece no way gets to. Stopped
-    and other errors of way go through."""
+    and other errors of way go through. passing: one for each of temporary (none: they themselves), smaller: the
+    poses kept are the ones where the body stays out of these (driven on past the temporary obstacles), a piece
+    ends and starts where it's out of the temporary obstacles (from and to which the ways go)."""
     n = len(poses)
     if not 0 <= from_pose <= n:
         raise PlanningError(f'from_pose {from_pose} is not a pose of the plan ({n})', word='BAD_REQUEST')
     starts = sorted({int(i) for i in section_start if 0 <= int(i) < n} | {0})
     polys = temporary_polygons(temporary)
+    inner = temporary_polygons(passing)
+    if inner and len(inner) != len(polys):
+        raise PlanningError(f'{len(inner)} temporary obstacles to pass, {len(polys)} temporary obstacles: one for each '
+                            'or none', word='BAD_REQUEST')
     if polys:
-        blocked = union(polys)
+        blocked = union(polys + inner)
         reach = 1.0 + max(math.hypot(x, y) for x, y in cfg.body_outline)  # (round every pose: only blocked is out)
         xs, ys = [p.x for p in poses] + [blocked.bounds[0], blocked.bounds[2]], \
             [p.y for p in poses] + [blocked.bounds[1], blocked.bounds[3]]
         box = Polygon([(min(xs) - reach, min(ys) - reach), (max(xs) + reach, min(ys) - reach),
                        (max(xs) + reach, max(ys) + reach), (min(xs) - reach, max(ys) + reach)])
-        fp = Footprint(polygonal(box.difference(blocked)), cfg.body_outline, cfg.spin_margin)
+        fp = Footprint(polygonal(box.difference(union(polys))), cfg.body_outline, cfg.spin_margin)
+        # (the poses kept go by the ones to pass where there are: the body outside them is driven on past)
+        fp_in = Footprint(polygonal(box.difference(union(inner))), cfg.body_outline, cfg.spin_margin) if inner else fp
     section = [0] * n
     for k, s in enumerate(starts):
         for i in range(s, starts[k + 1] if k + 1 < len(starts) else n):
@@ -779,7 +788,7 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
             e = starts[k + 1] if k + 1 < len(starts) else n
             lo = max(s, from_pose)
             if lo < e:
-                for i in fp.bad_poses(poses[lo:e]):
+                for i in fp_in.bad_poses(poses[lo:e]):
                     free[lo + i] = False
     runs: List[Tuple[int, int]] = []
     i = from_pose
@@ -793,6 +802,9 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
         if j - i + 1 >= 3:
             runs.append((i, j))
         i = j + 1
+    def clear(p: Pose2D) -> bool:  # (the body clear of the temporary obstacles, not only of the ones to pass)
+        return not inner or fp.fits_pose(p.x, p.y, p.yaw)
+
     def turns(p: Pose2D) -> bool:  # (round on the spot either way there, clear of them)
         return not polys or fp.fits_turn(p.x, p.y, p.yaw, p.yaw + 0.99 * math.pi) and \
             fp.fits_turn(p.x, p.y, p.yaw, p.yaw - 0.99 * math.pi)
@@ -807,8 +819,13 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
         if gap:
             # (from the last pose of the piece before, to the first of this one; where no way does, from and to
             # CUT_ENTRIES m further back and on, the closest first, CUT_PAIRS at most)
-            ends = _entries(poses, pieces[-1][0], pieces[-1][1], back=True) if pieces else [-1]
-            ons = _entries(poses, first, last)
+            # (where a way is to leave or arrive, the body clear of the temporary obstacles themselves)
+            if pieces:
+                f, t = pieces[-1]
+                t = next((i for i in range(t, f + 1, -1) if clear(poses[i])), t)
+            ons_from = next((i for i in range(first, last - 1) if clear(poses[i])), first)
+            ends = _entries(poses, pieces[-1][0], t, back=True) if pieces else [-1]
+            ons = _entries(poses, ons_from, last)
             got, why = None, ''
             pairs = sorted(((i, j) for i in range(len(ends)) for j in range(len(ons))), key=lambda q: (sum(q), q[1]))
             tries = [(ends[i], ons[j]) for i, j in pairs[:CUT_PAIRS]]

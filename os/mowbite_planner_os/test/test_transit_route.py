@@ -322,6 +322,15 @@ def test_cut_plan():
     assert len(gone.pieces) == 1 and gone.pieces[0][0] == a0 and gone.pieces[0][1] >= a1  # (up to the last free one)
     assert gone.left_out_from == first
     assert [w for w in gone.warnings if w.startswith(f'from pose {first} on no way gets to the plan')]
+    # passing: a lane the body keeps out of the smaller ones of goes on past (not of the temporary obstacles themselves)
+    by = [Pose2D(1.0 + 0.1 * i, 2.05, 0.0) for i in range(81)]
+    past = transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way,
+                                  [circle(5.0, 1.5, 0.25)])
+    assert past.pieces == [(0, 80)]
+    assert len(transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way).pieces) == 2
+    with pytest.raises(PlanningError, match='2 temporary obstacles to pass, 1 temporary obstacles') as e:
+        transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way, [seen, seen])
+    assert e.value.word == 'BAD_REQUEST'
     with pytest.raises(PlanningError, match='from_pose 999 is not a pose of the plan') as e:
         transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 999, [seen], PlannerConfig(**TRON), way)
     assert e.value.word == 'BAD_REQUEST'
