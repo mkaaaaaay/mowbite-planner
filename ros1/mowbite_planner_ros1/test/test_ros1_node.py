@@ -421,6 +421,17 @@ def test_settings_parameter(planner):
     check(p.handle(request()))
 
 
+def test_lane_spacing_no_wider_than_the_blade(planner):
+    """mower_logic's lane spacing wider than the blade: the lanes a blade apart, the blade as it is (what a mow left
+    is worked out with it), said in the log; narrower as asked, nothing said."""
+    cfg = planner.settings(request(distance=0.13), None)
+    assert cfg.mower_width == 0.18 and cfg.lane_spacing == pytest.approx(0.13)
+    assert not [line for _, line in rospy.log if 'tool_width' in line]
+    cfg = planner.settings(request(distance=0.3), None)
+    assert cfg.mower_width == 0.18 and cfg.overlap == 0.0 and cfg.lane_spacing == pytest.approx(0.18)
+    assert [line for level, line in rospy.log if level == 'warn' and 'tool_width 0.30 m) is wider than' in line]
+
+
 def test_settings_parameter_angle(planner):
     unmapped(planner)
     # an angle or angle_strategy in ~settings beats mower_logic's angle; lane spacing (overlap), loops and offset

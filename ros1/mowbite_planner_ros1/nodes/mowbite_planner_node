@@ -234,7 +234,7 @@ from mowbite_planner.core import (ASKED, EVENTS_TOPIC, FTC_PARAMS, LOG, METHOD_N
                                   PlannerCore, run_calib)
 from mowbite_planner.export import ANSWER_TOO_BIG, MAX_ANSWER, MAX_PATH_POSES, plan_pieces, too_big
 from mowbite_planner.geometry import clean_polygon, polygonal, union
-from mowbite_planner.mapfile import area_job, bodies_for, margins_for, match_area
+from mowbite_planner.mapfile import area_job, bodies_for, margins_for, match_area, wide_spacing
 from mowbite_planner.progress import check as stop_here
 from mowbite_planner.remote import (MAX_PACKED, PART, TOPIC, RemoteError, loads, plan_from, refused, stack,
                                     unpack)
@@ -1392,11 +1392,11 @@ class MowbitePlannerRos1(PlannerCore):
         """The node's settings, then what mower_logic asks for, then the area's own (planner property and
         angle range)."""
         current = self.current
-        width = max(current.mower_width, req.distance)
+        width = current.mower_width
         asked = dict(
             mower_width=width,
-            # OpenMower's distance is the lane spacing
-            overlap=1.0 - req.distance / width,
+            # OpenMower's distance is the lane spacing, none wider than the blade (it would leave strips)
+            overlap=max(0.0, 1.0 - req.distance / width),
             perimeter_offset=float(req.outer_offset),
             perimeter_passes=int(req.outline_count),
             lane_overlap_passes=int(req.outline_overlap_count),
@@ -1419,6 +1419,9 @@ class MowbitePlannerRos1(PlannerCore):
             cfg = cfg.with_overrides(job.planner)
         if cfg.lane_spacing_mode == 'auto':  # the blade, the spacing is the planner's
             cfg = cfg.with_overrides({'mower_width': current.mower_width})
+        wide = wide_spacing({'tool_width': req.distance}, cfg)
+        if wide:
+            self.logwarn_throttle(600, 'MowBite Planner: ' + wide)
         # (skip_lanes is a setting too: the request's skip_fill skips the lanes either way)
         return cfg.with_overrides({'angle_steps': self.angle['steps'], 'finished_mows': self.angle['finished'],
                                    'skip_lanes': cfg.skip_lanes or bool(req.skip_fill)})

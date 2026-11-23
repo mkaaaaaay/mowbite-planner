@@ -194,6 +194,13 @@ def test_plan_area_of_the_map(service, planned):
     assert obstacles == [[tuple(p) for p in rect(4, 2, 5, 3)]] and drivable == [[tuple(p) for p in rect(0, 8, 6, 12)]]
     assert res['angle'] == pytest.approx(0.5)  # the area's own angle
     assert res['lane_spacing'] == pytest.approx(0.2)  # the mower's tool_width
+    assert not [w for w in res['warnings'] if 'tool_width' in w]
+    # (wider than the blade: the lanes a blade apart, the plan's warnings say so)
+    service.on_params(json.dumps(dict(PARAMS, **{'/mower_logic/tool_width': 0.3})))
+    wide = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front'})
+    assert wide['lane_spacing'] == pytest.approx(PlannerConfig().mower_width)
+    assert [w for w in wide['warnings'] if w.startswith("OpenMower's lane spacing (tool_width 0.30 m) is wider than")]
+    service.on_params(json.dumps(PARAMS))
     assert not poses_in(res, rect(4.1, 2.1, 4.9, 2.9))  # the obstacle
     first = res['poses'][0]
     assert first[0] < 0.5 and first[1] < 2.5  # starts next to the dock

@@ -13,7 +13,7 @@ sys.path[:0] = [os.path.join(HERE, '..'), HERE]
 from mowbite_planner import PlannerConfig, PlanningError  # noqa: E402
 from mowbite_planner.mapfile import (MAP_FIELDS, area_job, area_settings, bodies_for, body_hints,  # noqa: E402
                                      body_known, body_warnings, drawn, find_area, margins_for, match_area, mow_areas, openmower_angle,
-                                     openmower_settings, recorded_body, settings_for)
+                                     openmower_settings, recorded_body, settings_for, wide_spacing)
 from stubplan import stub_plan_coverage  # noqa: E402
 
 
@@ -322,8 +322,19 @@ def test_openmower_settings():
     assert cfg.lane_spacing == pytest.approx(0.13)
     assert (cfg.perimeter_passes, cfg.lane_overlap_passes, cfg.perimeter_offset) == (3, 1, -0.05)
     assert cfg.angle is None and cfg.angle_offset == pytest.approx(math.radians(10))
-    # a spacing wider than the blade: no overlap
-    assert openmower_settings({'tool_width': 0.3}, 0.22) == {'mower_width': 0.3, 'overlap': 0.0}
+    # a spacing wider than the blade: no overlap, the blade as it is (the lanes a blade apart), and said so where the
+    # lanes go by it
+    assert openmower_settings({'tool_width': 0.3}, 0.22) == {'mower_width': 0.22, 'overlap': 0.0}
+    fixed = PlannerConfig(mower_width=0.22, lane_spacing_mode='fixed')
+    cfg = fixed.with_overrides(openmower_settings({'tool_width': 0.3}, 0.22))
+    assert cfg.lane_spacing == pytest.approx(0.22)
+    assert wide_spacing({'/mower_logic/tool_width': 0.3}, cfg) == wide_spacing({'tool_width': 0.3}, cfg) == (
+        "OpenMower's lane spacing (tool_width 0.30 m) is wider than the blade (mower_width 0.22 m): the lanes are a "
+        'blade apart, wider would leave strips')
+    for params, other in (({'tool_width': 0.22}, cfg), ({'tool_width': 0.13}, cfg), ({}, cfg), (None, cfg),
+                          ({'tool_width': 'x'}, cfg), ({'tool_width': 0.3}, cfg.with_overrides({'overlap': 0.1})),
+                          ({'tool_width': 0.3}, cfg.with_overrides({'lane_spacing_mode': 'auto'}))):
+        assert wide_spacing(params, other) == '', params
     # an absolute angle
     s = openmower_settings({'mow_angle_offset': -30, 'mow_angle_offset_is_absolute': True}, 0.22)
     assert s == {'angle': pytest.approx(math.radians(-30))}

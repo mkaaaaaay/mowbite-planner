@@ -93,7 +93,7 @@ over MQTT. Open it by the mower's address, its host name or `<host name>.local` 
 Loops, `perimeter_offset` and `lane_overlap_passes` come from OpenMower's parameters (`outline_count`, ...) until you
 set them here. An area's own values in the map beat both. The lane spacing the planner picks itself from the blade
 width, `mower_width` (or `OM_BLADE_WIDTH`). With `lane_spacing_mode: fixed` it's OpenMower's `tool_width` until you
-set `overlap`.
+set `overlap`, but never wider than the blade (the plan's warnings say so then): set `OM_BLADE_WIDTH` to your blade.
 
 | Method | What it does |
 | --- | --- |

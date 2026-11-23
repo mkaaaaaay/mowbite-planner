@@ -259,13 +259,25 @@ def body_told(data: Optional[Mapping[str, Any]], outlines: Any, cfg: Optional[Pl
     return body_warnings(body_hints(data, outlines, cfg.body_outline if cfg is not None and cfg.body else None))
 
 
+def wide_spacing(params: Optional[Mapping[str, Any]], cfg: PlannerConfig) -> str:
+    """What to tell where OpenMower's lane spacing (tool_width of params) is wider than cfg's blade and the lanes go by
+    it (lane_spacing_mode fixed, no overlap): they're a blade apart. '': nothing."""
+    params = params if isinstance(params, Mapping) else {}
+    spacing = _number(params.get('/mower_logic/tool_width', params.get('tool_width')))
+    if spacing is None or cfg.lane_spacing_mode != 'fixed' or cfg.overlap > 0.0 or spacing <= cfg.mower_width + 1e-9:
+        return ''
+    return (f"OpenMower's lane spacing (tool_width {spacing:.2f} m) is wider than the blade (mower_width "
+            f'{cfg.mower_width:.2f} m): the lanes are a blade apart, wider would leave strips')
+
+
 def openmower_settings(params: Optional[Mapping[str, Any]], mower_width: float) -> Dict[str, Any]:
     """The planner settings the mower's global ROS parameters (keys like /mower_logic/tool_width) stand for.
 
     OpenMower's tool_width is the lane spacing, not the blade: with the blade's mower_width the overlap
-    follows from it. mow_angle_offset (degrees, brought into -180..180 like OpenMower does) turns the lanes,
-    with mow_angle_offset_is_absolute it is the angle itself. The increment OpenMower adds after every
-    finished job is its own state, not in here."""
+    follows from it, none where it's wider than the blade (the lanes a blade apart then, wide_spacing says so: the
+    blade is never taken for wider than it is, what it leaves would count as mowed). mow_angle_offset (degrees,
+    brought into -180..180 like OpenMower does) turns the lanes, with mow_angle_offset_is_absolute it is the angle
+    itself. The increment OpenMower adds after every finished job is its own state, not in here."""
     params = params if isinstance(params, Mapping) else {}
 
     def get(key: str) -> Any:
@@ -274,9 +286,8 @@ def openmower_settings(params: Optional[Mapping[str, Any]], mower_width: float) 
     out: Dict[str, Any] = {}
     spacing = _number(get('tool_width'))
     if spacing is not None and spacing > 0:
-        width = max(mower_width, spacing)
-        out['mower_width'] = width
-        out['overlap'] = 1.0 - spacing / width
+        out['mower_width'] = mower_width
+        out['overlap'] = max(0.0, 1.0 - spacing / mower_width)
     count = _number(get('outline_count'))
     if count is not None and count >= 0:
         out['perimeter_passes'] = int(count)

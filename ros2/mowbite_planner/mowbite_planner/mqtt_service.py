@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from .export import ANSWER_TOO_BIG, to_openmower_json, to_poses_json, to_studio_payload, to_trace_json, too_big
 from .mapfile import (AreaJob, _number, area_job, area_settings, bodies_for, body_hints, body_warnings, margins_for,
-                      settings_for)
+                      settings_for, wide_spacing)
 from .config import PlannerConfig, PlanningError
 from .planner import plan_coverage
 from .report import check_plan
@@ -206,6 +206,7 @@ class PlannerService:
         if 'angle_strategy' in settings:
             settings.setdefault('angle', None)  # the strategy works it out, not the area's angle
         cfg = settings_for(self.base, self.params, job, settings, self.own_angle, self.own)
+        wide = wide_spacing(self.params, cfg)
         start = _pose(p['start'], 'start') if p.get('start') is not None else start
         end = _pose(p['end'], 'end') if p.get('end') is not None else end
         obstacles = job.obstacles + job.nested if cfg.nested_areas else job.obstacles
@@ -217,8 +218,9 @@ class PlannerService:
         plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
                                                margins, reach_over=job.navigation, unmowed=job.unmowed,
                                                **({'bodies': bodies} if bodies else {}))
-        if job.warnings:  # (what the map has besides: its obstacles left out)
-            plan = dataclasses.replace(plan, warnings=plan.warnings + job.warnings)
+        told = job.warnings + [wide] if wide else job.warnings
+        if told:  # (what the map has besides: its obstacles left out; the lanes closer than the mower's parameters ask)
+            plan = dataclasses.replace(plan, warnings=plan.warnings + told)
         result = to_openmower_json(plan, area_id)
         used = plan.config
         hints = body_hints(data, rings, used.body_outline if used is not None and used.body else None, self.missing)
