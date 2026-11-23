@@ -735,7 +735,8 @@ def test_a_robots_last_check(make, planned, tmp_path):
 @fake_only
 def test_plan_coverage_code_with_the_map(make, planned, monkeypatch):
     """~/plan_coverage of an area of the map: NOT_READY where the map can't be planned now, the planner's no with its
-    word (kept with it), NO_PLAN without one, INTERNAL for any other error."""
+    word (kept with it), NO_PLAN without one, INTERNAL for any other error. planner.plan's error has the same word as
+    its data, a mistake of the request none."""
     node = make(Robot)
     send_map(node, the_map())
     node.unusable = 'the map is being moved'
@@ -758,6 +759,17 @@ def test_plan_coverage_code_with_the_map(make, planned, monkeypatch):
     assert not res.success and res.code == 'INTERNAL' and 'RuntimeError: broken' in res.message
     failing(PlanningError('too small'))
     assert plan_area(node, perimeter_passes=1).code == 'NO_PLAN'
+    for again in range(2):  # (the second time the no kept)
+        assert rpc(node, 'planner.plan', {'area_id': 'a', 'outline_count': 1}, f'n{again}')[1] == (
+            -32602, 'too small', {'code': 'NO_PLAN'})
+    failing(PlanningError('start unreachable: no way', word='START_UNREACHABLE'))
+    assert rpc(node, 'planner.plan', {'area_id': 'a', 'outline_count': 2}, 'n2')[1] == (
+        -32602, 'start unreachable: no way', {'code': 'START_UNREACHABLE'})
+    failing(RuntimeError('broken'))
+    assert rpc(node, 'planner.plan', {'area_id': 'a', 'outline_count': 4}, 'n3')[1] == (
+        -32603, 'internal error: broken')
+    for params in ({'area_id': 'none'}, {'area_id': 'a', 'settings': 1}, {'area_id': 'a', 'slot': 1}):
+        assert len(rpc(node, 'planner.plan', params, 'n4')[1]) == 2, params
     monkeypatch.setattr(core_module, 'plan_coverage', planned)
     res = plan_area(node, perimeter_passes=3)
     assert res.success and res.code == ''

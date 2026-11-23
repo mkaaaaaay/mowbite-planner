@@ -22,7 +22,7 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
   - rpc: the planner.* methods (planner.settings, .settings.set, .angle.reset, .log, .area.set, .plan, .leftovers,
     .drive; what each answers: see the ROS 1 node's top) as JSON {method, params, id} on ~/rpc/request, the answer
     {id, result} or {id, error: {code, message}} on ~/rpc/response (JSON-RPC's codes; the planner's no with a word
-    of its own, as ~/plan_coverage's code says it, has it as the error's data: {code: BODY_OUT}). planner.area.set,
+    of its own, as ~/plan_coverage's code says it, has it as the error's data: {code: NO_PLAN}). planner.area.set,
     .plan, .leftovers and .drive on a thread of their own each, the others one after another on one.
   - the map: ~/map (std_msgs/String, transient local), OpenMower's JSON. Every value a plan goes by has one place: for
     all areas the planner.* settings (the node's parameters their defaults), the lane spacing, the loops and the angle

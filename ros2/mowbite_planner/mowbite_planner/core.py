@@ -523,10 +523,23 @@ def same_request(params):
     return json.dumps({k: v for k, v in params.items() if k not in ('ahead', 'slot')}, sort_keys=True)
 
 
+def no_plan(planner):
+    """planner, its no without a word (the area can't be planned as asked, not the request's mistake) with NO_PLAN, as
+    ~/plan_coverage's code says it."""
+    def planned(*args, **kw):
+        try:
+            return planner(*args, **kw)
+        except PlanningError as e:
+            if not e.word:
+                e.word = 'NO_PLAN'
+            raise
+    return planned
+
+
 def call(methods, method, params, loginfo=log.info, logerr=log.error, data=None):
     """An RPC method of methods with params (None: none): (its result as JSON, None) or (None, (code, message)), a
     PlanningError the caller's mistake; loginfo, logerr: the adapter's. data: a dict for the error's data, it gets
-    'code' where a PlanningError has a word (as a service's code says it: BODY_OUT, NOT_READY...)."""
+    'code' where a PlanningError has a word (as a service's code says it: BODY_OUT, NO_PLAN, NOT_READY...)."""
     try:
         if params is None:  # none given, or null
             params = {}
@@ -1202,7 +1215,8 @@ class PlannerCore:
 
     def rpc_plan(self, params, keep=None, mowed=None):
         """keep: a list the plan itself goes to too. mowed: where the blade went already, only what that left is planned
-        (not kept: it's that one mow's). PlanningError where the map can't be planned now (map_unusable)."""
+        (not kept: it's that one mow's). PlanningError where the map can't be planned now (map_unusable, NOT_READY), the
+        planner's own no with its word (NO_PLAN without one), a mistake of the request without."""
         reason = self.unusable()
         if reason:
             raise PlanningError(reason, word='NOT_READY')
@@ -1230,6 +1244,7 @@ class PlannerCore:
             service.planner = lambda *args, **kw: got.append(self.left_plan(*args, mowed=mowed, **kw)) or got[-1]
         elif keep is None and current.planner != 'slic3r':
             service.planner = lambda *args, **kw: got.append(self.plan_coverage(*args, **kw)) or got[-1]
+        service.planner = no_plan(service.planner)
         result = service.plan(params)
         if mowed is not None and keep is not None:
             keep.extend(got)

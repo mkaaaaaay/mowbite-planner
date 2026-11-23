@@ -5,8 +5,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     (RpcMethods, node_id mowbite_planner, reliable and transient local, depth 50; an empty list when the node ends),
     asked on bridge/rpc/request (RpcRequest, params JSON text), answered on bridge/rpc/response (RpcResponse, result
     JSON text) or bridge/rpc/error (RpcError; its data {"code": the word} where the planner's no has one, as
-    ~/plan_coverage's code says it: BODY_OUT, NOT_READY, START_UNREACHABLE); reliable, volatile, depth 100. A method of
-    no node here is another node's: not answered (the bridge answers it).
+    ~/plan_coverage's code says it: BODY_OUT, NO_PLAN, NOT_READY, START_UNREACHABLE); reliable, volatile, depth 100. A
+    method of no node here is another node's: not answered (the bridge answers it).
   - the map of mowbite_map: map/json (OpenMower's JSON, latched). planner.plan, ~/plan_coverage with the map and
     planning ahead only while map/status says MATCH (the map fits the GNSS datum), else an error with its reason; on
     MATCH again the areas are planned ahead. planner.area.set writes the map with map/replace, expected_sha256 the

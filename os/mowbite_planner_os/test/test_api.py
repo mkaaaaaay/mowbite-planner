@@ -59,7 +59,7 @@ def test_what_the_node_sends(make, monkeypatch):  # noqa: F811
         raise PlanningError('no room')
     monkeypatch.setattr(core_module, 'plan_coverage', failing)
     send_map(node, the_map(planner={'turn_radius': 0.3}))
-    assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')[1] == (-32602, 'no room')
+    assert rpc(node, 'planner.plan', {'area_id': 'a'}, 'r2')[1] == (-32602, 'no room', {'code': 'NO_PLAN'})
     monkeypatch.setattr(core_module, 'plan_coverage', real)
     node.core.progress.queue_changed()
     time.sleep(0.3)
