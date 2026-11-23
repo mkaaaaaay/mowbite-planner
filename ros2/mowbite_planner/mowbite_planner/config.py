@@ -608,6 +608,11 @@ class PlannerConfig:
         for name in ('robot_width', 'robot_front', 'robot_rear', 'robot_front_width', 'robot_rear_width'):
             if getattr(self, name) is not None:
                 finite(name, 0.0, MAX_BODY if name in ('robot_front', 'robot_rear') else 2.0 * MAX_BODY)
+        # (a body without an area: nothing to check it with)
+        if self.robot_width is not None and not self.robot_width > 0.0:
+            raise PlanningError(f'robot_width must be > 0, got {self.robot_width}')
+        if None not in (self.robot_front, self.robot_rear) and not self.robot_front + self.robot_rear > 0.0:
+            raise PlanningError(f'robot_front + robot_rear must be > 0, got {self.robot_front} + {self.robot_rear}')
         for name in ('robot_front_width', 'robot_rear_width'):
             if getattr(self, name) is not None and self.robot_width is not None and getattr(self, name) > \
                     self.robot_width:

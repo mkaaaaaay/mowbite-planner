@@ -1476,6 +1476,20 @@ def test_main_ends_when_the_master_restarts(monkeypatch):
     assert ('warn', 'MowBite Planner: the ROS master restarted, ending to register again') in rospy.log
 
 
+def test_main_ends_when_too_old(monkeypatch, capsys):
+    """With Python, shapely or numpy older than the planner needs it ends with 1 and says why, before it registers."""
+    import mowbite_planner
+    started = []
+    monkeypatch.setattr(mowbite_planner, 'unmet', lambda: 'MowBite Planner: too old here: shapely 1.8.5 (needs 2.0.3 '
+                                                          'or newer)')
+    monkeypatch.setattr(rospy, 'init_node', started.append, raising=False)
+    monkeypatch.setattr(node_module, 'MowbitePlannerRos1', lambda: started.append('node'))
+    with pytest.raises(SystemExit) as end:
+        node_module.main()
+    assert end.value.code == 1 and started == []
+    assert 'too old here: shapely 1.8.5' in capsys.readouterr().err
+
+
 def slic3r_path(is_outline, points):
     """A path as OpenMower's slic3r planner answers it, poses facing the next point."""
     poses = []

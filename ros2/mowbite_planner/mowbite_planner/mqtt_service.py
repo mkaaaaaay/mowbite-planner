@@ -217,6 +217,8 @@ class PlannerService:
         plan = (self.planner or plan_coverage)(job.boundary, obstacles, cfg, start, end, job.drivable, job.keep_out,
                                                margins, reach_over=job.navigation, unmowed=job.unmowed,
                                                **({'bodies': bodies} if bodies else {}))
+        if job.warnings:  # (what the map has besides: its obstacles left out)
+            plan = dataclasses.replace(plan, warnings=plan.warnings + job.warnings)
         result = to_openmower_json(plan, area_id)
         used = plan.config
         hints = body_hints(data, rings, used.body_outline if used is not None and used.body else None, self.missing)

@@ -1553,6 +1553,12 @@ def master_restarted(run_id):
 
 
 def main():
+    import sys
+    from mowbite_planner import unmet
+    why = unmet()  # (Python, shapely or numpy older than it needs: ends with 1 before it offers anything)
+    if why:
+        print(why, file=sys.stderr, flush=True)
+        raise SystemExit(1)
     rospy.init_node('slic3r_coverage_planner')
     MowbitePlannerRos1()
     run_id = rospy.get_param('/run_id', None)

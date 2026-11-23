@@ -229,6 +229,21 @@ def test_plan_with_the_margins_of_the_map(planned):
         assert planned[-1][7] == margins
 
 
+def test_plan_tells_the_obstacles_left_out(service, planned):
+    """An obstacle of the map in the area with fewer than 3 points has no area: left out, the plan's warnings say so
+    (planned as without it)."""
+    plain = result(service, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
+    s = PlannerService()
+    s.on_map(json.dumps(dict(MAP, areas=MAP['areas'] + [area('line', 'obstacle', [(1, 1), (2, 2)]),
+                                                        area('far', 'obstacle', [(1, 20)])])))
+    s.on_params(json.dumps(PARAMS))
+    res = result(s, 'ext.mowbite_planner.plan', {'area_id': 'front', 'poses': True})
+    assert planned[-1][1] == planned[0][1] and res['poses'] == plain['poses']
+    told = [w for w in res['warnings'] if 'left out, no area' in w]
+    assert told == ['1 obstacles of the map left out, no area (fewer than 3 points, or all on one line), the first at '
+                    '(1.00, 1.00)']
+
+
 def test_plan_with_the_bodies_of_the_map(monkeypatch):
     """The body each ring of the map was recorded with goes to the planner by its outline (none: no bodies, the
     request's own outline none either); body_hints and the warnings tell of a larger planning body and an unreadable

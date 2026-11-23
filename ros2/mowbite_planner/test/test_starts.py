@@ -417,3 +417,51 @@ def test_back_out_in_plan_coverage():
     small = [(0.0, 0.0), (3.0, 0.0), (3.0, 2.5), (0.0, 2.5)]
     got = plan_coverage(small, [], PlannerConfig(back_out=True, body_fit=False, **BODY))
     assert got.config.body_fit and got.warnings[-1].startswith('back_out: body_fit on') and 'back_out' in got.stats
+
+
+def budget(n, answer):
+    """arrives of a robot that answers like answer for the first n ways, then plans no more (_Spent, like MowBite OS'
+    ARRIVE_WAYS)."""
+    asked = []
+
+    def arrives(pose, came):
+        if len(asked) >= n:
+            raise _Spent()
+        asked.append((pose, came))
+        return answer(pose, came)
+    return arrives
+
+
+def test_asks_run_out_where_a_section_ends():
+    # the ways away from the lane's end in the corridor not asked any more: it ends at the last pose the body turns on
+    # the spot at (as where they're asked and none gets away), told as untried, not as a dead end
+    p = corridor()
+    got = reached_starts(p, budget(1, out_of_square))
+    end = got.poses[-1]
+    assert got.poses == p.poses[:len(got.poses)] and 1.0 < end.x < 3.9
+    starts = got.stats['starts']
+    assert len(starts['ends']) == 1 and starts['ends'][0][:2] == [8.5, 2.0]
+    assert starts['trapped'] == [] and starts['untried'] == [] and starts['unmowed_m2'] > 1.0
+    assert any('end earlier where the ways away from their end were not tried past' in w for w in got.warnings)
+    assert not any('no way gets away' in w for w in got.warnings)
+
+
+def test_asks_run_out_in_a_dead_end():
+    # the second section in the corridor got to, the ways away from it not asked any more: left out as untried (its
+    # last pose), not trapped; the third not asked about either
+    p = corridor(((1.0, 3.0), (4.5, 8.5), (2.8, 1.5)))
+    got = reached_starts(p, budget(2, lambda pose, came: came is None or came.x < 3.5 or
+                                   pose.yaw is not None and pose.x > 4.0))
+    starts = got.stats['starts']
+    assert got.poses == p.poses[:21] and starts['trapped'] == [] and starts['ends'] == []
+    assert starts['untried'] == [[8.5, 2.0], [2.8, 2.0]]
+    assert any(w.startswith('1 sections left out: the ways away from them not tried past') for w in got.warnings)
+    assert any(w.startswith('1 sections left out: the ways to them not tried past') for w in got.warnings)
+    assert not any('no way gets away' in w for w in got.warnings)
+    # a start got to, nothing left: not START_UNREACHABLE (it got there), the asks running out said
+    one = corridor(((4.5, 8.5),))
+    arrives = budget(1, lambda pose, came: True)
+    arrives.start = (1.0, 2.0, 0.0)
+    with pytest.raises(PlanningError, match='^no way gets to any section .* and away from it again .*ran out') as e:
+        reached_starts(one, arrives)
+    assert e.value.word == ''

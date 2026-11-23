@@ -103,3 +103,19 @@ def test_requires_met():
     have = {'numpy': numpy.__version__, 'python': platform.python_version(), 'shapely': shapely.__version__}
     for name, least in contract.read()['requires'].items():
         assert version(have[name]) >= version(least), (name, have[name], least)
+
+
+def test_too_old_ends_the_nodes():
+    """unmet: what's older than REQUIRES ('' where nothing is), each version by its numbers (no packaging)."""
+    import mowbite_planner
+    assert mowbite_planner.unmet() == ''
+    least = dict(mowbite_planner.REQUIRES)
+    assert mowbite_planner.unmet(least) == ''
+    assert mowbite_planner.unmet(dict(least, python='3.8', numpy='1.26.4+dfsg', shapely='2.1.0rc1')) == ''
+    assert mowbite_planner.unmet(dict(least, shapely='2.0.10', python='3.12.3')) == ''
+    assert mowbite_planner.unmet(dict(least, shapely='1.8.5.post1')) == \
+        'MowBite Planner: too old here: shapely 1.8.5.post1 (needs 2.0.3 or newer)'
+    got = mowbite_planner.unmet({'python': '3.7.17', 'numpy': '1.17.4'})
+    assert got == 'MowBite Planner: too old here: python 3.7.17 (needs 3.8 or newer), shapely missing (needs 2.0.3 ' \
+        'or newer)'
+    assert mowbite_planner.unmet(dict(least, shapely='2.0')).endswith('shapely 2.0 (needs 2.0.3 or newer)')

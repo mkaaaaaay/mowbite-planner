@@ -59,6 +59,7 @@ its own last check of every plan (checked);
 main(node_class=it, executor_class=its executor). SIGINT and SIGTERM end it with destroy_node first (see main).
 """
 
+import dataclasses
 import glob
 import hashlib
 import json
@@ -935,6 +936,8 @@ class MowbitePlannerNode(Node):
                                             bodies=bodies_for(data, rings))
                 if self.pins and index is not None:
                     core.pin(core.local.key)
+                if job.warnings:  # (what the map has besides, like planner.plan)
+                    plan = dataclasses.replace(plan, warnings=plan.warnings + job.warnings)
         except PlanningError as e:
             response.success = False
             response.code = code_of(e)
@@ -1052,7 +1055,13 @@ class MowbitePlannerNode(Node):
 def main(args=None, node_class=MowbitePlannerNode, executor_class=None):
     """The node (node_class: a robot's own, on its executor_class, by default a SingleThreadedExecutor) till SIGINT or
     SIGTERM. They end it here, not rclpy's handlers: those shut the context down first, what destroy_node still sends
-    (rpc_end) would go nowhere and the node end with an error."""
+    (rpc_end) would go nowhere and the node end with an error. Ends with 1 at once where Python, shapely or numpy are
+    older than it needs (mowbite_planner.REQUIRES)."""
+    from . import unmet
+    why = unmet()
+    if why:
+        print(why, file=sys.stderr, flush=True)
+        raise SystemExit(1)
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

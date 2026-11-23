@@ -12,7 +12,7 @@ from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tup
 
 from shapely.geometry import Polygon
 
-from .geometry import QUAD_SEGS, clean_polygon
+from .geometry import QUAD_SEGS, clean_polygon, shapeless
 from .config import DRAWN_CENTRE, DRAWN_HARD, LARGER, MAX_BLADE_OFFSET, PlannerConfig, PlanningError
 
 XY = Tuple[float, float]
@@ -45,6 +45,8 @@ class AreaJob:
     overrides: Dict[str, Any] = field(default_factory=dict)  # planner settings from the area's properties
     planner: Dict[str, Any] = field(default_factory=dict)  # MowBite's own of them: angle range, planner object
     dock: Optional[Tuple[float, float, float]] = None  # x, y, heading of the first docking station
+    # what the plan's warnings say of the map besides: its obstacles in this area left out (fewer than 3 points)
+    warnings: List[str] = field(default_factory=list)
 
 
 def _points(outline: Any) -> List[XY]:
@@ -354,7 +356,8 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     nested_areas (see NESTED_SHARE). navigation: the active navigation areas, the body may reach over the edge into
     one (plan_coverage's reach_over). unmowed: the active mowing areas not to mow (but those to mow around), the body
     may reach over into one as well, the blade stays off it (plan_coverage's unmowed).
-    Other areas with a broken outline are left out, a broken area to plan is a PlanningError."""
+    Other areas with a broken outline are left out, a broken area to plan is a PlanningError. warnings: the active
+    obstacles in the area with fewer than 3 points, left out (plan_coverage tells of those all on one line itself)."""
     found = find_area(data, which)
     area = dict(found, properties=dict(_props(found), **properties)) if properties else found
     try:
@@ -370,6 +373,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
         raise PlanningError(f'area {area.get("id")!r}: {e}') from None
     shape = clean_polygon(boundary)
     obstacles, mow_around, drivable, nav, keep_out, nested, navigation, unmowed = [], [], [], [], [], [], [], []
+    short = []
     for other in _areas(data):
         p = _props(other)
         if other is found:
@@ -378,9 +382,11 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
             pts = _points(other.get('outline'))
         except ValueError:
             continue
-        if len(pts) < 3:
-            continue
         kind = p.get('type')
+        if len(pts) < 3:
+            if kind == 'obstacle' and p.get('active') is not False:
+                short.append(pts)
+            continue
         if p.get('active') is False:
             if kind in ('mow', 'nav'):
                 keep_out.append(pts)
@@ -410,7 +416,7 @@ def area_job(data: Mapping[str, Any], which: Union[str, int],
     return AreaJob(area_id=str(area.get('id')), name=str(_props(area).get('name') or area.get('id')),
                    boundary=boundary, obstacles=obstacles, mow_around=mow_around, drivable=drivable, nav=nav,
                    overrides=overrides, planner=own, dock=_dock(data), keep_out=keep_out, nested=nested,
-                   navigation=navigation, unmowed=unmowed)
+                   navigation=navigation, unmowed=unmowed, warnings=shapeless(short, shape, 'obstacles of the map'))
 
 
 def openmower_angle(boundary: List[XY]) -> float:

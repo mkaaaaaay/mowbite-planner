@@ -983,6 +983,19 @@ def test_a_signal_ends_it(make, monkeypatch, sig):
     assert set(handlers) == {signal.SIGINT, signal.SIGTERM}
 
 
+def test_too_old_ends_at_once(monkeypatch, capsys):
+    """main: with Python, shapely or numpy older than it needs (mowbite_planner.REQUIRES) it ends with 1 and says why,
+    before rclpy and the node."""
+    calls = []
+    monkeypatch.setattr(mowbite_planner, 'unmet', lambda: 'MowBite Planner: too old here: shapely 1.8.5 (needs 2.0.3 '
+                                                          'or newer)')
+    monkeypatch.setattr(node_module.rclpy, 'init', lambda args=None, **kw: calls.append('init'))
+    with pytest.raises(SystemExit) as end:
+        node_module.main(node_class=lambda: calls.append('node'))
+    assert end.value.code == 1 and calls == []
+    assert 'too old here: shapely 1.8.5 (needs 2.0.3 or newer)' in capsys.readouterr().err
+
+
 def test_version_in_one_place():
     """The package's version is mowbite_planner.__version__ (planner.settings says it), setup.py and package.xml the
     same."""

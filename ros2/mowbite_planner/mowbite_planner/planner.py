@@ -21,7 +21,7 @@ from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _tur
 from .complete import complete, leftovers
 from .config import (_BODY_SPACE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, SPACING_CANDIDATES, TRACK, XY, ZERO_TURN,
                      CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
-from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, subtract
+from .geometry import QUAD_SEGS, clean_polygon, polygonal, polygons, rings, shapeless, subtract
 from .handover import _blade_on, _compact, _lengths, _origins, _ring_ways, _stats, _warn
 from .lanes import lane_angle
 from .objective import LEFT_GAIN
@@ -427,8 +427,9 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     none given: the setting). mowed (a geometry, where the blade went on a mow): no loops and lanes, only moves over
     what that left (complete.leftovers), the one nearest start first; stats['leftovers'] says how much. edge_slots: the
     slots by the edge too narrow for the body closed in free (see _edge_gaps; plan_coverage leaves that to the loops'
-    levels). bodies: see space._body_space. Raises PlanningError when there's nothing to plan, or a setting or point
-    is out of range (every coordinate within MAX_COORDINATE of the origin).
+    levels). bodies: see space._body_space. An obstacle without an area (fewer than 3 points, or all on one line) is
+    left out, said in the warnings where it lies in the area. Raises PlanningError when there's nothing to plan, or a
+    setting or point is out of range (every coordinate within MAX_COORDINATE of the origin).
     """
     timer = _Timer(time.perf_counter())
     cfg = config or PlannerConfig()
@@ -463,6 +464,7 @@ def _plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Sequ
     route, start_xy = _new_route(cfg, space, footprint, rings_of, passes, start, end, boundary)
     if space.recorded_off:
         route.warnings.append('recorded_loop ignored: ' + space.recorded_off)
+    route.warnings += shapeless(obstacles, space.area)
     if mowed is None:
         mow_parts(route, rings_of, passes, zones, narrow, [ring for kind, ring in rings(space.free) if kind == 'hole'],
                   start_xy, _point(end), {id(lane): f'cell-{pi}-{ci}' for pi, (_, cells) in enumerate(passes)

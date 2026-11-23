@@ -1,14 +1,15 @@
-"""shapely helpers that work the same on shapely 1.8 (Ubuntu 22.04 / Humble) and 2.x (Ubuntu 24.04 / Jazzy).
+"""shapely helpers. The planner needs shapely 2.0 or newer (mowbite_planner.REQUIRES, the nodes check it at their
+start): strokes.py uses shapely 2's own functions.
 
-Both versions take the buffer resolution as the second positional argument (1.8 calls it `resolution`,
-2.x `quad_segs`) and the join style as a plain number, so that's how buffer() is called everywhere.
+buffer() takes the buffer resolution as the second positional argument (`quad_segs`) and the join style as a plain
+number everywhere.
 """
 
 import math
 from typing import Iterable, Iterator, List, Sequence, Tuple
 
 from shapely.errors import ShapelyError
-from shapely.geometry import LineString, MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.polygon import orient
 from shapely.ops import polygonize, unary_union
 
@@ -66,6 +67,17 @@ def clean_polygon(points: Sequence[Sequence[float]]):
         else:
             poly = unary_union(list(polygonize(unary_union(LineString(pts + [pts[0]])))))
     return polygonal(poly)
+
+
+def shapeless(rings: Sequence[Sequence[Sequence[float]]], area, what: str = 'obstacles') -> List[str]:
+    """The warning where some of these rings (obstacles) with a point in area have no area themselves (fewer than 3
+    points, or all on one line, see clean_polygon): left out, the plan goes over where they are. [] where none."""
+    gone = [r for r in rings if clean_polygon(r).is_empty and any(area.covers(Point(p[0], p[1])) for p in r)]
+    if not gone:
+        return []
+    x, y = gone[0][0][0], gone[0][0][1]
+    return [f'{len(gone)} {what} left out, no area (fewer than 3 points, or all on one line), the first at '
+            f'({float(x):.2f}, {float(y):.2f})']
 
 
 def union(geoms: Iterable) -> object:

@@ -75,6 +75,9 @@ def test_area_job():
     assert job.keep_out == [rect(6, 8, 8, 10)]
     assert job.dock == (-3.0, 1.0, math.pi)  # the first one with a position
     assert job.overrides == {'angle': 0.5, 'perimeter_passes': 1} and job.planner == {}
+    # the one without an area left out, told (the plan's warnings get it)
+    assert job.warnings == ['1 obstacles of the map left out, no area (fewer than 3 points, or all on one line), the '
+                            'first at (1.00, 1.00)']
     # a mowing area not to mow is like a navigation area, unless it's one to mow around: the body may reach over into
     # it, the blade keeps off it (unmowed), nothing goes over it on the way
     meadow = area('meadow', 'mow', rect(0, 8, 6, 12), mowable=False)
@@ -85,6 +88,27 @@ def test_area_job():
     lawn = area('lawn', 'mow', rect(0, 8, 6, 12), active=False)
     job = area_job({'areas': [MAP['areas'][1], lawn]}, 'front')
     assert not job.drivable and job.keep_out == [rect(0, 8, 6, 12)]
+
+
+def test_obstacles_without_an_area_told():
+    """An active obstacle in the area with fewer than 3 points is left out and told; not one elsewhere, an inactive
+    one or one unreadable. One with 3 points on one line goes to the planner, which tells it."""
+    front = MAP['areas'][1]
+    for others, told in (([area('dot', 'obstacle', [(3, 4)])],
+                          '1 obstacles of the map left out, no area (fewer than 3 points, or all on one line), the '
+                          'first at (3.00, 4.00)'),
+                         ([area('a', 'obstacle', [(3, 4), (5, 4)]), area('b', 'obstacle', [(2, 2)])],
+                          '2 obstacles of the map left out, no area (fewer than 3 points, or all on one line), the '
+                          'first at (3.00, 4.00)'),
+                         ([area('far', 'obstacle', [(30, 4), (31, 4)])], None),
+                         ([area('gone', 'obstacle', [(3, 4), (5, 4)], active=False)], None),
+                         ([area('none', 'obstacle', [])], None),
+                         ([{'id': 'broken', 'properties': {'type': 'obstacle'}, 'outline': 5}], None)):
+        job = area_job({'areas': [front] + others}, 'front')
+        assert job.obstacles == [] and job.warnings == ([told] if told else []), others
+    line = [(1, 1), (2, 2), (3, 3)]
+    job = area_job({'areas': [front, area('line', 'obstacle', line)]}, 'front')
+    assert job.obstacles == [line] and job.warnings == []
 
 
 def test_nested_areas():

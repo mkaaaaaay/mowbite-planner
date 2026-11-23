@@ -11,7 +11,8 @@ whatever way, where the next section is got to from there, or the closest place 
 heading there: from there it gets anywhere it can, home too). Where none of that holds it's a dead end (a strip narrower
 than the body turns in): the section ends at the last pose before it it gets away from (left out where there's none:
 MowBite OS till M8), or with back_out (a robot that backs up where the plan does) it backs up along its own way to there
-instead.
+instead. Where the asks ran out before it's known whether it gets away, the same, but told as untried, not as a dead
+end.
 
 backed_out: back_out without arrives (OpenMower: mower_logic drives to the next section or home itself, its FTC turning
 on the spot where the section ends first): where that turn doesn't fit, the section backs up along its way to the last
@@ -66,11 +67,12 @@ def reached_starts(plan: CoveragePlan, arrives: Arrives, back_out: bool = False)
     """plan with every section starting where arrives(pose, came_from) says the robot gets to it and ending where it
     gets away from (back_out: backing up to there out of a dead end), see the module. stats['starts']: {'places': [[x,
     y, m of path left out]] where a section starts later (its first pose as planned), 'dropped' and 'untried': [[x, y]]
-    of the sections left out (no pose tried it gets to; not asked about past ARRIVE_ASKS), 'ends': [[x, y, m of path
-    left out]] where a section ends earlier (its last pose as planned), 'trapped': [[x, y]] of the sections left out
-    where no pose gets away (their last pose), 'unmowed_m2': what that leaves unmowed more, 'asks'}; back_out:
-    stats['back_out'] {'places': [[x, y, m backing up]] (the last pose), 'stuck': [], 'corners'}. The warnings say
-    where. Raises PlanningError where no section is left (START_UNREACHABLE first where none is got to from
+    of the sections left out (no pose tried it gets to; not asked about past ARRIVE_ASKS: the ways to them, their first
+    pose, or away from them, their last pose), 'ends': [[x, y, m of path left out]] where a section ends earlier (its
+    last pose as planned; no way away from it, or not asked about past ARRIVE_ASKS), 'trapped': [[x, y]] of the
+    sections left out where no pose gets away (their last pose), 'unmowed_m2': what that leaves unmowed more, 'asks'};
+    back_out: stats['back_out'] {'places': [[x, y, m backing up]] (the last pose), 'stuck': [], 'corners'}. The
+    warnings say where. Raises PlanningError where no section is left (START_UNREACHABLE first where none is got to from
     arrives.start)."""
     walk = _Walk(plan, arrives, back_out)
     walk.run()
@@ -88,7 +90,10 @@ class _Walk:
         self.kept: List[_Kept] = []
         self.cut: List[Tuple[int, int]] = []  # pose ranges [a, b) left out
         self.backs: Dict[int, int] = {}  # a section's last pose: the pose it backs up to from there
-        self.got: Dict[str, list] = {k: [] for k in ('places', 'dropped', 'untried', 'ends', 'trapped', 'backed')}
+        # (ends_untried, away_untried: those of ends and untried where the asks ran out at a section's end)
+        self.got: Dict[str, list] = {k: [] for k in ('places', 'dropped', 'untried', 'ends', 'trapped', 'backed',
+                                                     'ends_untried', 'away_untried')}
+        self.unasked = 0  # (aways not asked about any more)
         self._fp: Any = False
         self._room: Any = False
         start = getattr(arrives, 'start', None)
@@ -117,10 +122,11 @@ class _Walk:
             if self.section(n):
                 n += 1
         while self.kept and not self.kept[-1].out:  # (where the plan ends: away from there)
-            if self.gets_away(self.kept[-1]):
+            away = self.gets_away(self.kept[-1])
+            if away:
                 self.kept[-1].out = True
             else:
-                self.dead_end()
+                self.dead_end(away is None)
 
     def section(self, n: int) -> bool:
         """Section n from where the robot is: True where that's settled (kept, or left out), False where the section
@@ -139,8 +145,9 @@ class _Walk:
             self.keep(n, got)
             return True
         if self.kept and not self.kept[-1].out:
-            if not self.gets_away(self.kept[-1]):
-                self.dead_end()
+            away = self.gets_away(self.kept[-1])
+            if not away:
+                self.dead_end(away is None)
                 return False
             self.kept[-1].out = True
         self.got['untried' if spent else 'dropped'].append(_at(self.poses[a]))
@@ -182,14 +189,15 @@ class _Walk:
             of[k] = None if mine.is_empty else mine
         return of[k]
 
-    def gets_away(self, sec: _Kept) -> bool:
-        """Whether the robot gets away from where it is after sec (where it ends, or where it backed up to)."""
+    def gets_away(self, sec: _Kept) -> Optional[bool]:
+        """Whether the robot gets away from where it is after sec (where it ends, or where it backed up to): away."""
         return self.away(sec.at, sec.at != sec.last)
 
-    def away(self, i: int, backwards: bool = False, asks: Optional[int] = None) -> bool:
+    def away(self, i: int, backwards: bool = False, asks: Optional[int] = None) -> Optional[bool]:
         """Whether the robot gets away from pose i driving forwards: its body turning there whatever way (having backed
         up to it: backwards), or a way to the closest place it does, facing any way (asks: no more asked of arrives than
-        that many in all, else no; what it said already counts)."""
+        that many in all, else no; what it said already counts). None where the asks ran out before the way was asked
+        about (ARRIVE_ASKS, or arrives' own: _Spent)."""
         fp, p = self.footprint(), self.poses[i]
         if fp is None or fp.fits_turn(p.x, p.y, p.yaw, p.yaw + math.pi, backwards):
             return True  # (without the body nothing to check)
@@ -204,13 +212,16 @@ class _Walk:
         try:
             return self.gets_to(to, p)
         except _Spent:
-            return False
+            self.unasked += 1
+            return None
 
-    def dead_end(self) -> None:
-        """The last section kept ends where the robot doesn't get away: back_out backs up from there to the last pose
-        before it gets away from (BACK_OUT_MAX m at most), else the section ends there, else it's left out."""
+    def dead_end(self, untried: bool = False) -> None:
+        """The last section kept ends where the robot doesn't get away (untried: not known, the asks ran out): back_out
+        backs up from there to the last pose before it gets away from (BACK_OUT_MAX m at most), else the section ends
+        there, else it's left out. Told as untried where the asks ran out on the way to that."""
         sec = self.kept[-1]
         e = sec.last
+        unasked = self.unasked
         to = self.back_to(sec, self.back_out)
         if self.back_out:
             m = path_length(self.poses[to:e + 1]) if to is not None else math.inf
@@ -220,9 +231,12 @@ class _Walk:
                 sec.at, sec.out = to, True
                 return
             to = self.back_to(sec, False)  # (none, backing up that far, or not fitting: it ends earlier instead)
+        untried = untried or self.unasked > unasked
         if to is not None and to > sec.first:
             self.cut.append((to + 1, e + 1))
             self.got['ends'].append(_at(self.poses[e]) + [round(path_length(self.poses[to:e + 1]), 2)])
+            if untried:
+                self.got['ends_untried'].append(self.got['ends'][-1])
             sec.last = sec.at = to
             sec.out = True
             return
@@ -230,7 +244,11 @@ class _Walk:
         if sec.place is not None:
             self.got['places'].remove(sec.place)
         self.cut.append((self.own(sec.first), e + 1))
-        self.got['trapped'].append(_at(self.poses[e]))
+        if untried:
+            self.got['untried'].append(_at(self.poses[e]))
+            self.got['away_untried'].append(self.got['untried'][-1])
+        else:
+            self.got['trapped'].append(_at(self.poses[e]))
         if self.kept:
             self.kept[-1].out = False  # (known only to get to this one: away from there again)
 
@@ -278,7 +296,7 @@ class _Walk:
         if not self.cut and not self.backs:
             return dataclasses.replace(plan, stats=stats)
         out = _rebuilt(dataclasses.replace(plan, stats=stats), self.cut, self.backs)
-        if not out.poses and self.start is not None and not got['trapped']:
+        if not out.poses and self.start is not None and not got['trapped'] and not got['away_untried']:
             raise PlanningError(f'{START_UNREACHABLE}no way from the start ({self.start.x:.2f}, {self.start.y:.2f}) '
                                 'gets to any section of the plan facing its heading: at ' +
                                 ', '.join(f'({x:.2f}, {y:.2f})' for x, y in got['dropped'] + got['untried']) +
@@ -286,33 +304,47 @@ class _Walk:
                                 word='START_UNREACHABLE')
         if not out.poses:
             raise PlanningError('no way gets to any section of the plan facing its heading' +
-                                (' and away from it again driving forwards' if got['trapped'] else '') + ': at ' +
+                                (' and away from it again driving forwards' if got['trapped'] or got['away_untried']
+                                 else '') + ': at ' +
                                 ', '.join(f'({x:.2f}, {y:.2f})' for x, y in got['dropped'] + got['untried'] +
-                                          got['trapped']))
+                                          got['trapped']) +
+                                (' (the ways asked about ran out before the last ones)' if got['untried'] else ''))
         width = plan.config.mower_width if plan.config is not None else 0.0
         if width > 0 and self.cut:
             starts['unmowed_m2'] = round(swept_area(plan, width).difference(swept_area(out, width)).area, 3)
-        return dataclasses.replace(out, warnings=list(plan.warnings) + _told(starts, got['backed']))
+        return dataclasses.replace(out, warnings=list(plan.warnings) + _told(starts, got))
 
 
-def _told(starts: Dict[str, Any], backed: List[list]) -> List[str]:
+def _told(starts: Dict[str, Any], got: Dict[str, list]) -> List[str]:
     """The warnings of reached_starts."""
     def where(xys):
         return ', '.join(f'({p[0]:.2f}, {p[1]:.2f})' for p in xys)
 
+    def but(xys, these):  # (xys without the very entries of these)
+        return [p for p in xys if not any(p is q for q in these)]
+
     out = []
     places, dropped, untried, ends, trapped = (starts[k] for k in ('places', 'dropped', 'untried', 'ends', 'trapped'))
+    backed, away_untried, ends_untried = got['backed'], got['away_untried'], got['ends_untried']
+    to_untried, dead_ends = but(untried, away_untried), but(ends, ends_untried)
     if places:
         out.append(f'{len(places)} sections start later where no way gets to their start facing its heading, '
                    f'{sum(p[2] for p in places):.1f} m of loops and lanes left out: at {where(places)}')
     if dropped:
         out.append(f'{len(dropped)} sections left out: no way gets to them facing their heading: at {where(dropped)}')
-    if untried:
-        out.append(f'{len(untried)} sections left out: the ways to them not tried past {ARRIVE_ASKS}: at '
-                   f'{where(untried)}')
-    if ends:
-        out.append(f'{len(ends)} sections end earlier where no way gets away from their end driving forwards, '
-                   f'{sum(p[2] for p in ends):.1f} m of loops and lanes left out: at {where(ends)}')
+    if to_untried:
+        out.append(f'{len(to_untried)} sections left out: the ways to them not tried past {ARRIVE_ASKS}: at '
+                   f'{where(to_untried)}')
+    if away_untried:
+        out.append(f'{len(away_untried)} sections left out: the ways away from them not tried past {ARRIVE_ASKS}: '
+                   f'at {where(away_untried)}')
+    if dead_ends:
+        out.append(f'{len(dead_ends)} sections end earlier where no way gets away from their end driving forwards, '
+                   f'{sum(p[2] for p in dead_ends):.1f} m of loops and lanes left out: at {where(dead_ends)}')
+    if ends_untried:
+        out.append(f'{len(ends_untried)} sections end earlier where the ways away from their end were not tried past '
+                   f'{ARRIVE_ASKS}, {sum(p[2] for p in ends_untried):.1f} m of loops and lanes left out: at '
+                   f'{where(ends_untried)}')
     if trapped:
         out.append(f'{len(trapped)} sections left out: no way gets away from them driving forwards: at '
                    f'{where(trapped)}')

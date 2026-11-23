@@ -831,6 +831,14 @@ def test_body_and_blade_settings_out_of_range():
         with pytest.raises(PlanningError, match=match):
             PlannerConfig(**kw).validate()
     assert PlannerConfig().with_overrides({'robot_front': 1}).robot_front == 1.0
+    # a body without an area: refused, not a crash on the way
+    for kw, match in ((dict(robot_width=0.0), 'robot_width must be > 0'),
+                      (dict(robot_width=0.0, robot_front=0.4, robot_rear=0.1), 'robot_width must be > 0'),
+                      (dict(robot_width=0.4, robot_front=0.0, robot_rear=0.0), r'robot_front \+ robot_rear'),
+                      (dict(robot_front=0.0, robot_rear=0.0), r'robot_front \+ robot_rear must be > 0')):
+        with pytest.raises(PlanningError, match=match):
+            PlannerConfig(**kw).validate()
+    PlannerConfig(robot_width=0.4, robot_front=0.0, robot_rear=0.1).validate()  # (base_link at its front)
 
 
 # the body (robot_width, robot_front, robot_rear or robot_outline) ------------------------------------------
@@ -4260,3 +4268,18 @@ def test_island_loops_without_outline_loops():
         plan = plan_coverage(rect(0, 0, 8, 6), [bed], cfg, start=(1, 1, 0.0))
         check_invariants(plan, cfg, [bed])
         assert any(s.kind == PERIMETER for s in plan.segments) is looped
+
+
+@pytest.mark.parametrize('body', [{}, NX60I])
+def test_obstacles_without_an_area_told(body):
+    """Obstacles with fewer than 3 points or all on one line have no area: left out (planned as without them), the
+    warnings say so where they lie in the area."""
+    lawn = rect(0, 0, 6, 4)
+    cfg = PlannerConfig(mower_width=0.3, **body)
+    plain = plan_coverage(lawn, [], cfg)
+    got = plan_coverage(lawn, [[(1, 1), (2, 2)], [(3, 1), (3, 2), (3, 3)], [(4, 2)], [], [(10, 10), (11, 11)]], cfg)
+    assert got.poses == plain.poses and got.segments == plain.segments
+    assert [w for w in got.warnings if w not in plain.warnings] == [
+        '3 obstacles left out, no area (fewer than 3 points, or all on one line), the first at (1.00, 1.00)']
+    assert len(got.warnings) == len(plain.warnings) + 1
+    assert plan_coverage(lawn, [[(10, 10), (11, 11)]], cfg).warnings == plain.warnings  # (none in the area)
