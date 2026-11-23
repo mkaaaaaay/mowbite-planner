@@ -12,11 +12,15 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
   <!-- OpenMower's planner messages: PlanPath.srv and Path.msg -->
   <exec_depend>slic3r_coverage_planner</exec_depend>
   <!-- OpenMower's RPC messages (planner.settings, planner.settings.set, planner.plan) -->
   <exec_depend>xbot_mqtt</exec_depend>
   <!-- OpenMower's state and rain sensor (leftovers_auto) -->
   <exec_depend>mower_msgs</exec_depend>
+  <!-- OpenMower's pose (the calibration's recording) -->
+  <exec_depend>xbot_msgs</exec_depend>
+  <!-- shapely 2 is needed (pip install shapely==2.0.7), Noetic's 1.7 is too old: the node says so and ends -->
   <exec_depend>python3-shapely</exec_depend>
 </package>

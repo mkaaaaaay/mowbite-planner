@@ -9,4 +9,4 @@ catkin_package()
 
 catkin_install_python(PROGRAMS nodes/mowbite_planner_node
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
-install(DIRECTORY launch DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+install(DIRECTORY launch web DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

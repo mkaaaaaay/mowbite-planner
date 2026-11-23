@@ -751,7 +751,9 @@ function facts() {
     box.append(s);
   }
   const notes = (plan.warnings || []).slice();
-  if (Object.keys(pending).length) notes.unshift('Preview with your changes, not saved yet.');
+  if (Object.keys(pending).length || Object.keys(pendingArea).length) {
+    notes.unshift('Preview with your changes, not saved yet.');
+  }
   warn.textContent = notes.join(' · ');
 }
 

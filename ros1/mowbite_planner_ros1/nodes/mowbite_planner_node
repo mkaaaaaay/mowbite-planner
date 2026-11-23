@@ -305,7 +305,10 @@ NO_JOB = ('IDLE', 'AREA_RECORDING')
 # s between looks at the master's /run_id, a new one means it restarted and doesn't know this node any more
 MASTER_CHECK = 5.0
 # the settings page (WebPage): its folder, the most a request may send (bytes)
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'web')
+HERE = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.join(HERE, '..', 'web')
+if not os.path.isdir(WEB_DIR):  # (installed by catkin: the node in lib/<package>, the page in share/<package>)
+    WEB_DIR = os.path.join(HERE, '..', '..', 'share', 'mowbite_planner_ros1', 'web')
 WEB_MAX_REQUEST = 10 * 1024 * 1024
 # s a client of the web page may take to send or read what's on its way (its own thread held that long at most)
 WEB_TIMEOUT = 10.0
