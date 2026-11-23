@@ -376,7 +376,7 @@ def test_planning_ahead_and_the_quick_rpcs(make, planned, monkeypatch):
     ahead.join(60)
     lines, _ = rpc(node, 'planner.log', {'limit': 50}, 's4')
     said = [line['msg'] for line in lines['lines']]
-    assert any('planning a ahead stopped (a request waits), it waits again' in m for m in said)
+    assert any('planning a ahead stopped (mower_logic waits), it waits again' in m for m in said)
     assert any('1 areas planned ahead' in m for m in said)
 
 
@@ -882,12 +882,13 @@ def test_plan_coverage_code(make, planned):
     assert not res.success and res.code == 'NOT_READY' and 'map/status MISMATCH' in res.message
     give(node, 'map/status', MapStatus(datum_state=MapStatus.DATUM_MATCH))
     res = plan_area(node)
-    assert res.success and res.code == ''
+    assert res.success and res.code == '' and node.core.pinned  # (the job's plan, kept till it ends)
     request = PlanCoverage.Request(boundary=polygon(GARDEN), overrides=[override('robot_width', 0.3)])
     assert node._on_plan_coverage(request, PlanCoverage.Response()).code == 'BAD_REQUEST'
+    # (an outline of no area of the map: not planned without the map's areas to keep out of, margins and dock)
     for again in range(2):
         res = plan_area(node, [(0.0, 0.0), (1.0, 1.0)])
-        assert not res.success and res.code == 'NO_PLAN', res.message
+        assert not res.success and res.code == 'BAD_REQUEST' and 'no area of the map' in res.message, res.message
 
 
 @fake_only
@@ -1042,15 +1043,16 @@ def test_stored_before_the_geometry(make, tmp_path):
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(stored))
     node = make(body=None)
-    assert node.core.current.stored == {}
+    # (only the one that doesn't go with it left out till then)
+    assert node.core.current.stored == {'perimeter_passes': 4, 'angle': 30.0}
+    assert node.core.left_out == {'lane_spacing_max': 0.25}
     geometry(node, mower_width=0.281)
     assert node.core.current.stored == stored and node.core.current.base.perimeter_passes == 4
     assert json.loads(path.read_text()) == stored
     path.write_text(json.dumps(stored))
     later = make(body=None)
     refused = rpc(later, 'planner.settings.set', {'overlap': 0.1}, 'r2')[1]  # (0.25 is more than 0.22 still)
-    assert refused[1].startswith('the settings stored before (angle, lane_spacing_max, perimeter_passes) don\'t go '
-                                 'with the mower: ')
+    assert refused[1].startswith('the settings stored before (lane_spacing_max) don\'t go with the mower: ')
     assert json.loads(path.read_text()) == stored
     geometry(later, mower_width=0.281)
     assert rpc(later, 'planner.settings.set', {'overlap': 0.1}, 'r3')[1] is None

@@ -190,6 +190,7 @@ has to be on (restart: unless-stopped, see compose.yaml).
 import dataclasses
 import hashlib
 import http.server
+import ipaddress
 import itertools
 import json
 import logging
@@ -197,6 +198,7 @@ import math
 import os
 import pickle
 import shutil
+import socket
 import threading
 import time
 import uuid
@@ -258,6 +260,9 @@ REMOTE_STALL = 10.0
 REMOTE_QUIET = 600.0
 REMOTE_CATCH_UP = 120.0
 REMOTE_SETTLE = 3.0
+# s mower_logic's plan is waited for on the house at most (it waits with no time limit, the mower out there); no catching
+# up for it
+REMOTE_MOWER = 120.0
 REMOTE_SMALL = 65536
 # why drive slope and reverse are planned forwards and back_out is off: OpenMower's FTC backs up only with this
 # (open_mower_ros PR #371)
@@ -278,8 +283,13 @@ SIM_PARAMS = {'wheel_distance': '/ll/services/diff_drive/wheel_distance_m',
 # RPC methods answered on a thread of their own (they take a while, the others go on meanwhile)
 BACKGROUND = ('planner.simulate', 'planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive',
               'planner.calib.start', 'planner.calib.check')
-# s OpenMower may take for map.replace (as the MowBite app gives it)
+# s OpenMower may take for map.replace (as the MowBite app gives it); s mower_logic's plan waits for the first map
+# (use_map) before it's refused
 MAP_WAIT = 60.0
+MAP_FIRST = 30.0
+# mower_logic's states (STATE_TOPIC) with no job of its own: a plan asked for then is a preview (mowing.plan), it's
+# neither kept for a job (pin) nor takes the leftovers armed
+NO_JOB = ('IDLE', 'AREA_RECORDING')
 # s between looks at the master's /run_id, a new one means it restarted and doesn't know this node any more
 MASTER_CHECK = 5.0
 # the settings page (WebPage): its folder, the most a request may send (bytes)
@@ -370,7 +380,8 @@ class WebPage:
     """The settings page with a preview of the plans, http://<mower>:<port>/ without the MowBite app: GET / the page
     (WEB_DIR's index.html), GET /map the node's map (null before there is one), POST /rpc {method, params} a method
     of methods like over MQTT, answered {result} or {error: {code, message}}. Only JSON is taken (another web page
-    can't send it without asking first). No login: anyone on the network may change the settings, like over MQTT."""
+    can't send it without asking first), /map and /rpc only for a Host that's this mower (host_ok: a site of another
+    name pointing at it gets 403). No login: anyone on the network may change the settings, like over MQTT."""
 
     def __init__(self, port, methods, the_map):
         page = self
@@ -410,12 +421,16 @@ class WebPage:
             except OSError as e:
                 return self.send(req, 500, ('no page: %s' % e).encode(), 'text/plain; charset=utf-8')
         if path == '/map':
+            if not host_ok(req.headers.get('Host')):
+                return self.send(req, 403, b'not this mower\'s name', 'text/plain')
             return self.send(req, 200, json.dumps(self.the_map()).encode(), 'application/json')
         self.send(req, 404, b'not found', 'text/plain')
 
     def post(self, req):
         if req.path.split('?', 1)[0] != '/rpc':
             return self.send(req, 404, b'not found', 'text/plain')
+        if not host_ok(req.headers.get('Host')):
+            return self.send(req, 403, b'not this mower\'s name', 'text/plain')
         if req.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
             return self.send(req, 415, b'JSON only', 'text/plain')
         try:
@@ -436,6 +451,23 @@ class WebPage:
         out = '{"result": %s}' % result if error is None else json.dumps({'error': {'code': error[0],
                                                                                      'message': error[1]}})
         self.send(req, 200, out.encode(), 'application/json')
+
+
+def host_ok(host):
+    """Whether a request's Host header names this mower: an IP address, localhost, its host name or that with .local
+    (any port). Another name is another site's pointing here (DNS rebinding), not the settings page's."""
+    host = (host or '').strip().lower()
+    if host.startswith('['):  # ([v6 address]:port)
+        name = host[1:].split(']', 1)[0]
+    else:
+        name = host.rsplit(':', 1)[0] if host.count(':') == 1 else host
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    me = socket.gethostname().lower()
+    return bool(name) and name.rstrip('.') in ('localhost', me, me + '.local')
 
 
 class Calibration:
@@ -901,10 +933,10 @@ class RemotePlanning:
         return why, {'reachable': reachable, 'arch': hello.get('arch') if reachable else None,
                      'code_match': code_match, 'stack_match': stack_match, 'why': why or None}
 
-    def ready(self):
+    def ready(self, catch_up=True):
         """Why the house isn't asked now ('' where it is): state's, or it didn't answer a while ago. It waits
-        REMOTE_SETTLE s after connecting for the retained hello, and within REMOTE_CATCH_UP s of the start for a house
-        on the same stack but another code: its watcher fetches the code of here (a planner update)."""
+        REMOTE_SETTLE s after connecting for the retained hello, and (catch_up) within REMOTE_CATCH_UP s of the start
+        for a house on the same stack but another code: its watcher fetches the code of here (a planner update)."""
         while True:
             why, house = self.state()
             with self.cond:
@@ -912,7 +944,7 @@ class RemotePlanning:
                 if not why:
                     return '' if now >= self.quiet else 'it didn\'t answer, asked again from %s' % time.strftime(
                         '%H:%M', time.localtime(time.time() + self.quiet - now))
-                fetching = house['stack_match'] and now < self.started + REMOTE_CATCH_UP
+                fetching = catch_up and house['stack_match'] and now < self.started + REMOTE_CATCH_UP
                 if not (fetching or self.connected and now < self.connected + REMOTE_SETTLE):
                     return why
                 stop_here()
@@ -999,8 +1031,12 @@ class MowbitePlannerRos1(PlannerCore):
         # planner.calib.*: the recording and its result in calib_dir
         self.calib = Calibration(os.path.expanduser(rospy.get_param('~calib_dir', os.path.join(
             ros_home, 'mowbite_calib'))), lambda payload: self.publish(CALIB_TOPIC, payload, True), self.code)
-        if rospy.get_param('~use_map', True):
+        self.use_map = bool(rospy.get_param('~use_map', True))
+        if self.use_map:
             rospy.Subscriber(rospy.get_param('~map_topic', '/mower_map_service/json_map'), String, self.on_map)
+        # mower_logic's state as it last said it (None: not yet)
+        self.state_name = None
+        rospy.Subscriber(STATE_TOPIC, HighLevelStatus, self.on_state, queue_size=1)
         rospy.Subscriber('/xbot_monitoring/mqtt_publish', MqttPublish, self.on_publish)
         self.action = rospy.Publisher(ACTION_TOPIC, String, queue_size=1)
         self.hold = HoldReader() if rospy.get_param('~hold', HOLD) else None
@@ -1102,6 +1138,14 @@ class MowbitePlannerRos1(PlannerCore):
     def on_map(self, msg):
         self.set_map(msg.data)
 
+    def on_state(self, msg):
+        self.state_name = msg.state_name
+
+    def mowing(self):
+        """Whether mower_logic is in a job of its own (not idle: a plan asked for is the job's), as far as it's known
+        (not known: it is)."""
+        return self.state_name not in NO_JOB
+
     def on_publish(self, msg):
         """mower_logic's events (xbot_mqtt.publishEvent)."""
         if msg.topic == EVENTS_TOPIC:
@@ -1171,6 +1215,8 @@ class MowbitePlannerRos1(PlannerCore):
     def simulated(self, params, status, area):
         """planner.simulate's answer, saying how far it got to status(phase, fraction of all of it) (area[0]: the area's
         id once it's planned)."""
+        if self.current.planner == 'slic3r':  # (it'd simulate a plan the mower doesn't get)
+            raise PlanningError('planner slic3r: no plan simulated')
         params = dict(params)
         model = self.sim_model(params.pop('model', None))
         seeds = params.pop('seeds', 1)
@@ -1369,12 +1415,16 @@ class MowbitePlannerRos1(PlannerCore):
         REMOTE_FIRST without one), REMOTE_STALL s without a word. PlanningError: the planner's no there."""
         if not self.current.remote_planning or self.remote is None:
             return None
-        why = self.remote.ready()
+        mower = self.worker.urgency() == MOWER  # (mower_logic waits: briefly)
+        why = self.remote.ready(catch_up=not mower)
         if not why:
             took = self.progress.took.get(area_id)
+            wait = max(REMOTE_MIN_WAIT, REMOTE_TIMES * took) if took else REMOTE_FIRST
             self.progress.where('house')
-            data, why = self.remote.ask(key, form, max(REMOTE_MIN_WAIT, REMOTE_TIMES * took) if took else REMOTE_FIRST,
-                                        self.progress.step)
+            try:
+                data, why = self.remote.ask(key, form, min(wait, REMOTE_MOWER) if mower else wait, self.progress.step)
+            except PlanningError as e:  # (its no: planned here all the same, the no of here counts)
+                data, why = None, 'its no: %s' % e
             if data is not None:
                 try:
                     plan = plan_from(unpack(data), args, reach_over, unmowed, bodies)
@@ -1392,8 +1442,18 @@ class MowbitePlannerRos1(PlannerCore):
         return None
 
     def handle(self, req):
-        """mower_logic's plan_path, in the worker before anything else waiting there."""
+        """mower_logic's plan_path (and mowing.plan's), in the worker before anything else waiting there. With use_map
+        it waits MAP_FIRST s at most for the first map."""
+        if self.use_map and self.current.planner != 'slic3r':
+            self.map_came.wait(MAP_FIRST)
         return self.worker.run(MOWER, self.plan_path, req, job='mower')
+
+    def refuse(self, why):
+        """No plan (a failed call: mower_logic docks and ends the job, its JOB_COMPLETE then isn't a finished mow)."""
+        rospy.logwarn('MowBite Planner: no plan: %s', why)
+        if self.mowing():
+            self.refused_job = self.job
+        raise rospy.ServiceException('MowBite Planner: %s' % why)
 
     def plan_path(self, req):
         if self.current.planner == 'slic3r':  # mower_logic's request as it came
@@ -1403,31 +1463,39 @@ class MowbitePlannerRos1(PlannerCore):
                 return res
             except PlanningError as e:
                 rospy.logerr('MowBite Planner: %s, the MowBite Planner plans', e)
-        res = PlanPathResponse()
+        data = self.current_map()
+        why = self.unusable() or ('no map from OpenMower in %.0f s' % MAP_FIRST if self.use_map and data is None
+                                  else '')
+        if why:  # (planned without the map's areas to keep out of, margins, dock... it'd be another plan)
+            self.refuse(why)
+        mowing = self.mowing()
         boundary = [(p.x, p.y) for p in req.outline.points]
         obstacles = [[(p.x, p.y) for p in hole.points] for hole in req.holes]
-        with self.lock:
-            data = self.map
-        index = match_area(data, boundary) if data else None
         job, drivable, keep_out, dock, reach_over, unmowed = None, [], [], None, [], []
+        paths = []
         try:
+            index = match_area(data, boundary) if data else None
             if index is not None:
                 job = area_job(data, index)
                 # mower_logic sends the map's obstacles (or the ones mowing.plan was given), not these
                 obstacles += job.mow_around
                 drivable, keep_out, dock, reach_over = job.drivable, job.keep_out, job.dock, job.navigation
                 unmowed = job.unmowed
-            armed, left = self.armed_plan(job)
+            elif data:  # (a preview of an outline being edited: fine; mower_logic's own: the map's areas changed)
+                (rospy.logwarn if mowing else rospy.loginfo)(
+                    'MowBite Planner: the outline is no area of the map, planned without the map\'s areas to keep out '
+                    'of, margins and dock')
+            armed, left = self.armed_plan(job, mowing)
             if armed:
                 # planner.leftovers armed: what the mow before left in this area, nothing where it left nothing
                 stamp = rospy.Time.now()
                 for is_outline, first, last in plan_pieces(left, self.max_poses) if left is not None else ():
-                    res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
-                                                 path=self.to_path(left.poses[first:last + 1], stamp)))
+                    paths.append(PlannerPath(is_outline=1 if is_outline else 0,
+                                             path=self.to_path(left.poses[first:last + 1], stamp)))
                 rospy.loginfo('MowBite Planner: area %s, the leftovers: %s', job.area_id, 'nothing' if left is None
-                              else '%d paths, %.0f m, %d passes' % (len(res.paths), left.stats['path_length'],
+                              else '%d paths, %.0f m, %d passes' % (len(paths), left.stats['path_length'],
                                                                    left.stats['leftovers']['passes']))
-                return res
+                return PlanPathResponse(paths=paths)
             cfg = self.settings(req, job)
             if job is not None and cfg.nested_areas:
                 obstacles += job.nested  # the mowing areas in this one, mowed on their own
@@ -1439,18 +1507,19 @@ class MowbitePlannerRos1(PlannerCore):
             plan, kept = self.kept_plan(boundary, obstacles, cfg, start=dock, end=dock[:2] if dock else None,
                                         drivable=drivable, keep_out=keep_out, margins=margins, reach_over=reach_over,
                                         unmowed=unmowed, bodies=bodies)
-            self.pin(self.local.key)
+            if mowing:  # (a preview's plan isn't the job's)
+                self.pin(self.local.key)
+            stamp = rospy.Time.now()
+            for is_outline, first, last in plan_pieces(plan, self.max_poses):
+                paths.append(PlannerPath(is_outline=1 if is_outline else 0,
+                                         path=self.to_path(plan.poses[first:last + 1], stamp)))
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
-            return res
+            return PlanPathResponse()
         except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
             rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e, exc_info=True)
-            return res
+            return PlanPathResponse()
         self.serve(job.area_id if job else None, plan)
-        stamp = rospy.Time.now()
-        for is_outline, first, last in plan_pieces(plan, self.max_poses):
-            res.paths.append(PlannerPath(is_outline=1 if is_outline else 0,
-                                         path=self.to_path(plan.poses[first:last + 1], stamp)))
         st = plan.stats
         if not plan.warnings:
             warnings = ''
@@ -1460,10 +1529,10 @@ class MowbitePlannerRos1(PlannerCore):
             warnings = '. ' + '; '.join(plan.warnings)
             self.warned[id(plan)] = plan
         rospy.loginfo('MowBite Planner: %s%d paths, %d poses, %.0f m, lanes at %.1f deg, %s%s',
-                      'area %s, ' % job.area_id if job else '', len(res.paths), len(plan.poses),
+                      'area %s, ' % job.area_id if job else '', len(paths), len(plan.poses),
                       st['path_length'], math.degrees(plan.angle),
                       'kept from before' if kept else '%.0f ms' % (1000 * st['planning_time']), warnings)
-        return res
+        return PlanPathResponse(paths=paths)
 
     def to_path(self, poses, stamp):
         header = Header(frame_id=self.frame_id, stamp=stamp)

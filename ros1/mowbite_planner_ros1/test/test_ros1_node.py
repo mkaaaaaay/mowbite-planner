@@ -14,6 +14,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import struct
 import sys
 import tempfile
@@ -242,6 +243,12 @@ def send_map(data):
     rospy.subscribers['/mower_map_service/json_map'](types.SimpleNamespace(data=json.dumps(data)))
 
 
+def unmapped(node):
+    """node planning mower_logic's requests without a map till one comes (as with use_map false), not refusing them."""
+    node.use_map = False
+    return node
+
+
 @pytest.fixture
 def planner():
     rospy.params = {}
@@ -267,6 +274,8 @@ def planner():
     node_module.REMOTE = False
     # (a finished mow's track is there at once, test_track_read_when_the_job_ended waits for it)
     core.TRACK_WAIT = 0.0
+    # (mower_logic's plan refused at once without a map, test_no_map waits for one)
+    node_module.MAP_FIRST = 0.0
     # (the progress of the tests' nodes before off: a change of what waits is sent a while after, into this test)
     for node in NODES:
         node.progress.publish = lambda payload: None
@@ -305,6 +314,7 @@ def check(res, max_poses=node_module.MAX_PATH_POSES):
 
 
 def test_answers_like_slic3r(planner):
+    unmapped(planner)
     assert '/slic3r_coverage_planner/plan_path' in rospy.services
     res = planner.handle(request())
     check(res)
@@ -322,6 +332,7 @@ def test_answers_like_slic3r(planner):
 
 
 def test_same_request_same_plan(planner, monkeypatch):
+    unmapped(planner)
     a = [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
     planner.plans.clear()  # planned again, not the kept one
     b = [(p.position.x, p.position.y, p.orientation.z) for p in poses(planner.handle(request()))]
@@ -344,6 +355,7 @@ def test_same_request_same_plan(planner, monkeypatch):
 
 
 def test_area_settings_and_dock_from_the_map(planner):
+    unmapped(planner)
     plain = planner.handle(request())
     send_map(the_map({'fill_pattern': 'crosshatch', 'angle_strategy': 'longest_edge'}))
     res = planner.handle(request(angle=0.7))
@@ -365,8 +377,9 @@ def test_unknown_outline_is_planned_without_the_map(planner):
 
 
 def test_concentric_and_splitting(planner):
+    unmapped(planner)
     rospy.params = {'~max_path_poses': 400}
-    small = node_module.MowbitePlannerRos1()
+    small = unmapped(node_module.MowbitePlannerRos1())
     res = small.handle(request(fill_type=Request.FILL_CONCENTRIC))
     check(res, 400)
     assert len(res.paths) > 10
@@ -377,12 +390,13 @@ def test_concentric_and_splitting(planner):
             assert math.hypot(pb.x - pa.x, pb.y - pa.y) <= 0.1 + 1e-6
     # OpenMower's FTC controller needs 3 poses a path, pieces of at most 3 can't always have them: at least 4
     rospy.params = {'~max_path_poses': 3}
-    tiny = node_module.MowbitePlannerRos1()
+    tiny = unmapped(node_module.MowbitePlannerRos1())
     assert tiny.max_poses == 4
     check(tiny.handle(request(outline=[(0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0)], holes=[])), 4)
 
 
 def test_split_area(planner):
+    unmapped(planner)
     # a bed across the garden from edge to edge: both halves get their loops and lanes
     res = planner.handle(request(holes=[[(9.0, -1.0), (11.0, -1.0), (11.0, 11.0), (9.0, 11.0)]]))
     check(res)
@@ -393,41 +407,44 @@ def test_split_area(planner):
 
 
 def test_bad_area_gives_no_paths(planner):
+    unmapped(planner)
     res = planner.handle(request(outline=[(0.0, 0.0), (1.0, 1.0)]))
     assert res.paths == []
     assert any(level == 'warn' for level, _ in rospy.log)
 
 
 def test_settings_parameter(planner):
+    unmapped(planner)
     rospy.params = {'~settings': {'lane_order': 'snake', 'turn_types': 'detour,pivot'}}
-    p = node_module.MowbitePlannerRos1()
+    p = unmapped(node_module.MowbitePlannerRos1())
     assert p.base.lane_order == 'snake' and p.base.turn_types == ('detour', 'pivot')
     check(p.handle(request()))
 
 
 def test_settings_parameter_angle(planner):
+    unmapped(planner)
     # an angle or angle_strategy in ~settings beats mower_logic's angle; lane spacing (overlap), loops and offset
     # set here beat mower_logic's, the loops' skip flags always come with the request
     for settings, angle in (({}, 0.7), ({'angle': 0.3}, 0.3), ({'angle_strategy': 'longest_edge'}, None),
                             ({'angle': None}, None)):
         rospy.params = {'~settings': dict(settings, perimeter_passes=5, overlap=0.5, skip_outline_loops=True)}
-        cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
+        cfg = unmapped(node_module.MowbitePlannerRos1()).settings(request(angle=0.7), None)
         assert cfg.angle == angle and cfg.perimeter_passes == 5 and cfg.lane_spacing == pytest.approx(0.09)
         assert not cfg.skip_outline_loops and cfg.lane_overlap_passes == request().outline_overlap_count
         rospy.params = {'~settings': settings}
-        cfg = node_module.MowbitePlannerRos1().settings(request(angle=0.7), None)
+        cfg = unmapped(node_module.MowbitePlannerRos1()).settings(request(angle=0.7), None)
         assert cfg.perimeter_passes == 3 and cfg.lane_spacing == pytest.approx(0.13)
     # an area's own outline_count still beats the one set here
     rospy.params = {'~settings': {'perimeter_passes': 5}}
-    assert node_module.MowbitePlannerRos1().settings(request(), node_module.area_job(
+    assert unmapped(node_module.MowbitePlannerRos1()).settings(request(), node_module.area_job(
         the_map(outline_count=2), 0)).perimeter_passes == 2
     rospy.params = {'~settings': {'angle_strategy': 'longest_edge'}}
-    node_module.MowbitePlannerRos1().handle(request(angle=0.7))
+    unmapped(node_module.MowbitePlannerRos1()).handle(request(angle=0.7))
     assert lane_angle() == 0.0
     # an area with an angle of its own: mower_logic's angle counts (its mow_angle_offset in it), the area's
     # planner property still beats it
     rospy.params = {'~settings': {'angle': 0.3}}
-    p = node_module.MowbitePlannerRos1()
+    p = unmapped(node_module.MowbitePlannerRos1())
     for props, angle in (({}, 0.3), ({'angle': 0.5}, 0.7), ({'angle': 0.5, 'planner': {'angle': 0.2}}, 0.2),
                          ({'angle': 0.5, 'planner': {'angle_strategy': 'min_width'}}, None)):
         assert p.settings(request(angle=0.7), node_module.area_job(the_map(**props), 0)).angle == angle, props
@@ -449,6 +466,7 @@ def test_mowbite_properties_need_mower_map_to_keep_them(planner, keeps_all):
     extra area properties (open_mower_ros #364), before it they were dropped. An area not to mow keeps the blade off
     it either way ('mowable' is mower_map's own: without mow_around it's an area not to mow, plan_coverage's
     unmowed)."""
+    unmapped(planner)
     plain = planner.handle(request())
     pond = [(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0)]
     send_map(through_mower_map(the_map({'fill_pattern': 'crosshatch'}, angle_min=0.2, angle_max=0.4, areas=[
@@ -555,6 +573,7 @@ def test_no_way_over_navigation_areas(planner):
 
 
 def test_areas_with_the_same_outline(planner):
+    unmapped(planner)
     # the area with the request's outline that's mowed counts, not an inactive or not mowable one before it
     # (else the first one with it)
     plain = planner.handle(request())
@@ -571,6 +590,7 @@ def test_areas_with_the_same_outline(planner):
 
 
 def test_areas_with_the_same_id_or_none(planner):
+    unmapped(planner)
     # the area with the request's outline counts, not the first one with its id (one that can't be planned)
     plain = planner.handle(request())
     other = area('a', [(30.0, 0.0), (40.0, 0.0), (40.0, 10.0), (30.0, 10.0)], type='mow', planner={'turn_types': 5})
@@ -986,11 +1006,12 @@ def test_rpc_settings_set_refused(planner, params, message):
 
 
 def test_stored_settings_that_dont_fit_are_left_out(planner):
+    unmapped(planner)
     for content in ('{"turn_radius": -2}', '[1]', 'not json', '{"overlap_typo": 1}'):
         with open(stored_file(), 'w') as f:
             f.write(content)
         rospy.log.clear()
-        node = node_module.MowbitePlannerRos1()
+        node = unmapped(node_module.MowbitePlannerRos1())
         assert node.base.turn_radius == 0.25 and node.current.stored == {}
         assert any(level == 'warn' and 'stored settings' in line for level, line in rospy.log), content
         check(node.handle(request()))
@@ -1253,6 +1274,7 @@ def test_plans_of_another_code_dropped(planner, monkeypatch):
 def test_warnings_logged_once_a_plan(planner):
     """A plan's warnings go to the log once, asked for again (a preview, the mow) only how many. Another plan, its own
     warnings again."""
+    unmapped(planner)
     planner.handle(request())  # (no body size set: the plan warns of it)
     planner.handle(request())
     planner.handle(request(angle=0.5))
@@ -1470,6 +1492,7 @@ def test_planner_slic3r(planner, monkeypatch):
     as it came and its answer back as it is; planner.plan asks it like mower_logic would (OpenMower's settings, none of
     the node's) and gives its paths as a plan, nothing planned ahead. Where the slic3r planner doesn't answer the
     MowBite Planner plans, and the log says why. planner null: the MowBite Planner again."""
+    unmapped(planner)
     asked = []
     answer = node_module.PlanPathResponse(paths=[slic3r_path(1, [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0)]),
                                                  slic3r_path(0, [(1.0, 2.0), (2.0, 2.0), (3.0, 2.0), (4.0, 2.0)])])
@@ -1506,7 +1529,7 @@ def test_planner_slic3r(planner, monkeypatch):
     assert any(level == 'error' and 'no answer from the slic3r planner' in line for level, line in rospy.log)
     # after a restart still, then back to the MowBite Planner
     monkeypatch.setattr(rospy, 'wait_for_service', lambda name, timeout=None: None, raising=False)
-    again = node_module.MowbitePlannerRos1()
+    again = unmapped(node_module.MowbitePlannerRos1())
     assert again.current.planner == 'slic3r' and again.handle(req) is answer
     asked.clear()
     rpc('planner.settings.set', {'planner': None})
@@ -2076,7 +2099,7 @@ def test_worker_stops_planning_ahead():
         assert stopped == [] and runs[-1] == urgency
         done(go)
     runs.clear()
-    for urgency, why in ((node_module.MOWER, 'a request waits'), (node_module.ASKED, 'a request waits'),
+    for urgency, why in ((node_module.MOWER, 'mower_logic waits'), (node_module.ASKED, 'a request waits'),
                          (None, 'the map or the settings changed')):
         go = threading.Event()
         ask('b', core.AHEAD, long, 'b', go, area_id='b', same='b', rid='r1')
@@ -2825,8 +2848,9 @@ def test_remote_planning_falls_back(planner, monkeypatch):
     broker = Broker()
     a_house(broker, answering('no'))
     with_house(planner, broker)
-    for _ in range(2):
-        assert rpc('planner.plan', {'area_id': 'a', 'settings': {'turn_radius': 0.4}})[1][1] == 'the area is too small'
+    # (its no: planned here all the same, the no of here counts)
+    on, said = planned(turn_radius=0.4)
+    assert on == 'mower' and said == 'its no: the area is too small'
     broker = Broker()
     a_house(broker, lambda house, request: None)  # (says nothing)
     with_house(planner, broker)
@@ -2959,3 +2983,175 @@ def test_plans_dir_keeps_the_ones_last_asked_for(planner, monkeypatch):
     assert other(0.1) == a and planner.local.kept
     d = other(0.4)
     assert [os.path.exists(planner.plan_file(k)) for k in (a, c, d)] == [True, False, True]
+
+
+def mower_event(**payload):
+    rospy.subscribers['/xbot_monitoring/mqtt_publish'](node_module.MqttPublish(topic='events/json',
+                                                                               payload=json.dumps(payload)))
+
+
+def state(name):
+    rospy.subscribers[node_module.STATE_TOPIC](node_module.HighLevelStatus(state_name=name))
+
+
+def test_no_map_no_plan(planner):
+    """With use_map mower_logic's plan waits for the first map (MAP_FIRST s), then it's refused (a failed call: it docks
+    and ends the job, that JOB_COMPLETE is no finished mow); a map not readable isn't planned with, nor the one before
+    it. An outline of no area is planned without the map, told."""
+    node_module.MAP_FIRST = 0.05
+    state('MOWING')
+    mower_event(type='STATE', job_id='j9')
+    t0 = time.monotonic()
+    with pytest.raises(rospy.ServiceException, match='no map from OpenMower'):
+        planner.handle(request())
+    assert time.monotonic() - t0 >= 0.05
+    finished = planner.angle['finished']
+    mower_event(type='JOB_COMPLETE', job_id='j9')
+    assert planner.drive_thread is None and planner.angle['finished'] == finished
+    assert any('not a finished mow' in line for _, line in rospy.log)
+    send_map(the_map())
+    check(planner.handle(request()))
+    rospy.subscribers['/mower_map_service/json_map'](types.SimpleNamespace(data='[1, 2]'))
+    with pytest.raises(rospy.ServiceException, match='map isn\'t readable'):
+        planner.handle(request())
+    assert rpc('planner.plan', {'area_id': 'a'})[1][1].startswith('the map isn\'t readable')
+    send_map(the_map())
+    rospy.log.clear()
+    check(planner.handle(request(outline=[(0.0, 0.0), (15.0, 0.0), (15.0, 8.0), (0.0, 8.0)])))
+    assert any(level == 'warn' and 'no area of the map' in line for level, line in rospy.log)
+
+
+def test_previews_not_the_job(planner):
+    """A plan asked for while mower_logic is idle is a preview (mowing.plan): not kept for a job, the leftovers armed
+    not taken by it; while it mows, the job's."""
+    send_map(the_map())
+    state('IDLE')
+    planner.handle(request())
+    assert not planner.pinned
+    state('MOWING')
+    planner.handle(request())
+    assert planner.pinned
+
+
+def test_armed_leftovers_bound_to_their_job(planner):
+    """Armed leftovers: an area without any gets none (armed for one area: the others aren't mowed); the job that
+    took them keeps them, over a restart too, another job's start ends them, so does planner.area.set."""
+    send_map(the_map())
+    job = lambda area_id: types.SimpleNamespace(area_id=area_id)  # noqa: E731
+    planner.keep_armed({'until': time.time() + 100.0, 'plans': {'a': 'left'}, 'served': False, 'job': None,
+                        'key': planner.armed_key(planner.map)})
+    assert planner.armed_plan(job('b'), mowing=False) == (True, None) and not planner.armed['served']
+    mower_event(type='STATE', job_id='j1')
+    assert planner.armed_plan(job('a')) == (True, 'left')
+    assert planner.armed['served'] and planner.armed['job'] == 'j1' and planner.armed['until'] is None
+    again = node_module.MowbitePlannerRos1()
+    assert again.armed['job'] == 'j1'
+    send_map(the_map())
+    assert again.armed is not None and again.armed_plan(job('a')) == (True, 'left')
+    send_map(the_map(outline_count=1))
+    assert again.armed is None
+    again.keep_armed(dict(planner.armed, key=again.armed_key(again.map)))
+    mower_event(type='STATE', job_id='j2')
+    assert again.armed is None
+    assert not os.path.exists(os.path.join(again.plans_dir, core.ARMED_FILE))
+
+
+def test_settings_page_host(planner):
+    """The settings page's /map and /rpc only for a Host that names this mower."""
+    me = socket.gethostname()
+    for host in ('192.168.1.5:8090', '[fe80::1]:8090', 'localhost', me, me + '.local:8090', me.upper() + '.LOCAL'):
+        assert node_module.host_ok(host), host
+    for host in ('', None, 'evil.example', 'evil.example:8090', me + '.evil.example'):
+        assert not node_module.host_ok(host), host
+
+
+def test_simulate_not_with_slic3r(planner):
+    assert rpc('planner.settings.set', {'planner': 'slic3r'})[1] is None
+    assert rpc_waited('planner.simulate', {'area_id': 'a'})[1][1] == 'planner slic3r: no plan simulated'
+
+
+def test_reset_shows_mower_logics_value(planner):
+    """planner.settings: theirs, mower_logic's value of a setting it gives, what counts once the one set here is
+    gone."""
+    rospy.params['/mower_logic'] = {'tool_width': 0.13, 'outline_count': 2, 'mow_angle_offset': 0.0}
+    assert rpc('planner.settings.set', {'perimeter_passes': 5})[1] is None
+    got = rpc('planner.settings')[0]['settings']['perimeter_passes']
+    assert got['value'] == 5 and got['theirs'] == 2 and 'from' not in got
+
+
+def test_worker_joins_only_what_is_still_so():
+    """A request joins a running job only where the map and the settings didn't change since it began; mower_logic's
+    stops a running request (it waits again in its place)."""
+    worker = core.Worker()
+    stops = []
+    worker.stopped = lambda job, why: stops.append(why)
+    for change in (False, True):
+        began, go, got = threading.Event(), threading.Event(), []
+
+        def slow(tag):
+            began.set()
+            go.wait(10)
+            return tag
+        first = threading.Thread(target=lambda: got.append(worker.submit(core.ASKED, slow, 'first', same='x')))
+        first.start()
+        assert began.wait(10)
+        if change:
+            worker.stale()
+        second = threading.Thread(target=lambda: got.append(worker.submit(core.ASKED, slow, 'second', same='x')))
+        second.start()
+        time.sleep(0.2)
+        go.set()
+        first.join(10)
+        second.join(10)
+        assert sorted(got) == ([('first', False), ('second', False)] if change else [('first', False), ('first', True)])
+    from mowbite_planner import progress
+    began, go, got = threading.Event(), threading.Event(), []
+
+    def asked():
+        began.set()
+        while not go.is_set():
+            progress.check()
+            time.sleep(0.01)
+        return 'asked'
+    t = threading.Thread(target=lambda: got.append(worker.run(core.ASKED, asked)))
+    t.start()
+    assert began.wait(10)
+    assert worker.run(core.MOWER, lambda: 'mower') == 'mower'
+    go.set()
+    t.join(10)
+    assert got == ['asked'] and stops == ['mower_logic waits']
+
+
+def test_time_of_all_track_files(tmp_path):
+    """A job's mowing time from all its files, the last blade run to its end where it's known."""
+    def track(name, segments):
+        path = tmp_path / name
+        path.write_text(''.join(json.dumps({'type': 'new_segment', 'attributes': {'blades': b}, 'started_at': t,
+                                            'points': []}) + '\n' for t, b in segments))
+        os.utime(path, (1000.0, 1000.0))
+        return str(path)
+    one = track('100_j.jsonl', [(100.0, False), (110.0, True), (150.0, False), (160.0, True)])
+    two = track('500_j.jsonl', [(500.0, True), (530.0, False), (540.0, True)])
+    assert core.mowing_time(one) == 40.0
+    assert core.mowing_time([one, two]) == 40.0 + (500.0 - 160.0) + 30.0
+    assert core.mowing_time([one, two], ended=560.0) == 40.0 + 340.0 + 30.0 + 20.0
+
+
+def test_map_of_another_shape(planner):
+    """A map whose areas or planner property aren't objects: what isn't one left out, the node goes on."""
+    send_map({'areas': [5, {'properties': 'x'}, {'id': 'a', 'properties': {'type': 'mow', 'planner': 'x'},
+                                                 'outline': 'x'}], 'docking_stations': 'x'})
+    mower_event(type='JOB_COMPLETE', job_id='j')
+    planner.drive_thread.join(30)
+    planner.plan_ahead()
+    assert rpc('planner.drive')[1] is not None
+
+
+def test_only_the_stored_setting_that_doesnt_fit_left_out(planner):
+    """One stored setting that doesn't go: only it left out, the others count; a change keeps it in the file (or says
+    why not)."""
+    with open(stored_file(), 'w') as f:
+        json.dump({'turn_radius': -2, 'overlap': 0.2, 'perimeter_passes': 2}, f)
+    node = node_module.MowbitePlannerRos1()
+    assert node.current.stored == {'overlap': 0.2, 'perimeter_passes': 2} and node.left_out == {'turn_radius': -2}
+    assert any(level == 'warn' and 'left out' in line and 'turn_radius' in line for level, line in rospy.log)

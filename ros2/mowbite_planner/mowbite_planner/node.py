@@ -91,7 +91,7 @@ from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER
                    PlannerCore)
 from .core import call as core_call
 from .export import ANSWER_TOO_BIG, fingerprint, too_big
-from .mapfile import AreaJob, _number, area_job, bodies_for, body_known, body_told, margins_for, match_area
+from .mapfile import AreaJob, _areas, _number, area_job, bodies_for, body_known, body_told, margins_for, match_area
 from .mathutil import Pose2D, quaternion_to_yaw, yaw_to_quaternion
 from .config import (ANGLE_STRATEGIES, COVERAGE_CODES, EDGES, FILL_PATTERNS, HEADLAND_CORNERS, LANE, LANE_ORDERS,
                      MAX_PASSES, MAX_RECORDED_MARGIN, NARROW_PARTS, PERIMETER, PERIMETER_DIRECTIONS, PERIMETER_ORDERS,
@@ -452,8 +452,8 @@ class NodeCore(PlannerCore):
         if data is None or clean is not None and clean[0] is data:
             return None if data is None else clean[1]
         out = json.loads(json.dumps(data))
-        for area in out.get('areas') or []:
-            props = area.get('properties') if isinstance(area, dict) else None
+        for area in _areas(out):
+            props = area.get('properties')
             own = props.get('planner') if isinstance(props, dict) else None
             if not isinstance(own, dict):
                 continue
@@ -541,6 +541,9 @@ class MowbitePlannerNode(Node):
     background = ('planner.area.set', 'planner.plan', 'planner.leftovers', 'planner.drive')
     # an RPC method no node here answers gets its error (no other node shares the requests)
     answers_unknown = True
+    # the plans ~/plan_coverage gives with the map are kept till the job ends (PlannerCore.pin; JOB_COMPLETE, JOB_RESET
+    # on its events): a robot whose logic sends those
+    pins = False
 
     def __init__(self, node_name='mowbite_planner', **kwargs):
         super().__init__(node_name, **kwargs)
@@ -693,13 +696,24 @@ class MowbitePlannerNode(Node):
     def rpc_end(self):
         """The node ends."""
 
+    def guarded(self, callback, what: str):
+        """callback(msg) for a subscription: whatever goes wrong in it in the log, the node goes on."""
+        def guard(msg):
+            try:
+                callback(msg)
+            except Exception as e:  # noqa: BLE001 - a message must not take the node down
+                self.get_logger().error(f'{what} not taken: {type(e).__name__}: {e}')
+        return guard
+
     def map_input(self):
         """The map: ~/map (OpenMower's JSON, transient local)."""
-        self.create_subscription(String, '~/map', lambda msg: self.core.set_map(msg.data), self.latched)
+        self.create_subscription(String, '~/map', self.guarded(lambda msg: self.core.set_map(msg.data), '~/map'),
+                                 self.latched)
 
     def events_input(self):
         """The events of the robot's logic: ~/events (JSON like OpenMower's events/json)."""
-        self.create_subscription(String, '~/events', lambda msg: self.core.on_event(msg.data), 100)
+        self.create_subscription(String, '~/events', self.guarded(lambda msg: self.core.on_event(msg.data),
+                                                                  '~/events'), 100)
 
     def send_out(self, topic: str, payload: str, retain: bool):
         """PlannerCore's publish: JSON {topic, payload, retain} on ~/publish (the planning's progress)."""
@@ -715,6 +729,10 @@ class MowbitePlannerNode(Node):
         raise PlanningError('the map can\'t be written here')
 
     def map_unusable(self) -> str:
+        return ''
+
+    def no_area(self) -> str:
+        """Why ~/plan_coverage with the map doesn't plan an outline of no area of it ('' where it does: a preview)."""
         return ''
 
     def given(self) -> dict:
@@ -874,13 +892,16 @@ class MowbitePlannerNode(Node):
         job, where = None, 'outline' if index is None else f'area {index}'
         try:
             if index is None:  # (like planner.plan plans an outline: its obstacles and drivable areas, no dock)
+                why = self.no_area()
+                if why:
+                    raise PlanningError(why, word='BAD_REQUEST')
                 job = AreaJob(area_id='', name='', boundary=xy(request.boundary),
                               obstacles=[xy(p) for p in request.obstacles], mow_around=[],
                               drivable=[xy(p) for p in request.drivable_areas], nav=[])
             else:
                 job = area_job(data, index)
                 where = f'area {job.area_id}'
-            reason = core.map_unusable()
+            reason = core.unusable()
             if reason:
                 raise PlanningError(reason, word='NOT_READY')
             armed, plan = core.armed_plan(job) if index is not None else (False, None)
@@ -912,6 +933,8 @@ class MowbitePlannerNode(Node):
                                             job.keep_out, margins_for(data, obstacles + job.keep_out), job.navigation,
                                             job.unmowed, from_start=bool(request.use_start_pose),
                                             bodies=bodies_for(data, rings))
+                if self.pins and index is not None:
+                    core.pin(core.local.key)
         except PlanningError as e:
             response.success = False
             response.code = code_of(e)

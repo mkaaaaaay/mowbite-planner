@@ -64,7 +64,7 @@ from . import config as limits
 from .config import IGNORED, NothingLeft, PlannerConfig, PlanningError
 from .footprint import Footprint
 from .geometry import clean_polygon, polygons, union
-from .mapfile import _points, area_settings, body_known, match_area, mow_areas, openmower_settings
+from .mapfile import _areas, _points, _props, area_settings, body_known, match_area, mow_areas, openmower_settings
 from .mathutil import Pose2D
 from .mqtt_service import PlannerService
 from .planner import fill_field, plan_coverage, plan_footprint, set_workers
@@ -128,8 +128,10 @@ PLAN_ROOM = 4
 # the planner's no to a request kept too (in memory): an area too small asked for again doesn't take as long again
 REFUSED = 64
 DISK_PLANS = 16
-# in plans_dir: the keys of the plans of the job mower_logic mows (MowbitePlannerRos1.pin)
+# in plans_dir: the keys of the plans of the job mower_logic mows (MowbitePlannerRos1.pin), the leftovers armed (kept
+# over a restart, PlannerCore.keep_armed)
 PINNED_FILE = 'job.json'
+ARMED_FILE = 'armed.pickle'
 # s after the map or the settings last changed, every active mowing area is planned ahead (and kept) as it is: the next
 # mow and the app's preview find it
 PLAN_AHEAD_DELAY = 5.0
@@ -149,8 +151,8 @@ DOCK_REACH = 1.0
 TIMING_RUNS = 10
 # s planner.leftovers' arm lasts: mower_logic's plans in that time are the leftovers', until that job is finished
 LEFTOVERS_ARMED = 900.0
-# s it lasts once mower_logic got one of them, for a job that never finishes (JOB_COMPLETE ends it, a new map or
-# settings too)
+# s it lasts once mower_logic got one of them, where the job they went to has no id (an id binds them to that job: its
+# JOB_COMPLETE or JOB_RESET ends them, another job's STATE too; a new map or settings end them either way)
 LEFTOVERS_JOB = 6 * 3600.0
 # m2, an unmowed piece planner.leftovers counts (complete.LEAST_MOWED)
 LEFT_PIECE = 0.02
@@ -238,7 +240,8 @@ class _Job:
     def __init__(self, urgency, order, fn, args, job, area_id, same, waiter):
         self.urgency, self.order, self.fn, self.args = urgency, order, fn, args
         self.job, self.area_id, self.same, self.waiters = job, area_id, same, [waiter]
-        self.stop = None  # (running AHEAD: why it's stopped)
+        self.stop = None  # (running: why it's stopped)
+        self.began = None  # (running: Worker.generation as it began)
 
 
 class Worker:
@@ -247,13 +250,16 @@ class Worker:
     crash GEOS (shapely lets go of the GIL, a prepared geometry builds its indexes when first asked), and the other RPCs
     answer meanwhile. The most urgent job first (MOWER ... AHEAD), of those the one asked for first; a job a job asks for
     runs at once. A job planning ahead (AHEAD) stops once a MOWER or ASKED one waits, or once what it plans changed
-    (stale), and waits again in its place (progress.stoppable: its planning ends at its next step). changed(): the jobs
-    waiting changed (called outside the worker's lock), stopped(job, why): one stopped."""
+    (stale), an ASKED or AFTER_MOW one once a MOWER one waits (mower_logic waits for its plan with no time limit), and
+    waits again in its place (progress.stoppable: its planning ends at its next step). changed(): the jobs waiting
+    changed (called outside the worker's lock), stopped(job, why): one stopped."""
 
     def __init__(self):
         self.cond = threading.Condition()
         self.jobs, self.running = [], None
         self.order = itertools.count()
+        # (one more with every change of the map or the settings, stale: a job begun before it plans what was)
+        self.generation = 0
         self.changed = lambda: None
         self.stopped = lambda job, why: None
         self.thread = threading.Thread(target=self.serve, name='planner worker', daemon=True)
@@ -265,9 +271,10 @@ class Worker:
 
     def submit(self, urgency, fn, *args, job='plan', area_id=None, rid=None, same=None, slot=None):
         """fn(*args) in the worker: (its result, whether it joined a job waiting or running with the same same (not
-        None): that one's result), its exception raised here. job, area_id and rid (the RPC request's id): what waiting
-        tells of it. slot: who waits with it for a job not begun yet gets Superseded instead, a job nobody waits for
-        any more is dropped. A job asked for more urgently than it waits is moved up."""
+        None; a running one only where the map and the settings didn't change since it began): that one's result),
+        its exception raised here. job, area_id and rid (the RPC request's id): what waiting tells of it. slot: who
+        waits with it for a job not begun yet gets Superseded instead, a job nobody waits for any more is dropped. A
+        job asked for more urgently than it waits is moved up."""
         if threading.current_thread() is self.thread:
             return fn(*args), False
         future, gone = Future(), []
@@ -277,15 +284,17 @@ class Worker:
                     gone += [w for w in queued.waiters if w[2] == slot]
                     queued.waiters = [w for w in queued.waiters if w[2] != slot]
                 self.jobs = [queued for queued in self.jobs if queued.waiters]
-            running = [self.running] if self.running is not None else []
+            running = [self.running] if self.running is not None and self.running.began == self.generation else []
             found = next((j for j in running + self.jobs if j.same == same), None) if same is not None else None
             if found is not None:
                 found.waiters.append((future, rid, slot))
                 found.urgency = min(found.urgency, urgency)
             else:
                 self.jobs.append(_Job(urgency, next(self.order), fn, args, job, area_id, same, (future, rid, slot)))
-            if any(j.urgency < AFTER_MOW for j in self.jobs):
-                self.stop_ahead('a request waits')
+            if any(j.urgency == MOWER for j in self.jobs):
+                self.stop_running('mower_logic waits', (ASKED, AFTER_MOW, AHEAD))
+            elif any(j.urgency < AFTER_MOW for j in self.jobs):
+                self.stop_running('a request waits', (AHEAD,))
             self.cond.notify()
         for waiter in gone:
             waiter[0].set_exception(Superseded('superseded by a newer request'))
@@ -295,11 +304,17 @@ class Worker:
     def stale(self):
         """The map or the settings changed: a planning ahead that runs stops (it plans what was)."""
         with self.cond:
-            self.stop_ahead('the map or the settings changed')
+            self.generation += 1
+            self.stop_running('the map or the settings changed', (AHEAD,))
 
-    def stop_ahead(self, why):
-        if self.running is not None and self.running.urgency == AHEAD and self.running.stop is None:
+    def stop_running(self, why, ranks):
+        if self.running is not None and self.running.urgency in ranks and self.running.stop is None:
             self.running.stop = why
+
+    def urgency(self):
+        """The urgency of the job running (None: none)."""
+        running = self.running
+        return running.urgency if running is not None else None
 
     def waiting(self):
         """(how many jobs wait, the first WAITING_SHOWN of them in the order they'll run: [{area_id, job, rank,
@@ -317,7 +332,7 @@ class Worker:
                     self.cond.wait()
                 job = min(self.jobs, key=lambda j: (j.urgency, j.order))
                 self.jobs.remove(job)
-                self.running = job
+                self.running, job.began = job, self.generation
             self.changed()
             result, error = None, None
             try:
@@ -497,6 +512,12 @@ def asked_id():
 
 
 
+def active_areas(data):
+    """The map's active mowing areas with an id (what isn't one left out)."""
+    return [a for a in _areas(data) if _props(a).get('type') == 'mow' and _props(a).get('active') is not False and
+            a.get('id')]
+
+
 def same_request(params):
     """What makes two planner.plan requests the same (their answer the same): their params but ahead and slot."""
     return json.dumps({k: v for k, v in params.items() if k not in ('ahead', 'slot')}, sort_keys=True)
@@ -542,8 +563,9 @@ class PlannerCore:
                                      self.logwarn,
                                      os.path.join(os.path.dirname(settings_file), TOOK_FILE) if settings_file else '')
         self.worker.changed = self.progress.queue_changed
-        self.worker.stopped = lambda job, why: self.loginfo('MowBite Planner: planning %s ahead stopped (%s), it waits '
-                                                            'again', job.area_id or 'a plan', why)
+        self.worker.stopped = lambda job, why: self.loginfo(
+            'MowBite Planner: planning %s %s stopped (%s), it waits again', job.area_id or 'a plan',
+            'ahead' if job.urgency == AHEAD else '(%s)' % RANKS[job.urgency], why)
         self.launch_width = float(mower_width)
         self.launch = dict(settings or {})
         self.defaults = self.setup(self.launch_width, self.launch, {})
@@ -558,16 +580,15 @@ class PlannerCore:
             self.logwarn('MowBite Planner: stored settings not known, left out (%s): %s', self.file,
                          ', '.join(unknown))
             stored = {n: v for n, v in stored.items() if n not in unknown}
-        # (the stored settings left out at the start, as they were: the robot's given values that come later may
-        # take them, given_again(); a change of settings takes them first)
+        # (the stored settings left out at the start, as they were, only the ones that don't go with the others or
+        # the mower: the robot's given values that come later may take them, given_again(); a change of settings
+        # takes them first)
         self.left_out = {}
         if stored:
-            try:
-                self.current = self.setup(self.launch_width, self.launch, stored)
-            except PlanningError as e:  # the launch file changed since, its settings still work
-                self.left_out = stored
-                self.logwarn('MowBite Planner: stored settings left out (%s): %s', self.file, e)
+            self.current, self.left_out = self.settle(stored)
         self.map, self.map_text = None, None  # (as the robot sent it)
+        self.map_error = ''  # (why the last map sent isn't planned with, set_map)
+        self.map_came = threading.Event()  # (set once there's a map)
         self.lock = threading.Lock()
         self.set_lock = threading.Lock()
         self.plans = collections.OrderedDict()  # key -> (plan, where it was planned, its pickle's bytes)
@@ -601,9 +622,12 @@ class PlannerCore:
         self.timing_lock = threading.Lock()
         self.timing = self.read_timing()
         self.served = collections.deque(maxlen=64)
-        # planner.leftovers armed: {'until': when it ends, 'plans': {area id: its leftovers' plan or None}, 'served':
-        # the robot got one of them}
-        self.armed = None
+        # planner.leftovers armed: {'until': when it ends (None: with its job), 'plans': {area id: its leftovers' plan or
+        # None}, 'served': the robot got one of them, 'job': the id of the job it got them in (None: none known),
+        # 'key': the map and settings they're of (armed_key)}, kept over a restart
+        self.armed = self.read_armed()
+        # the job (its id, '' none known) mower_logic was refused a plan in (no map): its JOB_COMPLETE isn't a mow
+        self.refused_job = None
         # the job of the last event ('' none), see track_written
         self.job = ''
         self.job_change = threading.Condition()
@@ -653,6 +677,10 @@ class PlannerCore:
 
     def map_unusable(self):
         return ''
+
+    def unusable(self):
+        """Why the map can't be planned now ('' when it can): the last one sent wasn't readable, or map_unusable."""
+        return self.map_error or self.map_unusable()
 
     def given(self):
         """{setting: value} of given_by as the robot has them now ({}: none yet, the defaults count)."""
@@ -740,6 +768,8 @@ class PlannerCore:
                 data, text = self.map, self.map_text
             if data is None:
                 raise PlanningError('no map yet')
+            if self.map_error:
+                raise PlanningError(self.map_error)
             before, data = data, json.loads(json.dumps(data))
             area = next((a for a in data.get('areas', []) if isinstance(a, dict) and a.get('id') == area_id), None)
             if area is None:
@@ -775,6 +805,7 @@ class PlannerCore:
             self.replace_map(data, text)
             with self.lock:
                 self.map = data
+            self.keep_armed(None)  # (they were of the area as it was)
         self.loginfo('MowBite Planner: area %s now %s', area_id, json.dumps(
             {k: v for k, v in props.items() if k in ('planner', 'margin') or k in OPENMOWER_PROPS.values()},
             sort_keys=True))
@@ -837,6 +868,26 @@ class PlannerCore:
                      {n: list(v) if isinstance(v, tuple) else v for n, v in stored.items()},
                      frozenset(n for n in settings if n in MOWER_LOGIC), planner, leftovers_auto, remote_planning)
 
+    def settle(self, stored, taken=None):
+        """(the settings with as many of the stored ones as go: all of them, else one after the other by name each
+        that goes with the ones before, the stored ones left out {name: value}); in the log which and why. taken:
+        stored ones that go already (kept)."""
+        taken = dict(taken or {})
+        try:
+            return self.setup(self.launch_width, self.launch, dict(taken, **stored)), {}
+        except PlanningError as e:
+            why = e
+        for name in sorted(stored):
+            try:
+                self.setup(self.launch_width, self.launch, dict(taken, **{name: stored[name]}))
+                taken[name] = stored[name]
+            except PlanningError:
+                pass
+        left = {n: v for n, v in stored.items() if n not in taken}
+        self.logwarn('MowBite Planner: stored settings left out (%s): %s (%s)', self.file, ', '.join(sorted(left)),
+                     why)
+        return self.setup(self.launch_width, self.launch, taken), left
+
     def given_again(self):
         """The robot's given values changed (given()): the settings with them from now on, the leftovers armed gone
         (they were the values before), planned ahead again. PlanningError where they don't go with the settings
@@ -844,15 +895,14 @@ class PlannerCore:
         with self.set_lock:
             current = self.setup(self.launch_width, self.launch, self.current.stored)
             if self.left_out:
-                try:
-                    current = self.setup(self.launch_width, self.launch, self.left_out)
-                    self.left_out = {}
-                    self.loginfo('MowBite Planner: stored settings taken after all (%s)', self.file)
-                except PlanningError:
-                    pass
+                left = self.left_out
+                current, self.left_out = self.settle(left, current.stored)
+                if len(self.left_out) < len(left):
+                    self.loginfo('MowBite Planner: stored settings taken after all (%s): %s', self.file,
+                                 ', '.join(sorted(set(left) - set(self.left_out))))
             self.defaults = self.setup(self.launch_width, self.launch, {})
             self.current = current
-            self.armed = None
+            self.keep_armed(None)
         self.loginfo('MowBite Planner: %s', ', '.join('%s %s' % (n, json.dumps(v)) for n, v in sorted(
             self.given().items())))
         self.plan_ahead_later()
@@ -914,6 +964,8 @@ class PlannerCore:
             elif name in MOWER_LOGIC and name not in current.own:  # mower_logic's (an area's own still beats it)
                 entry['from'] = MOWER_LOGIC[name]
                 entry['value'] = theirs.get(name, entry['value'])
+            if name in MOWER_LOGIC and name not in defaults.own and name in theirs:  # (what counts once it isn't set)
+                entry['theirs'] = theirs[name]
             if default is None:
                 entry['nullable'] = True
             if name in CHOICES:
@@ -1043,21 +1095,30 @@ class PlannerCore:
         if not isinstance(event, dict):
             return
         if event.get('type') == 'STATE':
+            job_id = event.get('job_id') if isinstance(event.get('job_id'), str) else ''
             with self.job_change:
-                self.job = event.get('job_id') or ''
+                self.job = job_id
                 self.job_change.notify_all()
+            self.armed_job(job_id)
             return
         if event.get('type') in ('JOB_RESET', 'JOB_COMPLETE'):
             self.unpin()  # (the job's plans aren't resumed any more)
+            refused, self.refused_job = self.refused_job, None
+            if event.get('type') == 'JOB_COMPLETE' and refused is not None and \
+                    refused == (event.get('job_id') or ''):
+                # (mower_logic docked as it got no plan: no mow, the lanes don't turn on, nothing follows it)
+                self.loginfo('MowBite Planner: the job ended without a plan (it was refused one): not a finished mow')
+                return
         if event.get('type') == 'JOB_RESET':
             armed = self.armed
             if armed is not None and armed['served']:  # (the leftovers' job thrown away: the next mow is a whole one)
-                self.armed = None
+                self.keep_armed(None)
             return
         if event.get('type') != 'JOB_COMPLETE':
             return
         self.job_complete()
-        armed, self.armed = self.armed, None
+        armed = self.armed
+        self.keep_armed(None)
         if armed is not None and armed['served']:
             # (the leftovers of the mow before: no mow of its own, the lanes don't turn on, it isn't timed)
             self.loginfo('MowBite Planner: the leftovers are mowed')
@@ -1065,12 +1126,14 @@ class PlannerCore:
             return
         with self.job_change:
             self.job = event.get('job_id') or ''
-        self.drive_thread = threading.Thread(target=self.after_mow, args=(event.get('job_id'),), daemon=True)
+        self.drive_thread = threading.Thread(target=self.after_mow, args=(event.get('job_id'), time.time()),
+                                             daemon=True)
         self.drive_thread.start()
         base = self.current.base
         with self.lock:
             data = self.map
-        own = [((a.get('properties') or {}).get('planner') or {}) for a in (data or {}).get('areas', [])]
+        own = [_props(a).get('planner') for a in _areas(data)]
+        own = [p for p in own if isinstance(p, dict)]
         turning = base.angle_increment != 0 or any(p.get('angle_increment') for p in own)
         # (perimeter_direction random: from now on another way round, the plans ahead too)
         rolling = base.perimeter_direction == 'random' or any(p.get('perimeter_direction') == 'random' for p in own)
@@ -1099,8 +1162,8 @@ class PlannerCore:
         if unknown:
             raise PlanningError('unknown planner settings: %s' % ', '.join(unknown))
         with self.set_lock:
-            # (on the ones left out at the start where there are: they'd be gone from the file else)
-            stored = dict(self.left_out or self.current.stored)
+            # (with the ones left out at the start where there are: they'd be gone from the file else)
+            stored = dict(self.current.stored, **self.left_out)
             for name, value in params.items():
                 if value is None:
                     stored.pop(name, None)
@@ -1119,7 +1182,7 @@ class PlannerCore:
             changed = current._replace(stored=None, leftovers_auto=None) != \
                 self.current._replace(stored=None, leftovers_auto=None)
             self.current = current
-            self.armed = None  # (the leftovers were other settings')
+            self.keep_armed(None)  # (the leftovers were other settings')
         self.loginfo('MowBite Planner: settings %s', json.dumps(current.stored, sort_keys=True))
         self.plan_ahead_later(changed)
         return self.rpc_settings()
@@ -1140,12 +1203,12 @@ class PlannerCore:
     def rpc_plan(self, params, keep=None, mowed=None):
         """keep: a list the plan itself goes to too. mowed: where the blade went already, only what that left is planned
         (not kept: it's that one mow's). PlanningError where the map can't be planned now (map_unusable)."""
-        reason = self.map_unusable()
+        reason = self.unusable()
         if reason:
             raise PlanningError(reason, word='NOT_READY')
         current = self.current
-        with self.lock:
-            data = self.map
+        # (the map as ~/plan_coverage takes it: the same plan for both)
+        data = self.plan_map(self.current_map())
         if current.planner == 'slic3r' and keep is None:
             # what mower_logic would ask the slic3r planner: OpenMower's settings and the area's, not the node's
             service = PlannerService(PlannerConfig(mower_width=current.mower_width, nested_areas=False))
@@ -1184,7 +1247,8 @@ class PlannerCore:
         """planner.plan's duration of a plan the model gives estimate s for: times the finished mows' factor."""
         with self.timing_lock:
             runs = list(self.timing)
-        factor = sum(took for _, took, _ in runs) / sum(est for est, _, _ in runs) if runs else 1.0
+        est = sum(est for est, _, _ in runs)
+        factor = sum(took for _, took, _ in runs) / est if est > 0.0 else 1.0
         return {'min': round(estimate * factor / 60.0, 1), 'model_min': round(estimate / 60.0, 1),
                 'factor': round(factor, 3), 'runs': len(runs)}
 
@@ -1192,18 +1256,20 @@ class PlannerCore:
         try:
             with open(self.timing_file) as f:
                 runs = json.load(f)['runs']
-            return [[float(est), float(took), str(job)] for est, took, job in runs][-TIMING_RUNS:]
+            return [[float(est), float(took), str(job)] for est, took, job in runs if float(est) > 0.0][-TIMING_RUNS:]
         except (OSError, ValueError, KeyError, TypeError):
             return []
 
-    def time_after(self, job_id):
-        """How long the finished job took against the model, kept for duration (see TIMING_RUNS), in the log."""
+    def time_after(self, job_id, ended=None):
+        """How long the finished job took against the model, kept for duration (see TIMING_RUNS), in the log: all of
+        its track files (a restart begins another), ended: when it finished (JOB_COMPLETE, unix s; None: not known)."""
         files = glob.glob(os.path.join(self.history, '*_%s.jsonl' % job_id)) if self.history and job_id else []
         if not files:
             return
         try:
-            start = float(os.path.basename(files[0]).split('_', 1)[0])
-            took = mowing_time(files[0])
+            files.sort(key=track_start)
+            start = track_start(files[0])
+            took = mowing_time(files, ended)
         except (OSError, ValueError):
             return
         served = [(area, est) for t, area, est in list(self.served) if t >= start - 5.0]
@@ -1213,6 +1279,9 @@ class PlannerCore:
             self.loginfo('MowBite Planner: job %s not timed', job_id)
             return
         est = sum(e for _, e in served)
+        if est <= 0.0:
+            self.loginfo('MowBite Planner: job %s not timed, no time estimated', job_id)
+            return
         if not TIMING_RANGE[0] * est <= took <= TIMING_RANGE[1] * est:
             self.logwarn('MowBite Planner: job %s took %.0f min, %.0f min estimated: not counted', job_id, took / 60.0,
                          est / 60.0)
@@ -1256,9 +1325,7 @@ class PlannerCore:
         with self.lock:
             data = self.map
         ids = [params['area_id']] if params.get('area_id') is not None else [
-            a.get('id') for a in (data or {}).get('areas', []) if a.get('id') and
-            (a.get('properties') or {}).get('type') == 'mow' and (a.get('properties') or {}).get('active') is not False
-            and (a.get('properties') or {}).get('mowable') is not False]
+            a['id'] for a in active_areas(data) if _props(a).get('mowable') is not False]
         out, plans = {}, {}
         for i in ids:
             keep = []
@@ -1300,7 +1367,8 @@ class PlannerCore:
             with self.set_lock, self.lock:
                 same = self.current is current and self.map == data
                 if same:
-                    self.armed = {'until': time.time() + LEFTOVERS_ARMED, 'plans': plans, 'served': False}
+                    self.keep_armed({'until': time.time() + LEFTOVERS_ARMED, 'plans': plans, 'served': False,
+                                     'job': None, 'key': self.armed_key(data)})
             if not same:  # (they'd be the old map's or settings')
                 raise PlanningError('the map or the settings changed meanwhile: not armed')
             self.loginfo('MowBite Planner: leftovers armed for %.0f s: %s', LEFTOVERS_ARMED, ', '.join(
@@ -1308,17 +1376,19 @@ class PlannerCore:
                     p.stats['leftovers']['area'], p.stats['leftovers']['passes'])) for i, p in plans.items()))
         armed = self.armed
         return {'file': os.path.basename(path), 'files': [os.path.basename(f) for f in files], 'areas': out,
-                'armed': max(0.0, round(armed['until'] - time.time(), 1)) if armed else 0.0}
+                'armed': 0.0 if not armed else LEFTOVERS_JOB if armed['until'] is None else
+                max(0.0, round(armed['until'] - time.time(), 1))}
 
     def rpc_drive(self, params):
         if not params and self.drive is not None:
             return self.drive
         return self.drive_check(params.get('job_id'), params.get('file'), params.get('area_id'))
 
-    def after_mow(self, job_id):
-        """What follows a finished mow: its planner.drive and timing, then with leftovers_auto what it left."""
+    def after_mow(self, job_id, ended=None):
+        """What follows a finished mow (ended: when, unix s): its planner.drive and timing, then with leftovers_auto
+        what it left."""
         self.track_written(job_id)
-        self.drive_after(job_id)
+        self.drive_after(job_id, ended)
         if not self.current.leftovers_auto:
             return
         try:
@@ -1348,12 +1418,12 @@ class PlannerCore:
         area = sum(p.stats['leftovers']['area'] for p in armed['plans'].values() if p is not None) if armed else 0.0
         if area < LEFTOVERS_AUTO_MIN:
             if self.armed is armed:
-                self.armed = None
+                self.keep_armed(None)
             self.loginfo('MowBite Planner: %.2f m2 of leftovers to mow, under %.2f: the mower stays in', area,
                          LEFTOVERS_AUTO_MIN)
             return
         held = ''
-        while self.armed is armed and not armed['served'] and time.time() < armed['until']:
+        while self.armed is armed and not armed['served'] and time.time() < (armed['until'] or math.inf):
             if self.mower_ready():
                 why = self.held()
                 if not why:
@@ -1367,10 +1437,10 @@ class PlannerCore:
         self.loginfo('MowBite Planner: the mower not sent out for the leftovers, %s while they were armed',
                      'held (%s)' % held if held else 'not ready')
 
-    def drive_after(self, job_id):
+    def drive_after(self, job_id, ended=None):
         """planner.drive of a finished mow, in the log, and how long it took (time_after)."""
         try:
-            self.time_after(job_id)
+            self.time_after(job_id, ended)
         except Exception as e:  # noqa: BLE001 - timing must not take the planner down
             self.logerr('MowBite Planner: timing the mow failed: %s: %s', type(e).__name__, e, exc_info=True)
         try:
@@ -1399,21 +1469,17 @@ class PlannerCore:
         track = read_track(files[-1])
         with self.lock:
             data = self.map
-        if area_id is not None:
-            ids = [area_id]
-        else:
-            ids = [a.get('id') for a in (data or {}).get('areas', []) if a.get('id') and
-                   (a.get('properties') or {}).get('type') == 'mow' and
-                   (a.get('properties') or {}).get('active') is not False]
-        docks = [((d.get('position') or {}).get('x'), (d.get('position') or {}).get('y'))
-                 for d in (data or {}).get('docking_stations') or []]
+        ids = [area_id] if area_id is not None else [a['id'] for a in active_areas(data)]
+        docks = (data or {}).get('docking_stations')
+        docks = [d.get('position') for d in docks if isinstance(d, dict)] if isinstance(docks, list) else []
+        docks = [(p.get('x'), p.get('y')) for p in docks if isinstance(p, dict)]
         docks = [(x, y) for x, y in docks if isinstance(x, (int, float)) and isinstance(y, (int, float))]
         track = [(p, on) for p, on in track if all(math.hypot(p.x - x, p.y - y) > DOCK_REACH for x, y in docks)]
         # OpenMower's own drives (the blade off: to an area, between them, home) go over the lawns and the navigation
         # areas too, the plan's body_space has only the lawns it may drive through
         ground = []
-        for a in (data or {}).get('areas', []):
-            if (a.get('properties') or {}).get('type') in ('mow', 'nav'):
+        for a in _areas(data):
+            if _props(a).get('type') in ('mow', 'nav'):
                 try:
                     ground.append(clean_polygon(_points(a.get('outline'))))
                 except ValueError:
@@ -1462,16 +1528,24 @@ class PlannerCore:
         return {'file': os.path.basename(files[-1]), 'areas': out}
 
     def set_map(self, text):
-        """The robot's map as it sent it (OpenMower's JSON)."""
+        """The robot's map as it sent it (OpenMower's JSON object). One not readable isn't planned with, nor the one
+        before it (unusable) till a readable one comes."""
         try:
             data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError('not an object')
         except ValueError as e:
-            self.logwarn('MowBite Planner: map not readable: %s', e)
+            self.logwarn('MowBite Planner: map not readable, nothing planned with a map till it is: %s', e)
+            with self.lock:
+                self.map_error = 'the map isn\'t readable: %s' % e
+            self.worker.stale()
             return
         with self.lock:
             changed, self.map, self.map_text = data != self.map, data, text
+            self.map_error = ''
             if changed:
-                self.armed = None  # (the leftovers were another map's)
+                self.armed_changed()  # (the leftovers were another map's)
+            self.map_came.set()
         if changed:
             self.plan_ahead_later()
 
@@ -1496,18 +1570,11 @@ class PlannerCore:
         with self.ahead_run:
             if self.current.planner == 'slic3r':
                 return
-            reason = self.map_unusable()
+            reason = self.unusable()
             if reason:  # (planned ahead once it can be)
                 self.loginfo('MowBite Planner: not planned ahead: %s', reason)
                 return
-            with self.lock:
-                data = self.map
-            areas = []
-            for area in (data or {}).get('areas', []):
-                props = area.get('properties') or {}
-                if props.get('type') == 'mow' and props.get('active') is not False and \
-                        props.get('mowable') is not False and area.get('id'):
-                    areas.append(area)
+            areas = [a for a in active_areas(self.current_map()) if _props(a).get('mowable') is not False]
             t0 = time.perf_counter()
 
             def ahead(area):
@@ -1758,19 +1825,88 @@ class PlannerCore:
             self.logwarn('MowBite Planner: kept plan %s not readable: %s', key, e)
             return None
 
-    def armed_plan(self, job):
-        """planner.leftovers armed for the area of job (mapfile.AreaJob, None: an outline of no area): (True, its
-        leftovers' plan, None where it left nothing), that job of them from now on (until LEFTOVERS_JOB s at most, or
-        it's finished: the same again while that job runs, it asks again when it goes on after a break); (False,
-        None) where they aren't."""
+    def armed_plan(self, job, mowing=True):
+        """planner.leftovers armed, for the area of job (mapfile.AreaJob, None: an outline of no area): (True, its
+        leftovers' plan, None where it left nothing or they're of other areas), (False, None) where they aren't. mowing:
+        the robot asks for a job of its own (not a preview): that job's from now on (bound to its id, LEFTOVERS_JOB s
+        without one, see armed_job; the same again while it runs, it asks again when it goes on after a break or a
+        restart)."""
         armed = self.armed
-        if armed is not None and time.time() > armed['until']:
-            armed = self.armed = None
-        if armed is None or job is None or job.area_id not in armed['plans']:
+        if armed is not None and armed['until'] is not None and time.time() > armed['until']:
+            armed = None
+            self.keep_armed(None)
+        if armed is None or job is None:
             return False, None
-        if not armed['served']:
-            armed['served'], armed['until'] = True, time.time() + LEFTOVERS_JOB
-        return True, armed['plans'][job.area_id]
+        if mowing and not armed['served']:
+            job_id = self.job or None
+            armed.update(served=True, job=job_id, until=None if job_id else time.time() + LEFTOVERS_JOB)
+            self.keep_armed(armed)
+        return True, armed['plans'].get(job.area_id)
+
+    def armed_job(self, job_id):
+        """A job runs (job_id, STATE): the leftovers served without a job's id are that job's from now on, the ones of
+        another job gone."""
+        armed = self.armed
+        if armed is None or not armed['served'] or not job_id:
+            return
+        if armed['until'] is not None and time.time() > armed['until']:
+            self.keep_armed(None)
+        elif armed['job'] is None:
+            armed.update(job=job_id, until=None)
+            self.keep_armed(armed)
+        elif armed['job'] != job_id:
+            self.loginfo('MowBite Planner: the leftovers armed gone, job %s isn\'t theirs (%s)', job_id, armed['job'])
+            self.keep_armed(None)
+
+    def armed_changed(self):
+        """The map changed (set_map): the leftovers armed gone where they're another map's (or settings')."""
+        armed = self.armed
+        if armed is not None and armed.get('key') != self.armed_key(self.map):
+            self.keep_armed(None)
+
+    def armed_key(self, data):
+        """What the leftovers armed are of: the map data and the settings."""
+        current = self.current
+        return hashlib.sha1(json.dumps({'map': data, 'width': self.launch_width, 'launch': self.launch,
+                                        'stored': current.stored, 'given': self.given() if self.given_by else {}},
+                                       sort_keys=True, default=repr).encode()).hexdigest()
+
+    def keep_armed(self, armed):
+        """armed (None: none) from now on, kept in plans_dir (ARMED_FILE) over a restart."""
+        self.armed = armed
+        if not self.plans_dir:
+            return
+        path = os.path.join(self.plans_dir, ARMED_FILE)
+        try:
+            if armed is None:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            os.makedirs(self.plans_dir, exist_ok=True)
+            with open(path + '.tmp', 'wb') as f:
+                pickle.dump({'build': self.build, 'armed': armed}, f, protocol=4)
+            os.replace(path + '.tmp', path)
+        except Exception as e:  # noqa: BLE001 - they're still armed in memory
+            self.logwarn('MowBite Planner: the leftovers armed not kept in %s: %s: %s', self.plans_dir,
+                         type(e).__name__, e)
+
+    def read_armed(self):
+        """The leftovers armed before a restart (keep_armed), None: none (or another planner code's, or ended)."""
+        if not self.plans_dir:
+            return None
+        try:
+            with open(os.path.join(self.plans_dir, ARMED_FILE), 'rb') as f:
+                kept = pickle.load(f)  # (written here only: keep_armed)
+            armed = kept['armed'] if kept.get('build') == self.build else None
+        except FileNotFoundError:
+            return None
+        except Exception as e:  # noqa: BLE001 - a broken or old file: none
+            self.logwarn('MowBite Planner: the leftovers armed before not readable: %s: %s', type(e).__name__, e)
+            return None
+        if armed is None or armed['until'] is not None and time.time() > armed['until']:
+            return None
+        self.loginfo('MowBite Planner: the leftovers armed before the restart still are (job %s)', armed['job'])
+        return armed
 
     def serve(self, area_id, plan):
         """plan went to the robot for area_id (None: an outline of no area): the next finished job's (time_after)."""
@@ -1848,20 +1984,37 @@ def read_runs(path):
     return runs
 
 
-def mowing_time(path):
-    """s from the blade starting to run to it stopping last in a position_history file (its new_segment lines with
-    started_at and blades), the runs between added up; None without a run that ended."""
-    segments = []
-    with open(path) as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get('type') == 'new_segment' and \
-                    isinstance(rec.get('started_at'), (int, float)):
-                segments.append((float(rec['started_at']), bool((rec.get('attributes') or {}).get('blades'))))
-    runs = [b - a for (a, blades), (b, _) in zip(segments, segments[1:]) if blades]
+def track_start(path):
+    """When a position_history file began (unix s, its name's first part)."""
+    return float(os.path.basename(path).split('_', 1)[0])
+
+
+def mowing_time(paths, ended=None):
+    """s the blade ran in a job's position_history files (one path or several, the first first; their new_segment
+    lines with started_at and blades), the runs added up: each to the next segment, the last one of a file to the next
+    file's first (its last write at the latest), the last one of all to ended (unix s; None: not counted); None without
+    a run that ended."""
+    runs = []
+    paths = [paths] if isinstance(paths, str) else list(paths)
+    for k, path in enumerate(paths):
+        segments = []
+        with open(path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get('type') == 'new_segment' and \
+                        isinstance(rec.get('started_at'), (int, float)) and not isinstance(rec['started_at'], bool):
+                    segments.append((float(rec['started_at']), bool((rec.get('attributes') or {}).get('blades'))))
+        runs += [b - a for (a, blades), (b, _) in zip(segments, segments[1:]) if blades]
+        if segments and segments[-1][1]:  # (the blade still ran as the file ended)
+            if k + 1 < len(paths):
+                end = min(os.path.getmtime(path), track_start(paths[k + 1]))
+            else:
+                end = ended
+            if end is not None:
+                runs.append(max(0.0, end - segments[-1][0]))
     return sum(runs) if runs else None
 
 

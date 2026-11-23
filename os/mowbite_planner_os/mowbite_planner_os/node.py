@@ -174,6 +174,7 @@ class OsNode(base.MowbitePlannerNode):
     given_by = {n: FROM_GEOMETRY for n in GEOMETRY_KEYS}
     background = base.MowbitePlannerNode.background + ('planner.calib.evaluate',)
     answers_unknown = False
+    pins = True
 
     def __init__(self, node_name='mowbite_planner', **kwargs):
         # the others' parameters by node (bridge/params), the latest map/status, how many map/json came
@@ -235,8 +236,9 @@ class OsNode(base.MowbitePlannerNode):
         self.files = ''
         self.core = TransitCore(self, float(values['mower_width']), base.launch_settings(self.config(values)),
                                 os.path.join(data_dir, SETTINGS_FILE) if data_dir else '')
-        self.create_subscription(String, 'map/json', self._on_map, self.latched)
-        self.create_subscription(MapStatus, 'map/status', self._on_map_status, self.latched)
+        self.create_subscription(String, 'map/json', self.guarded(self._on_map, 'map/json'), self.latched)
+        self.create_subscription(MapStatus, 'map/status', self.guarded(self._on_map_status, 'map/status'),
+                                 self.latched)
         self.params_input()
 
     def calib_root(self) -> str:
@@ -298,8 +300,8 @@ class OsNode(base.MowbitePlannerNode):
         self._methods_pub = self.create_publisher(RpcMethods, 'bridge/rpc/methods', QoSProfile(
             depth=50, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.create_subscription(RpcRequest, 'bridge/rpc/request',
-                                 lambda msg: self.on_request(msg.method, msg.params, msg.id), 100)
+        self.create_subscription(RpcRequest, 'bridge/rpc/request', self.guarded(
+            lambda msg: self.on_request(msg.method, msg.params, msg.id), 'bridge/rpc/request'), 100)
         self._methods_pub.publish(RpcMethods(node_id=NODE_ID, methods=sorted(self.core.methods)))
 
     def answer(self, rid: str, result: Optional[str], error, data: Optional[dict] = None):
@@ -324,11 +326,11 @@ class OsNode(base.MowbitePlannerNode):
     def events_input(self):
         # (before anything is planned: the progress goes out on it)
         self._publish_pub = self.create_publisher(MqttPublish, 'bridge/publish', 100)
-        self.create_subscription(MqttPublish, 'bridge/publish', self._on_publish, 100)
+        self.create_subscription(MqttPublish, 'bridge/publish', self.guarded(self._on_publish, 'bridge/publish'), 100)
         self.params_input()
 
     def params_input(self):
-        self.create_subscription(String, 'bridge/params', self._on_params, QoSProfile(
+        self.create_subscription(String, 'bridge/params', self.guarded(self._on_params, 'bridge/params'), QoSProfile(
             depth=50, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
@@ -395,8 +397,9 @@ class OsNode(base.MowbitePlannerNode):
     # the map: mowbite_map
 
     def map_input(self):
-        self.create_subscription(String, 'map/json', self._on_map, self.latched)
-        self.create_subscription(MapStatus, 'map/status', self._on_map_status, self.latched)
+        self.create_subscription(String, 'map/json', self.guarded(self._on_map, 'map/json'), self.latched)
+        self.create_subscription(MapStatus, 'map/status', self.guarded(self._on_map_status, 'map/status'),
+                                 self.latched)
         self._replace = self.create_client(ReplaceMap, 'map/replace')
 
     def _on_map(self, msg):
@@ -421,6 +424,11 @@ class OsNode(base.MowbitePlannerNode):
             return ''
         state = DATUM_STATES[status.datum_state] if status.datum_state < len(DATUM_STATES) else status.datum_state
         return f'the map can\'t be planned now (map/status {state}): {status.reason or "no reason given"}'
+
+    def no_area(self) -> str:
+        """mowbite_logic asks for an area of the map by its outline: one of no area (the map changed meanwhile, float32
+        far off its origin) isn't planned without the map's areas to keep out of, margins and dock."""
+        return 'the outline is no area of the map (to 1 mm): not planned (the map changed meanwhile?)'
 
     def replace_map(self, data: dict, based_on: Optional[str]):
         """data written with map/replace where map/json is still the text based_on (None: no check), then its new
