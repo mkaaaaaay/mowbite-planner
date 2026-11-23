@@ -367,6 +367,7 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         # body fits facing yaw, None if there's none within max_outside
         ux, uy = sign * math.cos(yaw), sign * math.sin(yaw)
         for k in range(int(max_outside / step + 1e-9) + 1):
+            check()  # (a planning stopped from outside ends here, progress.stoppable)
             if clear((p[0] + k * step * ux, p[1] + k * step * uy), yaw):
                 return k * step
         return None

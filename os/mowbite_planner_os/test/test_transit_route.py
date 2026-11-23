@@ -524,6 +524,20 @@ def test_stopped_anywhere_the_room_stays_good():
             assert [answer(*ask) for ask in asks] == want, at
 
 
+def test_stopped_on_the_way_in():
+    # a start far outside with a long max_outside (the node takes 1 m at most): stopped while looking for where the body
+    # fits on the way in, not only once the search has begun
+    def stop():
+        stop.seen += 1
+        return stop.seen > 5
+    stop.seen = 0
+    transit_route._ROOM.__dict__.clear()
+    with pytest.raises(progress.Stopped) as got:
+        with progress.stoppable(stop):
+            transit((-30.0, 3.0, 0.0), (5.0, 1.0), max_outside=40.0)
+    assert 'first_clear' in [f.name for f in got.traceback] and stop.seen == 6
+
+
 def test_at_the_goal():
     t = transit((2.0, 3.0, 0.0), (2.05, 3.0, 0.1))
     assert t.poses == [] and t.length == 0 and t.warnings == ['at the goal already']

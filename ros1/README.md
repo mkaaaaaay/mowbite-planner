@@ -43,6 +43,8 @@ and no planner, `mower_logic` gives up after 60 s and starts again every 70 s, a
 2. A stack of its own, e.g. `/opt/stacks/mowbite-planner/`, with [`compose.yaml`](compose.yaml). It builds the planner
    on the mower from this repository, on top of OpenMower's image. `docker compose up -d` there (Dockge: Deploy) and
    wait until `docker logs -f mowbite_planner` says `MowBite Planner answers /slic3r_coverage_planner/plan_path`.
+   With the mower docked and idle, and step 3 right after: till then the planner and OpenMower's slic3r run under the
+   same node name (`slic3r_coverage_planner`) and push each other out.
 3. Only then `OM_PLANNER=external` in OpenMower's `.env`, and OpenMower's stack restarted (`docker compose up -d`).
    OpenMower then doesn't start slic3r, the planner container starts again with it and answers.
 

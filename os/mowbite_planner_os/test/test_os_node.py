@@ -234,6 +234,9 @@ def test_temporary_obstacles_and_cut_plan(make):
     bad = node._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0], from_pose=99,
                                             drivable_areas=[polygon(GARDEN)]), CutPlan.Response())
     assert (bad.success, bad.code) == (False, 'BAD_REQUEST') and 'from_pose 99' in bad.message
+    wide = node._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0],
+                                             drivable_areas=[polygon(GARDEN)], max_outside=5.0), CutPlan.Response())
+    assert (wide.success, wide.code) == (False, 'BAD_REQUEST') and 'max_outside 5 m' in wide.message
     bare = make(body=None)
     early = bare._on_cut_plan(CutPlan.Request(start=pose(1.0, 1.2, 0.0), path=path, section_start=[0],
                                               drivable_areas=[polygon(GARDEN)]), CutPlan.Response())
@@ -483,6 +486,7 @@ def test_plan_transit_code(make, monkeypatch):
     node = make()
     res = transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2))
     assert res.success and res.code == ''
+    assert transit(node, (1.0, 1.0, 0.0), (6.5, 4.0, math.pi / 2), max_outside=os_module.MAX_OUTSIDE_ASKED).success
     far = [(20.0, 0.0), (28.0, 0.0), (28.0, 5.0), (20.0, 5.0)]
     for code, start, goal, fields in (
             ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'overrides': [override('nothing', 1.0)]}),
@@ -491,6 +495,8 @@ def test_plan_transit_code(make, monkeypatch):
             ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'goal_straight_length': -1.0}),
             ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'drivable_areas': []}),
             ('BAD_REQUEST', (math.nan, 1.0, 0.0), (6.5, 4.0, 0.0), {}),
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'max_outside': os_module.MAX_OUTSIDE_ASKED + 0.01}),
+            ('BAD_REQUEST', (1.0, 1.0, 0.0), (6.5, 4.0, 0.0), {'max_outside': math.inf}),
             ('START_OUTSIDE', (30.0, 1.0, 0.0), (6.5, 4.0, 0.0), {}),
             ('START_OUTSIDE', (7.9, 2.5, 0.0), (2.0, 2.0, 0.0), {'max_outside': 0.0}),  # (the nose over the edge)
             ('GOAL_OUTSIDE', (1.0, 1.0, 0.0), (5.5, 2.5, 0.0), {}),  # (in the bed)
@@ -529,9 +535,10 @@ def test_transit_search_limit(make, monkeypatch):
         res = transit(node, *ask)
         assert not res.success and res.code == 'SEARCH_LIMIT' and not res.path.poses
         assert res.message == 'planning the transit failed: no way found in 1e-09 s (transit_search_limit)'
-        # (not where there's nothing to look for)
-        assert transit(node, (30.0, 1.0, 0.0), ask[1]).code == 'START_OUTSIDE'
+        # (looked at on the way in too, before a start too far out is told of)
+        assert transit(node, (30.0, 1.0, 0.0), ask[1]).code == 'SEARCH_LIMIT'
         node._search_limit = 0.0
+        assert transit(node, (30.0, 1.0, 0.0), ask[1]).code == 'START_OUTSIDE'
         got = transit(node, *ask)
         assert got.success and way(got) == way(want)
     # (its clock from when it took the request, looked at in the search: a search that takes long ends)

@@ -19,7 +19,7 @@ geometry_msgs/Polygon[] obstacles
 # 16 at most, 3 to 64 points each, each within 3 m of its centre, else BAD_REQUEST
 geometry_msgs/Polygon[] temporary_obstacles
 # m, how far the start or the goal may lie outside of where the body fits (by the edge, the dock), the way from or to
-# there runs straight and unchecked. < 0: 0.5
+# there runs straight and unchecked. < 0: 0.5, more than 1.0: BAD_REQUEST
 float64 max_outside -1.0
 # Overrides for this request, any of the node's parameters by its name (e.g. turn_radius, turn_on_spot, robot_width).
 # Left out, the node's parameters apply.

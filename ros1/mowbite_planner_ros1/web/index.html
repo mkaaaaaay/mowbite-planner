@@ -235,6 +235,9 @@ const GROUPS = [['mower', 'Your mower', true], ['keep', 'Keeping off edges and o
                 ['drives', 'Driving between parts', false], ['extras', 'Extras', false], ['other', 'Other', false]];
 const NODE_ONLY = ['planner', 'leftovers_auto', 'remote_planning'];  // the node's own, planner.plan doesn't take them
 const PERCENT = ['overlap'];
+// come with mower_logic's request (its parameter), unless set here: back to that, not to the default (core.MOWER_LOGIC)
+const MOWER_LOGIC = {overlap: 'tool_width', perimeter_offset: 'outline_offset', perimeter_passes: 'outline_count',
+                     lane_overlap_passes: 'outline_overlap_count'};
 
 const $ = id => document.getElementById(id);
 const svg = $('map');
@@ -271,7 +274,18 @@ function round(v) { return Math.round(v * 1000) / 1000; }
 function globalValue(name) {  // for all areas, the changes not saved yet too
   const e = settings[name];
   if (!(name in pending)) return e.value;
-  return pending[name] === null ? e.default : pending[name];
+  return pending[name] === null ? backTo(name).value : pending[name];
+}
+
+// what counts once the saved value is gone, {value, from: mower_logic's parameter where it's its}: mower_logic's
+// (theirs, or the value while it's not saved) for the ones its request brings, else the default
+function backTo(name) {
+  const e = settings[name];
+  if (name in MOWER_LOGIC) {
+    if (e.theirs !== undefined) return {value: e.theirs, from: MOWER_LOGIC[name]};
+    if (e.from && e.from.startsWith('/mower_logic/')) return {value: e.value, from: MOWER_LOGIC[name]};
+  }
+  return {value: e.default};
 }
 
 // the chosen area's own settings, as the planner reads them from the map (mapfile.area_settings): OpenMower's
@@ -408,9 +422,10 @@ function row(name) {
   }
   const meta = document.createElement('div');
   meta.className = 'meta';
-  let m = 'default ' + text(e.default, e, name);
+  const back = backTo(name);
+  let m = 'default ' + text(back.value, e, name) + (back.from ? ' (OpenMower\'s ' + back.from + ')' : '');
   if (e.auto_value !== undefined) m += ', ' + e.auto_value + ': automatic';
-  if (e.from && !changed(name)) m += ' · now from OpenMower (' + e.from.split('/').pop() + ')';
+  if (e.from && !changed(name) && !back.from) m += ' · now from OpenMower (' + e.from.split('/').pop() + ')';
   if (e.stored) m += ' · saved';
   if (e.ignored) m += ' · not in use: ' + e.ignored;
   if (scope === 'area') {
@@ -508,11 +523,11 @@ function mark(name, message) {
   el.textContent = message;
 }
 
-function tried() {  // the changes for planner.plan (they beat the area's own): back to a default as its value
+function tried() {  // the changes for planner.plan (they beat the area's own): back to what counts then as its value
   const out = {}, own = areaOwn();
   for (const [n, v] of Object.entries(pending)) {
     if (NODE_ONLY.includes(n) || n in own) continue;
-    out[n] = v === null ? settings[n].default : v;
+    out[n] = v === null ? backTo(n).value : v;
   }
   for (const [n, v] of Object.entries(pendingArea)) out[n] = v === null ? globalValue(n) : v;
   return out;

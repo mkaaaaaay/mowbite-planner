@@ -10,6 +10,12 @@ services:
     pull_policy: build  # Dockge's Update builds the newest planner
     container_name: mowbite_planner
     restart: unless-stopped
+    # the mower's disk is small: the container's log kept to 2 files of 5 MB
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
     network_mode: host
     volumes:
       - /home/openmower/ros:/data/ros

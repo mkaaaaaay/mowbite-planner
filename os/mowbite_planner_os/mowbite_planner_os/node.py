@@ -152,6 +152,9 @@ SETTINGS_FILE = os.path.join('planner', 'mowbite_planner_settings.json')
 # s ~/plan_transit looks for a way at most by default (transit_search_limit; mowbite_logic waits plan_timeout, 30 s,
 # for its answer)
 SEARCH_LIMIT = 6.0
+# m, the most a request's max_outside may be (~/plan_transit, ~/cut_plan), more: BAD_REQUEST. The stretch from or to
+# there isn't checked: about a body's length (Tron 0.72 m) with some room, twice the default (callers ask 0.3 to 0.5)
+MAX_OUTSIDE_ASKED = 1.0
 # a plan refused for the body sticking out (checked) tells of this many places at most, poses this many m apart, each
 # with what the pose is part of (sweep.body_out's kind)
 BODY_OUT_SHOWN = 5
@@ -581,6 +584,10 @@ class OsNode(base.MowbitePlannerNode):
             values = self.values(request.overrides)
         except ValueError as e:
             return no('BAD_REQUEST', f'bad override: {e}')
+        try:
+            max_outside = max_outside_of(request.max_outside)
+        except ValueError as e:
+            return no('BAD_REQUEST', f'cutting the plan failed: {e}')
         why = self.no_body()
         if why:
             return no('NOT_READY', f'cutting the plan failed: {why}')
@@ -598,7 +605,6 @@ class OsNode(base.MowbitePlannerNode):
         obstacles = [base.xy(poly) for poly in request.obstacles]
         temporary = [base.xy(poly) for poly in request.temporary_obstacles]
         passing = [base.xy(poly) for poly in request.temporary_passing]
-        max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         limit = self.search_limit()
         data = self.core.current_map() if self.core is not None else None
         bodies, margins = bodies_for(data, drivable + obstacles), margins_for(data, obstacles)
@@ -642,6 +648,10 @@ class OsNode(base.MowbitePlannerNode):
             values = self.values(request.overrides)
         except ValueError as e:
             return no('BAD_REQUEST', f'bad override: {e}')
+        try:
+            max_outside = max_outside_of(request.max_outside)
+        except ValueError as e:
+            return no('BAD_REQUEST', f'planning the transit failed: {e}')
         why = self.no_body()
         if why:
             return no('NOT_READY', f'planning the transit failed: {why}')
@@ -661,7 +671,6 @@ class OsNode(base.MowbitePlannerNode):
         warnings = base.float32_warnings([*drivable, *obstacles])
         for w in warnings:
             self.get_logger().warning(w)
-        max_outside = float(request.max_outside) if request.max_outside >= 0.0 else MAX_OUTSIDE
         limit = self.search_limit()
         # (the body each one was recorded with, drawn or not, and each obstacle's own margin, from the map by its
         # outline)
@@ -802,6 +811,15 @@ def os_code() -> str:
 
 
 _OS_CODE = None
+
+
+def max_outside_of(asked: float) -> float:
+    """A request's max_outside: MAX_OUTSIDE where it's < 0 (or no number), ValueError over MAX_OUTSIDE_ASKED."""
+    if not asked >= 0.0:
+        return MAX_OUTSIDE
+    if not asked <= MAX_OUTSIDE_ASKED:
+        raise ValueError(f'max_outside {asked:g} m is more than {MAX_OUTSIDE_ASKED:g} m')
+    return float(asked)
 
 
 def _finite(v) -> bool:
