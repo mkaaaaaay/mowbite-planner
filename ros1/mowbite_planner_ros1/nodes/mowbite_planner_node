@@ -53,7 +53,9 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         choices, settable. Not settable: skip_area_outline and skip_obstacle_outlines of
                         mower_logic's request.
                         mower_width is the blade, it beats the mower_width parameter (OM_BLADE_WIDTH). robot_outline's
-                        type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r.
+                        type is points ([[x, y], ...]). planner (not a planner setting): mowbite or slic3r. theirs
+                        (perimeter_passes, perimeter_offset, lane_overlap_passes, overlap): mower_logic's value, what
+                        counts once the one set here is gone.
                         leftovers_auto (the node's too): see below. remote_planning (the node's): see below, ignored
                         with why while there's no house computer with the code of here (no house computer, house
                         computer out of date); the block remote: {reachable, arch, code_match, stack_match, why}. drive (forward, slope, reverse; for all areas and
@@ -93,7 +95,10 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         one of these: most_left (that), nothing_left (the mower gets to none of what's left). arm
                         true: the next plans mower_logic asks for (within LEFTOVERS_ARMED s) are these, an area
                         without paths gets none (mower_logic skips it): start mowing as ever and the mower only mows
-                        what was left. That job doesn't count as a mow (angle_increment, duration). armed: s it still is
+                        what was left, an area they aren't of gets none either (armed for one area: only it). The job
+                        that takes them first keeps them (bound to its id, over a restart too) till it ends or another
+                        job starts; that job doesn't count as a mow (angle_increment, duration). armed: s it still is
+                        (LEFTOVERS_JOB while it's bound to its job)
   planner.simulate      the plan of planner.plan (its params: area_id or outline, settings...) driven by a simulated
                         mower (mowbite_sim.simulate: OpenMower's FTC controller and mower_logic, the drive,
                         xbot_positioning, each a bit off like on a real mower): {model (a preset: realistic, the
@@ -169,8 +174,15 @@ the house first (mowbite_planner.house, see RemotePlanning): over the mower's ow
 with this code on this stack. The node builds the plan's geometry itself and takes it only where its own checks
 (mowbite_planner.remote.refused: its form, check_plan's rules with this body) find nothing; else, when the house
 computer says nothing for REMOTE_STALL s or has no plan in REMOTE_TIMES what the area's last planning took, it plans
-itself (why in the log and the progress). The planner's no there is its no. The plans mower_logic got stay kept (in
-memory and plans_dir) till its job ends (JOB_COMPLETE, JOB_RESET): resuming finds them, wherever they were planned.
+itself (why in the log and the progress), its no too (the no of here counts); mower_logic's plan waits REMOTE_MOWER s
+at most there. The plans mower_logic got stay kept (in memory and plans_dir) till its job ends (JOB_COMPLETE,
+JOB_RESET): resuming finds them, wherever they were planned. A plan asked for while mower_logic is idle (a preview,
+mowing.plan) isn't the job's: not kept for it, nor does it take the leftovers armed.
+
+With use_map mower_logic's plan waits MAP_FIRST s at most for the first map, then it's refused (a failed call:
+mower_logic docks and ends the job, that JOB_COMPLETE is no finished mow); a map that isn't readable isn't planned with,
+nor the one before it, till a readable one comes. An outline of no area of the map is planned without the map's areas
+to keep out of, margins and dock, said in the log (a preview of an outline being edited).
 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's

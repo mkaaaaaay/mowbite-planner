@@ -85,7 +85,7 @@ on. An interrupted area whose plan changes starts again.
 with a short help, for all areas or one area's own, an obstacle's own gap (tap it on the map), and a preview of the
 plan with what's left unmowed. An area's settings and an obstacle's gap go into OpenMower's map, the map before is
 kept in `/home/openmower/ros/mowbite_map_backups` (the last 10). No login: anyone on your network can change them, as
-over MQTT.
+over MQTT. Open it by the mower's address, its host name or `<host name>.local` (another name gets 403).
 
 Loops, `perimeter_offset` and `lane_overlap_passes` come from OpenMower's parameters (`outline_count`, ...) until you
 set them here. An area's own values in the map beat both. The lane spacing the planner picks itself from the blade
