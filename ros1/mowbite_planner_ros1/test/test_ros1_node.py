@@ -2926,8 +2926,10 @@ def test_the_jobs_plans_kept(planner, monkeypatch):
     monkeypatch.setattr(core, 'CACHED_PLANS', 2)
     monkeypatch.setattr(core, 'DISK_PLANS', 2)
     send_map(the_map())
+    assert rpc('planner.settings')[0]['job_open'] is False
     planner.handle(request())
     key, = planner.pinned
+    assert rpc('planner.settings')[0]['job_open'] is True  # (planner.settings: who saves asks first)
 
     def others(*angles):
         for angle in angles:
@@ -2938,6 +2940,7 @@ def test_the_jobs_plans_kept(planner, monkeypatch):
     event('JOB_COMPLETE')
     others(0.4, 0.5)
     assert key not in planner.plans and not os.path.exists(planner.plan_file(key)) and planner.pinned == set()
+    assert rpc('planner.settings')[0]['job_open'] is False
     planner.handle(request())
     restarted = node_module.MowbitePlannerRos1()  # (the events go to it from now on)
     assert restarted.pinned == {key}

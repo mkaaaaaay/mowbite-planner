@@ -890,6 +890,7 @@ def test_plan_coverage_code(make, planned):
     give(node, 'map/status', MapStatus(datum_state=MapStatus.DATUM_MATCH))
     res = plan_area(node)
     assert res.success and res.code == '' and node.core.pinned  # (the job's plan, kept till it ends)
+    assert rpc(node, 'planner.settings')[0]['job_open'] is True
     request = PlanCoverage.Request(boundary=polygon(GARDEN), overrides=[override('robot_width', 0.3)])
     assert node._on_plan_coverage(request, PlanCoverage.Response()).code == 'BAD_REQUEST'
     # (an outline of no area of the map: not planned without the map's areas to keep out of, margins and dock)

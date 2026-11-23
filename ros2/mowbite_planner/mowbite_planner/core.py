@@ -1041,7 +1041,9 @@ class PlannerCore:
             out[name].update({'settable': False, 'from': where})
         # angle_increment: the steps turned so far and the finished mows towards the next one (and all of them)
         steps, mows = self.angle['steps'], self.angle['mows']
-        return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None,
+        with self.plans_lock:  # (a mow's plans kept: under way or paused, an area whose plan changes starts again)
+            job_open = bool(self.pinned)
+        return {'settings': out, 'own_angle': current.own_angle, 'file': self.file or None, 'job_open': job_open,
                 'angle_steps': steps, 'angle_mows': mows,
                 'angle_turned': steps * current.base.angle_increment, 'finished_mows': self.angle['finished'],
                 'remote': house or {'reachable': False, 'arch': None, 'code_match': False, 'stack_match': False,

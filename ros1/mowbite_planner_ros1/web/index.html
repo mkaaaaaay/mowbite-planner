@@ -446,6 +446,7 @@ function row(name) {
     again.textContent = 'start again';
     again.disabled = !turned.angle_steps && !turned.angle_mows;
     again.onclick = async () => {
+      if (!await goOn()) return;
       try { took(await rpc('planner.angle.reset')); status('the stripes start again at 0°'); preview(); }
       catch (err) { status('not reset: ' + err.message, true); }
     };
@@ -453,6 +454,14 @@ function row(name) {
     div.append(t);
   }
   return div;
+}
+
+// before a change is saved: a mow under way or paused (job_open) starts an area again whose plan changes
+async function goOn() {
+  let open = false;
+  try { open = (await rpc('planner.settings')).job_open === true; } catch (err) { /* (saved without asking) */ }
+  return !open || confirm('A mow is under way or paused. An area whose plan changes starts again from its ' +
+                          'beginning. Save anyway?');
 }
 
 function took(got) {  // planner.settings' answer
@@ -815,6 +824,7 @@ function obstacle(id) {
   save.className = 'primary'; save.textContent = 'Save';
   save.onclick = async () => {
     save.disabled = true;
+    if (!await goOn()) { save.disabled = false; return; }
     const v = gap.value.trim();
     try {
       await rpc('planner.area.set', {area_id: id, margin: v === '' ? null : Number(v) / 100});
@@ -870,6 +880,7 @@ $('discard').onclick = () => {
 };
 $('save').onclick = async () => {
   $('save').disabled = true;
+  if (!await goOn()) { $('save').disabled = false; return; }
   try {
     if (scope === 'area') {
       await rpc('planner.area.set', {area_id: areaId, settings: pendingArea});
