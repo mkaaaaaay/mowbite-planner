@@ -5,8 +5,9 @@ services:
       context: https://github.com/mkaaaaaay/mowbite-planner.git#main
       dockerfile: ros1/Dockerfile
       args:
-        OPENMOWER_IMAGE: ghcr.io/clemenselflein/open_mower_ros:${OPENMOWER_VERSION:-edge}
-    image: mowbite_planner:${OPENMOWER_VERSION:-edge}
+        # OpenMower's VERSION (its .env): the planner is built on that image, the messages have to be the same
+        OPENMOWER_IMAGE: ghcr.io/clemenselflein/open_mower_ros:${OPENMOWER_VERSION:-latest}
+    image: mowbite_planner:${OPENMOWER_VERSION:-latest}
     pull_policy: build  # Dockge's Update builds the newest planner
     container_name: mowbite_planner
     restart: unless-stopped

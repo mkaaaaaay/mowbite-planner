@@ -33,15 +33,18 @@ just use it. It runs in its own container next to OpenMower's.
 
 ## Setup
 
-Needs OpenMower's `edge` image (open_mower_ros #363 for `OM_PLANNER=external`, #364 so `mower_map` keeps the extra
-area properties). Both are in `edge` since 8 October 2026, not in a release yet.
+Needs open_mower_ros 1.5.0 or newer (#363 for `OM_PLANNER=external`, #364 so `mower_map` keeps the extra area
+properties; released 21 November 2026, image tags `1.5.0`, `1.5`, `latest`), or `edge`. The planner is built on
+OpenMower's image: `OPENMOWER_VERSION` in its stack's `.env` is OpenMower's `VERSION` (default `latest`).
 
 On OpenMowerOS v2, in this order. The planner has to answer before OpenMower drops slic3r: with `OM_PLANNER=external`
 and no planner, `mower_logic` gives up after 60 s and starts again every 70 s, and the mower does nothing.
 
-1. OpenMower on `edge`: `VERSION="edge"` in its `.env` (Dockge, stack `openmower`), restarted. Still with slic3r.
-2. A stack of its own, e.g. `/opt/stacks/mowbite-planner/`, with [`compose.yaml`](compose.yaml). It builds the planner
-   on the mower from this repository, on top of OpenMower's image. `docker compose up -d` there (Dockge: Deploy) and
+1. OpenMower on 1.5.0 or newer: `VERSION` in its `.env` (Dockge, stack `openmower`) `latest`, `1.5.0` or `edge`,
+   restarted. Still with slic3r.
+2. A stack of its own, e.g. `/opt/stacks/mowbite-planner/`, with [`compose.yaml`](compose.yaml) and in its `.env`
+   `OPENMOWER_VERSION` as OpenMower's `VERSION`. It builds the planner on the mower from this repository, on top of
+   OpenMower's image. `docker compose up -d` there (Dockge: Deploy) and
    wait until `docker logs -f mowbite_planner` says `MowBite Planner answers /slic3r_coverage_planner/plan_path`.
    With the mower docked and idle, and step 3 right after: till then the planner and OpenMower's slic3r run under the
    same node name (`slic3r_coverage_planner`) and push each other out.
@@ -51,9 +54,9 @@ and no planner, `mower_logic` gives up after 60 s and starts again every 70 s, a
 Updating: the [MowBite Updater](https://github.com/mkaaaaaay/mowbite-updater) (part of MowBite) offers a new build
 when this repository's `main` moved or OpenMower's image changed under it, and restarts the planner only when the image
 changed. By hand: Update in Dockge (`docker compose up -d`: with `pull_policy: build` it builds the newest planner every
-time, so starting it from Dockge needs the internet). After an OpenMower update too, then `docker image prune -f &&
-docker builder prune -f`: the planner image is built on OpenMower's, the old one would keep the old OpenMower image
-(GBs) on the disk, and every build leaves some build cache.
+time, so starting it from Dockge needs the internet). After an OpenMower update too (`OPENMOWER_VERSION` as its new
+`VERSION`), then `docker image prune -f && docker builder prune -f`: the planner image is built on OpenMower's, the old
+one would keep the old OpenMower image (GBs) on the disk, and every build leaves some build cache.
 
 Going back, the other way round: `OM_PLANNER` out of OpenMower's `.env`, OpenMower restarted (`VERSION` as before if
 you like), then the planner stack stopped.

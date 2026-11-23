@@ -2,7 +2,7 @@
 # see compose.yaml). Built on OpenMower's image of the same version: ROS, OpenMower's messages and its slic3r planner
 # (for the setting planner slic3r) come from it, and its layers are on the mower already. Build context: this
 # repository's root.
-ARG OPENMOWER_IMAGE=ghcr.io/clemenselflein/open_mower_ros:edge
+ARG OPENMOWER_IMAGE=ghcr.io/clemenselflein/open_mower_ros:latest
 FROM ${OPENMOWER_IMAGE}
 
 USER root
