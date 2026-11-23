@@ -47,12 +47,9 @@ def _stop_pool() -> None:
         if pool is None or all(f.done() for f in list(_HANDED)):
             return
         _POOL = None
-    end = getattr(pool, 'terminate_workers', None)  # (Python 3.14)
-    if end is not None:
-        end()
-    else:
-        for process in list((getattr(pool, '_processes', None) or {}).values()):
-            process.terminate()
+    # (not Python 3.14's terminate_workers: it shuts the pool down first, a process may get by it then and plan on)
+    for process in list((getattr(pool, '_processes', None) or {}).values()):
+        process.terminate()
     pool.shutdown()  # (at once, they're gone; not waiting for its thread, Python 3.8's fails on the closed pipe)
 
 
