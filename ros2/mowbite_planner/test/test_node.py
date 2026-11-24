@@ -723,13 +723,23 @@ def test_a_robots_last_check(make, planned, tmp_path):
     assert node.core.plans == kept and sorted(glob.glob(str(tmp_path / 'planner' / 'plans' / '*.pkl'))) == plans
     assert len(node.publishers['~/coverage_path'].published) == sent
     assert plan_area(node).message.startswith('area a, kept from before: ')  # (one it took before stays)
-    # (without the map: the request's own)
-    bare = make(Picky)
+    # (use_map off: the request's own)
+    bare = make(Picky, use_map=False)
     assert plan_area(bare).success and len(bare.seen) == 1 and len(bare.publishers['~/coverage_path'].published) == 1
     bare.refuses = 'nor this'
     res = plan_area(bare)
     assert not res.success and (res.code, res.message) == ('BODY_OUT', 'nor this')
     assert len(bare.publishers['~/coverage_path'].published) == 1
+
+
+@fake_only
+def test_plan_coverage_without_the_map(make):
+    """With use_map and no map yet: NOT_READY (the .srv's word), nothing planned from the node's parameters."""
+    node = make()
+    got = plan_area(node)
+    assert (got.success, got.code) == (False, 'NOT_READY') and 'no map yet' in got.message and not got.path.poses
+    send_map(node, the_map())
+    assert plan_area(node).success
 
 
 @fake_only

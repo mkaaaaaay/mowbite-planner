@@ -40,7 +40,7 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
     area (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
     request give the same plan (kept); armed leftovers (planner.leftovers arm) are the plan of their area until that
     job ends, an area without them gets success with no poses. Planned in the core's worker, before what waits there.
-    Without a map as ever.
+    Without a map (none came yet) NOT_READY.
   - the events of the robot's logic on ~/events (STATE, JOB_COMPLETE, JOB_RESET as OpenMower's events/json):
     angle_increment, perimeter_direction random, the finished mow's planner.drive and timing.
   - the planning's progress (mowbite/planner/progress, see the ROS 1 node's top) as JSON {topic, payload, retain} on
@@ -879,12 +879,16 @@ class MowbitePlannerNode(Node):
 
     def _plan_area(self, request, response, values: dict):
         """~/plan_coverage with a map: of an area of it (its outline as boundary) or of an outline of none (a preview),
-        planned like planner.plan plans it (see the top), in the core's worker before what waits there. None without
-        a map."""
+        planned like planner.plan plans it (see the top), in the core's worker before what waits there. NOT_READY
+        without a map."""
         core = self.core
         data = core.plan_map(core.current_map())
         if data is None:
-            return None
+            response.success = False
+            response.code = 'NOT_READY'
+            response.message = 'no map yet (use_map): not planned, ask again when there is one'
+            self.get_logger().warning(response.message)
+            return response
         return core.worker.run(MOWER, self._area_plan, request, response, values, data, job='mower')
 
     def _area_plan(self, request, response, values: dict, data: dict):

@@ -177,11 +177,12 @@ def answer(node, rid, wait=60.0):
     raise AssertionError(f'no answer to {rid}')
 
 
-def plan_area(node, boundary=GARDEN):
+def plan_area(node, boundary=GARDEN, overrides=()):
     """~/plan_coverage as mowbite_logic asks it for area a: its outline and the map's obstacles."""
     request = PlanCoverage.Request()
     request.boundary = polygon(boundary)
     request.obstacles = [polygon(BED)]
+    request.overrides = list(overrides)
     return node._on_plan_coverage(request, PlanCoverage.Response())
 
 
@@ -874,15 +875,15 @@ def test_the_first_section_from_the_start(make, monkeypatch):
 
 @fake_only
 def test_plan_coverage_code(make, planned):
-    """~/plan_coverage's code on MowBite OS: NOT_READY without the body or while the map can't be planned (with the
-    map and without), the others as mowbite_planner's node gives them."""
+    """~/plan_coverage's code on MowBite OS: NOT_READY without the body, without the map or while it can't be planned,
+    the others as mowbite_planner's node gives them."""
     bare = make(None)
     send_map(bare, the_map())
     res = plan_area(bare)
     assert not res.success and res.code == 'NOT_READY' and 'no dimensions of the mower yet' in res.message
     bare.core.map = None
     res = plan_area(bare)
-    assert not res.success and res.code == 'NOT_READY' and 'no dimensions of the mower yet' in res.message
+    assert not res.success and res.code == 'NOT_READY' and 'no map yet' in res.message
     node = make()
     send_map(node, the_map(), MapStatus.DATUM_MISMATCH)
     res = plan_area(node)
@@ -932,9 +933,8 @@ def test_every_plan_checked_once_more(make, planned, monkeypatch, tmp_path):
     shown = [json.loads(m.payload) for m in node.publishers['bridge/publish'].published
              if m.topic == 'mowbite/planner/progress']
     assert shown[-1]['error'] == no and not shown[-1]['running']
-    # (without the map, and what a mow left)
-    node.core.map = None
-    res = plan_area(node)
+    # (use_map off, and what a mow left)
+    res = plan_area(node, overrides=[override('use_map', False)])
     assert not res.success and res.code == 'BODY_OUT' and res.message.startswith('the plan is not given out, ')
     assert not node.publishers['~/coverage_path'].published
     with pytest.raises(PlanningError, match='^the plan is not given out') as e:
@@ -1026,8 +1026,9 @@ def test_body_from_robot_geometry(make, planned, tmp_path):
     assert plan_area(node).success and planned.config().mower_width == 0.18
     node.geometry, node.geometry_why = (6, dict(node.geometry[1], robot_width=0.5)), ''  # (as _on_geometry, before)
     assert plan_area(node).message == "area a: the mower's dimensions (version 6) not taken yet"
-    # (without a map: in the worker, with the body)
+    # (use_map off: in the worker, with the body; without a map NOT_READY)
     node.core.map = None
+    assert plan_area(node).code == 'NOT_READY'
     threads = []
     real = node_module.plan_coverage
 
@@ -1037,7 +1038,8 @@ def test_body_from_robot_geometry(make, planned, tmp_path):
     node_module.plan_coverage = where
     try:
         geometry(node, version=6, robot_width=0.5)
-        assert plan_area(node).success and threads == ['planner worker'] and planned.config().robot_width == 0.5
+        assert plan_area(node, overrides=[override('use_map', False)]).success and threads == ['planner worker'] and \
+            planned.config().robot_width == 0.5
     finally:
         node_module.plan_coverage = real
 
