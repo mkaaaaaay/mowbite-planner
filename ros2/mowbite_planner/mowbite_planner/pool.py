@@ -66,17 +66,29 @@ def _stop_pool() -> None:
     pool.shutdown()  # (at once, they're gone; not waiting for its thread, Python 3.8's fails on the closed pipe)
 
 
+def _drop(pool: ProcessPoolExecutor) -> None:
+    """pool can't plan any more (broken or shut down): not asked again, a new one when next asked."""
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is pool:
+            _POOL = None
+    pool.shutdown()
+
+
 def later(fn: Callable, args: tuple, kw: Dict[str, Any]) -> 'Future':
-    """fn(args, kw) in a process of the pool where there's one (a future of it), else at once."""
-    pool = _pool()
-    if pool is not None:
+    """fn(args, kw) in a process of the pool where there's one (a future of it), else at once; a broken pool is
+    replaced (_drop)."""
+    for _ in range(2):  # (one of its processes died meanwhile, or it's shut down: once more in a new one)
+        pool = _pool()
+        if pool is None:
+            break
         try:
             future = pool.submit(fn, args, kw)
             _HANDED.add(future)
             future.add_done_callback(_HANDED.discard)
             return future
-        except (BrokenProcessPool, RuntimeError):  # (one of them died, or it's shut down: in this one)
-            set_workers(_WORKERS)
+        except (BrokenProcessPool, RuntimeError):
+            _drop(pool)
     check()
     done: Future = Future()
     try:

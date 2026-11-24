@@ -2291,6 +2291,26 @@ def test_workers_plan_at_the_lowest_priority():
     assert os.nice(0) == before
 
 
+def test_a_broken_pool_is_replaced():
+    """A process of the pool died while it was idle: the next plan goes to a new pool, not to this process."""
+    try:
+        planner.set_workers(1)
+        old = pool._pool()
+        assert old.submit(divmod, 7, 2).result(60) == (3, 1)
+        for process in list(old._processes.values()):
+            process.terminate()
+            process.join(10)
+        until = time.monotonic() + 10
+        while not old._broken and time.monotonic() < until:
+            time.sleep(0.05)
+        assert old._broken
+        future = pool.later(divmod, 7, 2)
+        assert future.result(60) == (3, 1) and pool._POOL is not None and pool._POOL is not old
+        assert all(p.is_alive() for p in pool._POOL._processes.values())
+    finally:
+        planner.set_workers(0)
+
+
 def test_stopped_planning():
     """A planning stopped from outside (progress.stoppable) ends with Stopped at its next step, in this thread and with
     processes of its own (those at its plans ended); the same planned after is the plan planned without it."""
