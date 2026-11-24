@@ -27,7 +27,7 @@ from shapely.ops import nearest_points
 
 from .backing import CORNER_COS, CORNER_STEP
 from .config import CoveragePlan, PlanningError, SegmentInfo
-from .footprint import Footprint
+from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, polygons
 from .maneuvers import path_length, same_position
 from .mathutil import Pose2D, angle_diff
@@ -133,8 +133,10 @@ class _Walk:
         before it turned out to end in a dead end (changed: n again from where the robot is now)."""
         a, last = self.bounds[n]
         c = self.came()
-        if a and c is not None and same_position((c.x, c.y), (self.poses[a].x, self.poses[a].y)):
-            self.keep(n, a)  # (there already)
+        p = self.poses[a]
+        there = c is not None and same_position((c.x, c.y), (p.x, p.y))
+        if a and there and (c.yaw is None or angle_diff(c.yaw, p.yaw) <= SPIN):
+            self.keep(n, a)  # (there already, facing its way: else turning there is arrives' to check)
             return True
         try:
             got = _first_reached(self.poses, a, last, lambda p: self.gets_to(p, c))

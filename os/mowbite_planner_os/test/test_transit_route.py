@@ -546,9 +546,17 @@ def test_at_the_goal():
         t = transit(start, goal)
         check(t, start, goal)
         assert t.spins == [] and t.length < 2.5
-    # with turn_on_spot turning there is up to the driver
+    # with turn_on_spot turning there is up to the driver where the body turns there (Review 19), by the tree it doesn't
+    # where the mower is: a way like any other (on to the goal turning there, or round)
     t = transit((2.0, 3.0, 0.0), (2.05, 3.0, math.pi), {'turn_on_spot': True})
-    assert t.poses == [] and '180 deg off its heading' in t.warnings[0]
+    assert t.poses == [] and '180 deg off its heading' in t.warnings[0] and 'checked' in t.warnings[0]
+    t = transit((4.0, 3.0, math.pi), (3.95, 3.0, 0.5 * math.pi), {'turn_on_spot': True})
+    assert t.poses == [] and '90 deg off its heading' in t.warnings[0]
+    for x in (4.1, 4.15):
+        start, goal = (x, 3.0, math.pi), (x - 0.05, 3.0, 0.5 * math.pi)
+        t = transit(start, goal, {'turn_on_spot': True})
+        assert t.poses and not any('at the goal already' in w for w in t.warnings)
+        check(t, start, goal, {'turn_on_spot': True})
 
 
 def test_without_body():

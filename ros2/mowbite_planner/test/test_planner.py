@@ -1709,6 +1709,43 @@ def test_body_fit_starts_later(monkeypatch):
     assert any('places left out' in w for w in plan.warnings)
 
 
+def test_body_fit_jump_ways_through_turn_room(monkeypatch):
+    """Review 19: where the path jumps within a section (nothing tried for a place here, FIT_TRIES 0), mower_logic turns
+    on the spot where the section before ends and where the next one starts unchecked: a way from there to where the
+    body turns whatever way it faces and one from there in, both checked (the sections ending and starting there, or a
+    step off: the same place is one pose), else (no ways tried for them, FIT_ROUND 0) the
+    place said, unchecked, and check_plan finding the turn there."""
+    loops_by_heading(monkeypatch)
+    cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
+    monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
+    monkeypatch.setattr('mowbite_planner.rings.repaired', lambda poses, *args, **kw: (poses, 0, 0))
+    monkeypatch.setattr(bodyfit, 'FIT_TRIES', 0)
+    monkeypatch.setattr(bodyfit, 'FIT_TRIES_M', 0.0)
+    for tried in (FIT_ROUND, 0):
+        monkeypatch.setattr(bodyfit, 'FIT_ROUND', tried)
+        config._FITTED.clear()
+        plan = plan_coverage(GARDEN, [TREE, BED], cfg, start=(0.95, 1, 0.0), end=(1, 1))
+        fit, fp = plan.stats['body_fit'], plan_footprint(plan)
+        room = fp.turning.anywhere.intersection(plan.transit_space)
+        assert fit['left'] == len(fit['jumps']) == len(plan.section_starts) - 1 > 0
+        out = check_plan(plan)['body_out']
+        if tried:
+            assert fit['unchecked'] == [] and out == [] and fit['fixed'] >= 2 * fit['left']
+            for a in plan.section_starts[1:]:
+                assert all(room.distance(Point(p.x, p.y)) < cfg.waypoint_spacing + 1e-3 for p in plan.poses[a - 1:a + 1])
+            continue
+        said = [a for a in plan.section_starts[1:] if any(
+            room.distance(Point(p.x, p.y)) > 1e-3 for p in plan.poses[a - 1:a + 1])]
+        assert said and [[round(plan.poses[a].x, 2), round(plan.poses[a].y, 2)] for a in said] == \
+            fit['unchecked'][-len(said):]
+        assert any("the body isn't checked" in w for w in plan.warnings)
+        assert any(o['kind'] == 'spin' for o in out)
+        assert all(min(math.hypot(o['x'] - plan.poses[a].x, o['y'] - plan.poses[a].y) for a in said) <= 1.0
+                   for o in out)
+        # (a plan whose sections a robot's arrives got to, starts.reached_starts: the ways over are its, not checked)
+        assert check_plan(dataclasses.replace(plan, stats=dict(plan.stats, starts={})))['body_out'] == []
+
+
 def test_body_fit_place_where_it_sticks_out_most():
     """A loop getting closer to the edge till it turns away (the body sticking out further and further, most turning on
     the spot at the corner, its rear corner swinging out 0.244 - 0.15 m): the path goes another way there, the place at
@@ -2406,7 +2443,8 @@ def test_body_fit_bounded(monkeypatch):
     """A dead end too narrow to turn round in without backing up: the plan gets done, nothing sticking out, no more than
     FIT_PLACE ways tried for a place (none: none tried), FIT_ROUND turning round there, nor FIT_TRIES for all
     (FIT_TRIES_M 0 here), but for the ways to the start and from the end: FIT_ROUND from each of their points on top.
-    Where it may try none it leaves out what doesn't fit and jumps over it, a warning saying where."""
+    Where it may try none it leaves out what doesn't fit and jumps over it, a warning saying where, the turn there
+    unchecked (Review 19)."""
     shape = [(0, 0), (6, 0), (6, 3), (3.3, 3), (3.3, 13), (2.7, 13), (2.7, 3), (0, 3)]
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
     monkeypatch.setattr(bodyfit, 'FIT_TRIES_M', 0.0)
@@ -2419,10 +2457,18 @@ def test_body_fit_bounded(monkeypatch):
         check_invariants(plan, cfg)
         fit = plan.stats['body_fit']
         leads = 2 * turning * (FIT_SPOTS + 1)
-        assert check_plan(plan)['body_out'] == [] and fit['tries'] <= tries + leads
+        out = check_plan(plan)['body_out']
+        assert fit['tries'] <= tries + 2 * leads  # (a jump in the dead end: ways out of it and in tried too)
         assert (fit['tries'] > 0) == (sum(place) > 0)
         assert bool(fit['jumps']) == (tries == 50 or not turning) == (len(plan.section_starts) > 1)
-        if fit['jumps']:
+        if not fit['jumps']:
+            assert out == []
+        else:
+            # (turning round where it jumps, in the dead end, is mower_logic's own, unchecked: said, the report finds it
+            # there; with no ways tried for them at the others too)
+            said = fit['unchecked']
+            assert said and out and all(min(math.hypot(o['x'] - x, o['y'] - y) for x, y in said) <= 1.0 for o in out)
+            assert any(y > 9 for _, y in said)
             assert all(y > 9 for _, y in fit['jumps'][-1:])
             assert any('places left out' in w and f'({fit["jumps"][-1][0]:.2f}, {fit["jumps"][-1][1]:.2f})' in w
                        for w in plan.warnings)

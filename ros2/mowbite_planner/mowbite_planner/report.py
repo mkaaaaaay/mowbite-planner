@@ -199,8 +199,9 @@ def rules(plan: CoveragePlan) -> Dict[str, Any]:
             and (cfg is None or cfg.drive == 'forward'):
         hard.append('drives backwards')
     footprint = plan_footprint(plan, blade=False)
-    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan)) \
-        if footprint is not None else []
+    # (the ways over between sections where no arrives checked them, see starts.reached_starts)
+    body = body_out(poses, plan.segments, plan.section_starts, footprint, recorded_footprint(plan),
+                    between='starts' not in plan.stats) if footprint is not None else []
     if body:
         hard.append(f'the body sticks out past the edges at {len(body)} poses, the first ({body[0]["kind"]}) at '
                     f'({body[0]["x"]:.2f}, {body[0]["y"]:.2f})')

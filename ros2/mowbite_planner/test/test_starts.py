@@ -55,6 +55,23 @@ def ends(p):
             for k in range(len(p.segments)) if k == 0 or p.segments[k].section != p.segments[k - 1].section]
 
 
+def test_there_already_facing_its_way():
+    """A section starting where the one before ends is got to without asking only facing its way (within SPIN), else
+    arrives says whether turning there gets to it (Review 19: a turn refused there before)."""
+    base = plan()
+    a = [Pose2D(1.0 + 0.1 * i, 2.0, 0.0) for i in range(21)]
+    for yaw, asks in ((0.05, 1), (0.5 * math.pi, 2)):
+        b = [Pose2D(3.0 + 0.1 * i * math.cos(yaw), 2.0 + 0.1 * i * math.sin(yaw), yaw) for i in range(21)]
+        two = CoveragePlan(**dict(vars(base), poses=a + b, segments=[SegmentInfo(LANE, 0, 20, False, '', 0),
+                                                                     SegmentInfo(LANE, 21, 41, False, '', 1)],
+                                  section_starts=[0, 21]))
+        asked = []
+        got = reached_starts(two, lambda pose, came: asked.append((pose, came)) or True)
+        assert got.poses == two.poses and len(asked) == asks
+        if asks == 2:
+            assert asked[1] == (b[0], a[-1])
+
+
 def test_where_the_robot_comes_from():
     # the first section from wherever the robot is (None), each other one from where the section before it that's kept
     # ends: a section left out leaves the robot where it was

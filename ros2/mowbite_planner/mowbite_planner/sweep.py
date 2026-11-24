@@ -8,7 +8,7 @@ from shapely.geometry import LineString, MultiLineString, Polygon
 from .config import PERIMETER, SWEPT_PIECE, SWEPT_SLACK, TRANSIT, TURN, XY, CoveragePlan, PlannerConfig, SegmentInfo
 from .footprint import BLADE_SLACK, SPIN, SPIN_BACK, Blade, Footprint
 from .geometry import union
-from .mathutil import Pose2D, normalize_angle
+from .mathutil import Pose2D, angle_diff, normalize_angle
 from .progress import check
 from .space import loop_footprint
 
@@ -17,6 +17,11 @@ from .space import loop_footprint
 # ask about the same stretches again and again), cleared at this many
 BLADES_KEPT = 1024
 _blades: Dict[tuple, Any] = {}
+# m: where a section starts closer than SECTION_NEAR to where the one before ends, body_out checks the way over as
+# mower_logic drives it (turning on the spot to face the start, straight there, poses SECTION_STEP apart, turning to the
+# start's heading); further apart the parts have no way between them anyway (MowBite OS plans its own, starts.py)
+SECTION_NEAR = 1.0
+SECTION_STEP = 0.05
 
 
 def blade(cfg: PlannerConfig, *runs: Sequence[Pose2D], whole: bool = False):
@@ -110,11 +115,14 @@ def recorded_footprint(plan: CoveragePlan) -> Optional[Tuple[Footprint, Tuple[st
 
 
 def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: List[int],
-             footprint: Footprint, recorded: Optional[Tuple[Footprint, Sequence[str]]] = None) -> List[Dict[str, Any]]:
+             footprint: Footprint, recorded: Optional[Tuple[Footprint, Sequence[str]]] = None,
+             between: bool = False) -> List[Dict[str, Any]]:
     """The poses where the body sticks out: [{x, y, yaw, kind}], kind 'spin' (turning on the spot there), 'turn',
     'lane_end', 'loop' or 'transit' (what the pose belongs to). On the turns between lanes spin_margin further in
     (footprint.OnTurn). Turning on the spot where it came backing up, the way in is ahead of it (segments driven
-    backwards). recorded (recorded_footprint): the recorded loop's poses in its own space instead."""
+    backwards). recorded (recorded_footprint): the recorded loop's poses in its own space instead. between: where a
+    section starts close to where the one before ends, the way over too (SECTION_NEAR: a plan mower_logic drives; one
+    that went through starts.reached_starts has its ways there checked by the robot's arrives)."""
     kind_at: Dict[int, str] = {}
     on_turn = [False] * len(poses)  # (on the way to it: a turn between lanes)
     for seg in segments:
@@ -140,6 +148,22 @@ def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: L
             p = part[i]
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
                         'kind': 'spin' if footprint.spins(part, i) else kind_at.get(a + i, 'transit')})
+    for a in section_starts[1:] if between else ():  # (the ways over close to the sections' ends, see SECTION_NEAR)
+        if not 0 < a < len(poses):
+            continue
+        e, s = poses[a - 1], poses[a]
+        d = math.hypot(s.x - e.x, s.y - e.y)
+        if d > SECTION_NEAR:
+            continue
+        h = math.atan2(s.y - e.y, s.x - e.x) if d > 1e-6 else s.yaw
+        k = max(1, int(math.ceil(d / SECTION_STEP)))
+        over = [Pose2D(e.x + (s.x - e.x) * j / k, e.y + (s.y - e.y) * j / k, h) for j in range(1, k)]
+        wrong = [(e, 'spin')] if angle_diff(h, e.yaw) > SPIN and \
+            not footprint.fits_turn(e.x, e.y, e.yaw, h, backwards[a - 1]) else []
+        wrong += [(p, 'transit') for p in over if not footprint.fits_pose(p.x, p.y, p.yaw)]
+        if angle_diff(s.yaw, h) > SPIN and not footprint.fits_turn(s.x, s.y, h, s.yaw):
+            wrong.append((s, 'spin'))
+        out.extend({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3), 'kind': kind} for p, kind in wrong)
     return out
 
 

@@ -332,7 +332,8 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
     (leave_edge; the goal's mirrored, with a heading and no goal_straight) keeps the body where it was while the edges
     were recorded, every pose checked. The same request gives the same poses, after the same number of ways tried
     (see search below: no time in it). An empty way where it's at the goal already (closer than waypoint_spacing,
-    facing its way; with turn_on_spot whatever way it faces, turning there is up to whoever drives it). Raises
+    facing its way; with turn_on_spot whatever way it faces where the body turns into the goal's heading there, where
+    it is and at the goal: else a way like any other, turning there up to whoever drives it). Raises
     PlanningError where there's no way (a goal by the edge no arc of turn_radius gets to facing its heading, where the
     body sticks out turning into it there too, says so), or the input is out of range; its word what ~/plan_transit's
     code says (CODES). bodies: the body a ring was recorded with where it's another, or drawn (space._body_space).
@@ -454,10 +455,12 @@ def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequen
         off = 0.0 if g_yaw is None else angle_diff(g_yaw, s_yaw)
         if off <= SPIN:
             return Transit([], 0.0, [], 0.0, 0.0, warnings + ['at the goal already'])
-        if cfg.turn_on_spot:
+        # (turning there with the body in, where it is and at the goal; else a way like any other, none: refused)
+        if cfg.turn_on_spot and (footprint is None or all(
+                footprint.fits_turn(x, y, s_yaw, g_yaw) for x, y in (s, g))):
             return Transit([], 0.0, [], 0.0, 0.0, warnings + [
-                f'at the goal already, {math.degrees(off):.0f} deg off its heading: turning on the spot there is up to '
-                'whoever drives it'])
+                f'at the goal already, {math.degrees(off):.0f} deg off its heading: turning on the spot there is '
+                'checked, up to whoever drives it'])
 
     head = sample_straight(s[0], s[1], entry[0], entry[1], in_yaw, step)[:-1] if way_in > 0 else head_out[:-1]
     tail = sample_straight(exit_[0], exit_[1], g[0], g[1], out_yaw, step)[1:] if way_out > 0 else tail_in[1:]

@@ -39,8 +39,9 @@ string message
 string code
 # The way: each pose faces the next one, the last one the way it arrives, waypoint_spacing apart, at least 3, no two on
 # the same position. A pose whose heading jumps from the one before (by more than 15 deg) turns on the spot there.
-# Empty where the start is at the goal already: closer than waypoint_spacing, facing its way within 15 deg (with
-# turn_on_spot whatever way it faces, turning there on the spot is up to the driver, see message).
+# Empty where the start is at the goal already: closer than waypoint_spacing, facing its way within 15 deg, or with
+# turn_on_spot turning there on the spot into the goal's heading is checked (the body in where the start is and at the
+# goal; the driver turns there). Where it isn't, a way like any other, or NO_WAY.
 nav_msgs/Path path
 # m
 float64 path_length

@@ -574,8 +574,8 @@ def _net(route: _Route, planned, free) -> Tuple[list, list, Dict[str, Any]]:
         route.warnings.append(f'{fitted["left"]} places left out where the body doesn\'t fit and no other way does'
                               + (f', the path jumps over them at {jumps}' if jumps else ''))
     if fitted['unchecked']:
-        route.warnings.append('the path starts later or ends before where the body doesn\'t fit and no way does '
-                              'from or to the dock\'s side: getting to or from ' + ', '.join(
+        route.warnings.append('the path starts later, ends before or jumps where the body doesn\'t fit and no way '
+                              'does from or to where it turns whatever way it faces: getting to or from ' + ', '.join(
                                   f'({x:.2f}, {y:.2f})' for x, y in fitted['unchecked']) + ' the body isn\'t '
                               'checked')
     return poses, segments, fitted

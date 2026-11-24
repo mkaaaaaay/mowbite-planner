@@ -139,8 +139,10 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
     the path as planned where the body sticks out the most there, 'poses': [[x, y, yaw, m, spin]] of those poses (how
     far it sticks out of the space that applies there, see Footprint.out_by, spin 1 where that's turning on the spot),
     'skipped_m': those m added up, 'jumps': [[x, y]] of the places the path jumps over, 'unchecked': [[x, y]] where it
-    starts later or ends before with no such way, 'tries': ways tried, 'spans': [(a, b)] of the places, the poses as
-    planned the path doesn't drive as planned there (from a, back on at b; for the planner, see _loop_ends)}."""
+    starts later or ends before with no such way, or jumps within a section with none from where the one before ends or
+    to where its own starts (where the body doesn't turn whatever way it faces there), 'tries': ways tried, 'spans':
+    [(a, b)] of the places, the poses as planned the path doesn't drive as planned there (from a, back on at b; for the
+    planner, see _loop_ends)}."""
     fp, step = route.footprint, route.step
     n = len(poses)
     section, mows = [0] * n, [False] * n  # (mows: on the way to it the blade mows a loop or a lane)
@@ -784,6 +786,46 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                                    round(mown(range(orig[-1] + 1, n)) + sum(cut[leads[1][0] + 1:]), 2)))
         else:
             unchecked.append([round(out[-1].x, 2), round(out[-1].y, 2)])
+    # where the path jumps within a section (a section of its own from there), mower_logic gets from where the one
+    # before ends to where it starts itself, turning on the spot at both unchecked (the turn just refused, Review 19):
+    # a way from there to where it turns whatever way it faces and one from there in, as at the path's ends. Where one
+    # of them is missing, neither, the place said (unchecked)
+    room_at = turn_room.intersection(route.transit.space)
+
+    def planned_at(k: int) -> int:  # which of poses out[k] is, or the last before it that is one
+        while orig[k] is None:
+            k -= 1
+        return orig[k]
+
+    mids: List[Tuple[int, Optional[Tuple[int, List[Pose2D]]], Optional[Tuple[int, List[Pose2D]]]]] = []
+    low = leads[0][0] + 1 if leads[0] else 0
+    for r in splits:
+        if not 0 < r < len(out):
+            continue
+        a = max([low] + [b for b in bounds if b < r])
+        z = min([b for b in bounds if b > r] + ([leads[1][0]] if leads[1] and leads[1][0] > r else []))
+        low = r
+        ways_at: List[Optional[Tuple[int, List[Pose2D]]]] = [None, None]
+        missing = False
+        for side, p in enumerate((out[r - 1], out[r])):
+            if room_at.is_empty or room_at.distance(Point(p.x, p.y)) > 1e-6:
+                first = a  # (legs())
+                ways_at[side] = lead(p, range(r - 1, a - 1, -1), False) if side == 0 else lead(p, range(r, z), True)
+                missing = missing or ways_at[side] is None
+        if missing:
+            unchecked.append([round(out[r].x, 2), round(out[r].y, 2)])
+            continue
+        if ways_at[0] is not None:
+            k = ways_at[0][0]
+            fixed += 1
+            places.append(place_of(planned_at(k) + 1, planned_at(r - 1), round(sum(cut[k + 1:r]), 2)))
+        if ways_at[1] is not None:
+            k = ways_at[1][0]
+            fixed += 1
+            places.append(place_of(orig[r], planned_at(k) - 1, round(sum(cut[r + 1:k + 1]), 2)))
+            low = k + 1
+        if ways_at[0] is not None or ways_at[1] is not None:
+            mids.append((r, ways_at[0], ways_at[1]))
     for r, gone in jumps:
         places.append(place_of(orig[r - 1] + 1 if r else 0, orig[r] if r < len(out) else n - 1, mown(gone)))
     new.sort(key=lambda info: (info.start, info.end))
@@ -793,6 +835,30 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
         at = SegmentInfo(TRANSIT, k, k + len(way) - 1, False, 'body', new[-1].section)
         new = [dataclasses.replace(info, end=min(info.end, k)) for info in new if info.start < k] + [at]
         out[k:] = way
+    for r, away, into in reversed(mids):  # (the later ones first: the earlier ones' indices stay)
+        # (one pose a position: where the section before ends where the next one starts, that one starts a step on)
+        end = away[1][-1] if away is not None else out[r - 1]
+        if into is not None and into[1] and same_position(end, into[1][0]):
+            into = (into[0], into[1][1:])
+        elif into is None and away is not None and len(away[1]) > 2 and same_position(end, out[r]):
+            away = (away[0], away[1][:-1])
+        if into is not None:  # (the way, then the segments from out[k] on)
+            k, way = into
+            d = len(way) - (k - r)
+            sec = next(info.section for info in new if info.start >= r)
+            new = [info for info in new if info.end < r] + \
+                ([SegmentInfo(TRANSIT, r, r + len(way), False, 'body', sec)] if way else []) + \
+                [dataclasses.replace(info, start=max(info.start, k) + d, end=info.end + d) for info in new
+                 if info.end > k]
+            out[r:k] = way
+        if away is not None:  # (the segments as far as out[k], then the way from there)
+            k, way = away
+            d = len(way) - (r - k)
+            sec = next(info.section for info in reversed(new) if info.end < r)
+            new = [dataclasses.replace(info, end=min(info.end, k)) for info in new if info.start < k] + \
+                [SegmentInfo(TRANSIT, k, k + len(way) - 1, False, 'body', sec)] + \
+                [dataclasses.replace(info, start=info.start + d, end=info.end + d) for info in new if info.start >= r]
+            out[k:r] = way
     if leads[0]:  # (the way, then the segments from out[k] on)
         k, way = leads[0]
         new = [SegmentInfo(TRANSIT, 0, len(way), False, 'body', new[0].section)] + [
