@@ -1,9 +1,11 @@
 """The processes of their own that plan (set_workers): an area's plans round its slots by the edge at once, the plans of
 callers on threads of their own at once, the same plans as in the caller's. Started fresh (spawn), not forked from a
-process with threads of its own. A planning stopped from outside (progress.stoppable) ends the ones at its plans."""
+process with threads of its own, at the lowest priority (POOL_NICE). A planning stopped from outside
+(progress.stoppable) ends the ones at its plans."""
 
 import functools
 import multiprocessing
+import os
 import threading
 from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError as FutureTimeout
 from concurrent.futures.process import BrokenProcessPool
@@ -18,6 +20,10 @@ _POOL_LOCK = threading.Lock()
 # looks whether a planning waiting for one is to stop
 _HANDED: set = set()
 STOP_POLL = 0.2
+# the pool's processes plan at this nice (19: the lowest priority), what shares the computer with them keeps its time
+# (MowBite OS's loops in the same container: 50 Hz ticks more than 5 ms late 14 -> 2-3 in 30 s, mkay1337 24.11.),
+# planning takes as long where nothing else wants the CPU
+POOL_NICE = 19
 
 
 def set_workers(n: int) -> None:
@@ -30,11 +36,18 @@ def set_workers(n: int) -> None:
         _WORKERS = max(0, int(n))
 
 
+def _low() -> None:  # (each process of the pool as it starts)
+    try:
+        os.nice(POOL_NICE)
+    except OSError:  # (not allowed: as it is)
+        pass
+
+
 def _pool() -> Optional[ProcessPoolExecutor]:
     global _POOL
     with _POOL_LOCK:
         if _POOL is None and _WORKERS > 0:
-            _POOL = ProcessPoolExecutor(_WORKERS, mp_context=multiprocessing.get_context('spawn'))
+            _POOL = ProcessPoolExecutor(_WORKERS, mp_context=multiprocessing.get_context('spawn'), initializer=_low)
         return _POOL
 
 

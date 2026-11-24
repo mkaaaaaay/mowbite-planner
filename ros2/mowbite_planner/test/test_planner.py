@@ -2278,6 +2278,17 @@ def test_workers_plan_the_same():
         assert one.stats['edge_slots'] == other.stats['edge_slots'] and one.stats['chosen'] == other.stats['chosen']
 
 
+def test_workers_plan_at_the_lowest_priority():
+    """The pool's processes plan at nice 19 (POOL_NICE), this one as it was."""
+    before = os.nice(0)
+    try:
+        planner.set_workers(1)
+        assert pool._pool().submit(os.nice, 0).result(60) == pool.POOL_NICE == 19
+    finally:
+        planner.set_workers(0)
+    assert os.nice(0) == before
+
+
 def test_stopped_planning():
     """A planning stopped from outside (progress.stoppable) ends with Stopped at its next step, in this thread and with
     processes of its own (those at its plans ended); the same planned after is the plan planned without it."""
