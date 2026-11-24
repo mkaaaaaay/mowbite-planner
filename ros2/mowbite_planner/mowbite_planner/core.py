@@ -28,7 +28,9 @@ An adapter is a class of PlannerCore that connects it to a robot, Python 3.8 or 
                 stored, theirs count; given_again() once they change),
                 drive_ignored(): why drive slope and reverse are planned forwards ('' where they aren't),
                 back_out_ignored(): why back_out is off ('' where it isn't: the robot backs up where a plan does;
-                by default drive_ignored's),
+                by default drive_ignored's). back_out is on by default here (ROBOT_DEFAULTS, mkay 24.11.: out of a
+                dead end backing up rather than turning with no room); where the robot doesn't back up it's off
+                without a word unless set (stored), and without arrives the dead end is left out (ends.left_ends),
                 recorded_loop_ignored(recorded): why recorded_loop is off for an area ('' where it isn't; recorded:
                 the map has the body it was recorded with),
                 classic_plan (planner slic3r), remote_plan (remote_planning), remote_state, mower_ready, held and
@@ -176,6 +178,9 @@ FTC_PARAMS = '/move_base_flex/FTCPlanner'
 # changed, -32002: the answer too big)
 MOWER, ASKED, AFTER_MOW, AHEAD = range(4)
 RANKS = ('mower', 'asked', 'after_mow', 'ahead')
+# the planner.* settings' defaults where they aren't the planner's: lanes far enough apart for a forward U-turn
+# (OpenMower's FTC drives forwards only), backing up out of a dead end where the robot backs up (mkay 24.11.)
+ROBOT_DEFAULTS = {'lane_order': 'skip', 'back_out': True}
 WAITING_SHOWN = 20
 SUPERSEDED = -32003
 # mowbite/planner/progress (PlanProgress): s between two messages at least (the one as a planning ends at once), done
@@ -873,7 +878,7 @@ class PlannerCore:
                 raise PlanningError('%s must be true or false' % name)
         # OpenMower's FTC controller only drives forwards: lanes far enough apart that every turn is a forward U-turn
         # of turn_radius. ~settings can change that (and anything else)
-        base = PlannerConfig(lane_order='skip').with_overrides(settings)
+        base = PlannerConfig(**ROBOT_DEFAULTS).with_overrides(settings)
         # (checked with the blade's width: lane_spacing_min and lane_spacing_max go by it)
         blade = base.with_overrides({'mower_width': stored.get('mower_width', width)})
         blade.validate()
@@ -1638,13 +1643,16 @@ class PlannerCore:
         forward, back_out or recorded_loop off, why for the plan's warnings)."""
         drive = self.drive_ignored() if cfg.drive != 'forward' else ''
         out = self.back_out_ignored() if cfg.back_out else ''
+        quiet = out and 'back_out' not in self.current.stored  # (the default where the robot doesn't back up: no word)
         loop = self.recorded_loop_ignored(body_known(bodies, boundary)) if cfg.recorded_loop else ''
         if not drive and not out and not loop:
             return cfg, []
+        said = out and not quiet
         told = ['; '.join(['drive %s ignored: %s' % (cfg.drive, drive)] * bool(drive) +
-                          ['back_out ignored: %s' % out] * bool(out))] * bool(drive or out) + \
+                          ['back_out ignored: %s' % out] * bool(said))] * bool(drive or said) + \
             ['recorded_loop ignored: %s' % loop] * bool(loop)
-        self.logwarn_throttle(60, 'MowBite Planner: ' + '; '.join(told))
+        if told:
+            self.logwarn_throttle(60, 'MowBite Planner: ' + '; '.join(told))
         return cfg.with_overrides(dict({'drive': 'forward'} if drive else {}, **{'back_out': False} if out else {},
                                        **{'recorded_loop': False} if loop else {})), told
 

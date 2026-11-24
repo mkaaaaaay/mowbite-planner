@@ -63,11 +63,12 @@ OpenMower RPCs (xbot_monitoring, JSON-RPC over MQTT):
                         drive_ignored), else forces {body_fit, spin_margin} with forces_why: what slope and reverse
                         plan with whatever is set; with the setting for all areas slope or reverse body_fit and
                         spin_margin say so too (effective, effective_why). back_out (true: where a section ends in a
-                        dead end it backs up along its way to where FTC turns on the spot, see mowbite_planner.starts):
-                        so too. recorded_loop (the outermost loop along the outline the line the area was recorded on,
-                        recorded_loop_margin inside it): ignored with why where what else is set keeps it from doing
-                        anything (PlannerConfig.recorded_off); an area it's not planned with says so in its plan's
-                        warnings (recorded_loop ignored: ...). job_open (beside settings): a mow is under way or
+                        dead end it backs up along its way to where FTC turns on the spot, see mowbite_planner.starts;
+                        on by default, mkay 24.11.: off without a word where FTC doesn't back up and it isn't set, the
+                        dead end then left out, ends.left_ends): so too. recorded_loop (the outermost loop along the
+                        outline the line the area was recorded on, recorded_loop_margin inside it): ignored with why
+                        where what else is set keeps it from doing anything (PlannerConfig.recorded_off); an area it's
+                        not planned with says so in its plan's warnings (recorded_loop ignored: ...). job_open (beside settings): a mow is under way or
                         paused, the planner keeps its plans (pin): an area whose plan changes starts again, who
                         saves asks first
   planner.settings.set  {name: value, ...}, null: back to the default. Checked as a whole, kept in settings_file,

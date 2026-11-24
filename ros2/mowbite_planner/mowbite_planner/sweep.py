@@ -149,22 +149,38 @@ def body_out(poses: List[Pose2D], segments: List[SegmentInfo], section_starts: L
             out.append({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3),
                         'kind': 'spin' if footprint.spins(part, i) else kind_at.get(a + i, 'transit')})
     for a in section_starts[1:] if between else ():  # (the ways over close to the sections' ends, see SECTION_NEAR)
-        if not 0 < a < len(poses):
-            continue
-        e, s = poses[a - 1], poses[a]
-        d = math.hypot(s.x - e.x, s.y - e.y)
-        if d > SECTION_NEAR:
-            continue
-        h = math.atan2(s.y - e.y, s.x - e.x) if d > 1e-6 else s.yaw
-        k = max(1, int(math.ceil(d / SECTION_STEP)))
-        over = [Pose2D(e.x + (s.x - e.x) * j / k, e.y + (s.y - e.y) * j / k, h) for j in range(1, k)]
-        wrong = [(e, 'spin')] if angle_diff(h, e.yaw) > SPIN and \
-            not footprint.fits_turn(e.x, e.y, e.yaw, h, backwards[a - 1]) else []
-        wrong += [(p, 'transit') for p in over if not footprint.fits_pose(p.x, p.y, p.yaw)]
-        if angle_diff(s.yaw, h) > SPIN and not footprint.fits_turn(s.x, s.y, h, s.yaw):
-            wrong.append((s, 'spin'))
-        out.extend({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3), 'kind': kind} for p, kind in wrong)
+        if 0 < a < len(poses) and math.hypot(poses[a].x - poses[a - 1].x, poses[a].y - poses[a - 1].y) <= SECTION_NEAR:
+            out.extend({'x': round(p.x, 3), 'y': round(p.y, 3), 'yaw': round(p.yaw, 3), 'kind': kind}
+                       for p, kind in way_over(footprint, poses[a - 1], poses[a], backwards[a - 1]))
     return out
+
+
+def way_over(footprint: Footprint, e: Pose2D, s: Pose2D, backwards: bool = False) -> List[Tuple[Pose2D, str]]:
+    """Where the body sticks out driving from e (where a section ends; backwards: it got there backing up) to s (where
+    the next one starts) as mower_logic does: turning on the spot to face s, straight there (poses SECTION_STEP apart),
+    turning into s's heading. [(pose, 'spin' or 'transit')], none where it fits all along."""
+    d = math.hypot(s.x - e.x, s.y - e.y)
+    h = math.atan2(s.y - e.y, s.x - e.x) if d > 1e-6 else s.yaw
+    k = max(1, int(math.ceil(d / SECTION_STEP)))
+    wrong = [(e, 'spin')] if angle_diff(h, e.yaw) > SPIN and not footprint.fits_turn(e.x, e.y, e.yaw, h, backwards) \
+        else []
+    wrong += [(p, 'transit') for p in (Pose2D(e.x + (s.x - e.x) * j / k, e.y + (s.y - e.y) * j / k, h)
+                                       for j in range(1, k)) if not footprint.fits_pose(p.x, p.y, p.yaw)]
+    if angle_diff(s.yaw, h) > SPIN and not footprint.fits_turn(s.x, s.y, h, s.yaw):
+        wrong.append((s, 'spin'))
+    return wrong
+
+
+def fits_over(footprint: Footprint, e: Pose2D, s: Pose2D, backwards: bool = False) -> bool:
+    """not way_over(footprint, e, s, backwards), quicker: the turns first, the way between as all_fit has it."""
+    d = math.hypot(s.x - e.x, s.y - e.y)
+    h = math.atan2(s.y - e.y, s.x - e.x) if d > 1e-6 else s.yaw
+    if angle_diff(h, e.yaw) > SPIN and not footprint.fits_turn(e.x, e.y, e.yaw, h, backwards) or \
+            angle_diff(s.yaw, h) > SPIN and not footprint.fits_turn(s.x, s.y, h, s.yaw):
+        return False
+    k = max(1, int(math.ceil(d / SECTION_STEP)))
+    return k < 2 or footprint.all_fit([Pose2D(e.x + (s.x - e.x) * j / k, e.y + (s.y - e.y) * j / k, h)
+                                       for j in range(1, k)])
 
 
 def blade_points(plan: CoveragePlan, start: int, end: int) -> List[XY]:

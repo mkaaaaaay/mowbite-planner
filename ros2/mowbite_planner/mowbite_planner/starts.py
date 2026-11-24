@@ -16,7 +16,8 @@ end.
 
 backed_out: back_out without arrives (OpenMower: mower_logic drives to the next section or home itself, its FTC turning
 on the spot where the section ends first): where that turn doesn't fit, the section backs up along its way to the last
-pose it fits at."""
+pose it fits at.
+"""
 
 import dataclasses
 import math

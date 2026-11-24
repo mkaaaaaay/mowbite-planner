@@ -381,7 +381,7 @@ def float32_warnings(rings: Sequence[Sequence[XY]]) -> List[str]:
 
 def launch_settings(cfg: PlannerConfig) -> dict:
     """The planner.* settings the node's parameters (as cfg) stand for: the ones that aren't PlannerCore's defaults
-    (the planner's with lane_order skip)."""
+    (the planner's with lane_order skip; back_out, no parameter here, as PlannerCore has it)."""
     default = PlannerConfig(lane_order='skip')
 
     def plain(v):

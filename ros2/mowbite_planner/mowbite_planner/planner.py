@@ -17,7 +17,7 @@ from shapely.prepared import prep
 
 from . import backing
 from .assemble import mow_parts
-from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at
+from .bodyfit import _assemble, _field_turns, _lanes_field, _round_corners, _turn_at, unchecked_said
 from .complete import complete, leftovers
 from .config import (_BODY_SPACE, LEFT_PIECE, LEFT_TOTAL, LEFT_TUFT, SPACING_CANDIDATES, TRACK, XY, ZERO_TURN,
                      CoveragePlan, NothingLeft, PlannerConfig, PlanningError)
@@ -31,6 +31,7 @@ from .levels import Rings, body_levels, ring_levels
 from .loopfit import _smooth_spins, fit_rings
 from .rings import _Route
 from .space import _check_coordinates, build_space, loop_footprint, margins_of
+from .ends import left_ends
 from .starts import Arrives, backed_out, reached_starts
 from .spacing import left_alone, left_whole, strip_between_lanes, turn_places
 from .sweep import plan_footprint, swept_area
@@ -88,7 +89,9 @@ def plan_coverage(boundary: Sequence[Sequence[float]], obstacles: Sequence[Seque
     the plan's sections itself, MowBite OS: whether it gets to the pose facing its heading from came_from, the end of
     the section before; None for the first): every section starts where it does, see starts.reached_starts. progress(stage, done, of): how far it got (progress.Progress). drive slope or reverse:
     see backing.py; without the body set forwards, said in the warnings. back_out (drive forward): out of a dead end
-    where a section ends backing up, see starts.py (without arrives backed_out). Stopped from outside
+    where a section ends backing up, see starts.py (without arrives backed_out); without arrives a section's end and the
+    next one's start where mower_logic would turn between them with no room left out (ends.left_ends). Stopped from
+    outside
     (progress.stoppable): Stopped at its next step, the pool's processes at its plans ended. bodies ((ring, corners),
     ...): the body a ring was recorded with where it's another, see space._body_space."""
     cfg = config or PlannerConfig()
@@ -128,7 +131,8 @@ def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, kee
     back = cfg.back_out and cfg.drive == 'forward'
     done = None
     try:
-        done = reached_starts(plan, arrives, back) if arrives is not None else backed_out(plan) if back else plan
+        done = reached_starts(plan, arrives, back) if arrives is not None else \
+            left_ends(backed_out(plan) if back else plan)
         # (not where the ways it may ask about ran out: none are left for a second plan)
         lost = bool(plan.recorded_loops) and _left_out(done) > 0 and not done.stats['starts']['untried']
     except PlanningError:
@@ -574,8 +578,5 @@ def _net(route: _Route, planned, free) -> Tuple[list, list, Dict[str, Any]]:
         route.warnings.append(f'{fitted["left"]} places left out where the body doesn\'t fit and no other way does'
                               + (f', the path jumps over them at {jumps}' if jumps else ''))
     if fitted['unchecked']:
-        route.warnings.append('the path starts later, ends before or jumps where the body doesn\'t fit and no way '
-                              'does from or to where it turns whatever way it faces: getting to or from ' + ', '.join(
-                                  f'({x:.2f}, {y:.2f})' for x, y in fitted['unchecked']) + ' the body isn\'t '
-                              'checked')
+        route.warnings.append(unchecked_said(fitted['unchecked']))
     return poses, segments, fitted

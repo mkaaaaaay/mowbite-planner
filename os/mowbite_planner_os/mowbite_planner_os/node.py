@@ -35,7 +35,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
   - not here: the slic3r planner, leftovers_auto (MowBite OS' schedule starts the mower), the house computer.
     planner.settings says why.
   - back_up_with_plan (false): the robot backs up where a plan's poses face against the way (MowBite OS from M8):
-    back_out planned; false: ignored (planner.settings says why). drive slope and reverse stay forwards either way
+    back_out planned (on by default); false: ignored (planner.settings says why, the plans say nothing where it isn't
+    set; dead ends as starts.reached_starts has them). drive slope and reverse stay forwards either way
     (their own step: the sections are got to on the plan as driven forwards).
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
     through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see

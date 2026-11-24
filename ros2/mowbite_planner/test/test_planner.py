@@ -1675,6 +1675,7 @@ def test_body_fit_starts_later(monkeypatch):
     loop. The loops as planned: trace.repaired drives the corner by the dock anew, the body fitting all along. The dock
     a little closer to the western edge: the loop starts on it, the corner right after. The outermost loop going round
     by the heading, loops_by_heading.)"""
+    monkeypatch.setattr('mowbite_planner.planner.left_ends', lambda plan: plan)  # (_fit_body's own, see below)
     loops_by_heading(monkeypatch)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     monkeypatch.setattr(bodyfit, 'FIT_ROUND', 0)
@@ -1715,6 +1716,7 @@ def test_body_fit_jump_ways_through_turn_room(monkeypatch):
     body turns whatever way it faces and one from there in, both checked (the sections ending and starting there, or a
     step off: the same place is one pose), else (no ways tried for them, FIT_ROUND 0) the
     place said, unchecked, and check_plan finding the turn there."""
+    monkeypatch.setattr('mowbite_planner.planner.left_ends', lambda plan: plan)  # (_fit_body's own, see below)
     loops_by_heading(monkeypatch)
     cfg = PlannerConfig(**dict(MOWER, **NX60I, angle=0.0))
     monkeypatch.setattr(_Route, '_start_at', lambda self, poses, target: None)
@@ -2456,6 +2458,7 @@ def test_body_fit_bounded(monkeypatch):
     (FIT_TRIES_M 0 here), but for the ways to the start and from the end: FIT_ROUND from each of their points on top.
     Where it may try none it leaves out what doesn't fit and jumps over it, a warning saying where, the turn there
     unchecked (Review 19)."""
+    monkeypatch.setattr('mowbite_planner.planner.left_ends', lambda plan: plan)  # (_fit_body's own, see below)
     shape = [(0, 0), (6, 0), (6, 3), (3.3, 3), (3.3, 13), (2.7, 13), (2.7, 3), (0, 3)]
     cfg = PlannerConfig(**dict(MOWER, **NX60I))
     monkeypatch.setattr(bodyfit, 'FIT_TRIES_M', 0.0)
@@ -2485,6 +2488,29 @@ def test_body_fit_bounded(monkeypatch):
                        for w in plan.warnings)
         if tries == 50:
             assert fit['tries'] >= 50
+
+
+def test_dead_end_left_out(monkeypatch):
+    """A dead end too narrow to turn round in (the path jumping where it'd turn, nothing tried there): without arrives
+    (mower_logic drives from where a section ends to the next one's start itself) and backing up the ends and starts
+    there are left out till that way fits (ends.left_ends, mkay 24.11.), said with what's left unmowed, nothing for
+    the report; the dead end's place no longer unchecked. Every section two poses at least."""
+    shape = [(0, 0), (6, 0), (6, 3), (3.3, 3), (3.3, 13), (2.7, 13), (2.7, 3), (0, 3)]
+    cfg = PlannerConfig(**dict(MOWER, **NX60I))
+    monkeypatch.setattr(bodyfit, 'FIT_TRIES_M', 0.0)
+    monkeypatch.setattr(bodyfit, 'FIT_TRIES', 50)
+    plan = plan_coverage(shape, [], cfg, start=(1, 1, 0.0))
+    check_invariants(plan, cfg)
+    got, fit = plan.stats['left_ends'], plan.stats['body_fit']
+    assert got['places'] and not got['stuck'] and got['unmowed_m2'] > 0
+    assert check_plan(plan)['body_out'] == []
+    assert not any(p[:2] in fit['unchecked'] for p in got['places'])
+    assert any('their ends and starts left out' in w for w in plan.warnings)
+    ends = list(plan.section_starts[1:]) + [len(plan.poses)]
+    assert all(b - a >= 2 for a, b in zip(plan.section_starts, ends))
+    # (with arrives the robot's own: none of this)
+    assert 'left_ends' not in plan_coverage(shape, [], cfg, start=(1, 1, 0.0),
+                                            arrives=lambda pose, came: True).stats
 
 
 def test_body_fit_tries_grow_with_the_area(monkeypatch):

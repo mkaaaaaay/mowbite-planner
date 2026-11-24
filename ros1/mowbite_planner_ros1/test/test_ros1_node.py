@@ -1970,7 +1970,8 @@ def test_drive(planner, stub_planner):
     rospy.params['/move_base_flex/FTCPlanner/back_up_with_plan'] = True
     result, _ = rpc('planner.settings')
     assert 'no body set' in result['settings']['drive']['ignored']  # (the planner plans it forwards then)
-    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'spin_margin': 0.0})
+    rpc('planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14, 'spin_margin': 0.0,
+                                 'back_out': False})  # (on by default, it'd force them too)
     result, _ = rpc('planner.settings')
     drive, spin = result['settings']['drive'], result['settings']['spin_margin']
     assert 'ignored' not in drive and drive['forces'] == {'body_fit': True, 'spin_margin': 0.05}
@@ -1994,16 +1995,18 @@ def test_drive(planner, stub_planner):
 
 
 def test_back_out(planner, stub_planner):
-    """back_out (backing up out of a dead end) like drive: off by default; planned so only with OpenMower's FTC backing
-    up and the body set, else off, said in the plan's warnings and as ignored in planner.settings; where it's planned
-    so planner.settings says what it forces, for all areas at body_fit and spin_margin too."""
+    """back_out (backing up out of a dead end) like drive: on by default (mkay 24.11.); planned so only with OpenMower's
+    FTC backing up and the body set, else off, as ignored in planner.settings, in the plan's warnings where it's set
+    (stored; the default without a word); where it's planned so planner.settings says what it forces, for all areas at
+    body_fit and spin_margin too."""
     send_map(the_map())
     result, _ = rpc('planner.settings')
     out = result['settings']['back_out']
-    assert out['value'] is False and out['default'] is False and out['type'] == 'boolean' and out['settable']
+    assert out['value'] is True and out['default'] is True and out['type'] == 'boolean' and out['settable']
     assert out['ignored'] == node_module.NO_BACKING
     plan, error = rpc('planner.plan', {'area_id': 'a'})
     assert error is None and not any(w.startswith('back_out') for w in plan['warnings'])
+    assert stub_planner.config().back_out is False
     rpc('planner.settings.set', {'back_out': True})
     plan, error = rpc('planner.plan', {'area_id': 'a'})
     assert error is None and stub_planner.config().back_out is False

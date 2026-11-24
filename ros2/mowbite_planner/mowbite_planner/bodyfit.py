@@ -870,6 +870,13 @@ def _fit_body(route: BodyRoute, poses: List[Pose2D],
                       'spans': spans}
 
 
+def unchecked_said(points: Sequence[Sequence[float]]) -> str:
+    """The plan's warning of _fit_body's 'unchecked' places ([x, y] each)."""
+    return 'the path starts later, ends before or jumps where the body doesn\'t fit and no way does from or to where ' \
+        'it turns whatever way it faces: getting to or from ' + ', '.join(f'({x:.2f}, {y:.2f})' for x, y in points) + \
+        ' the body isn\'t checked'
+
+
 def _lanes_field(passes: List[Tuple[float, List[List[Lane]]]], trim: float, half: float):
     """Where the lanes of every set lie, each cell's from lane to lane and half further out, but for trim at their
     ends."""
