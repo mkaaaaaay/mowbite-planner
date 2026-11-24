@@ -152,6 +152,18 @@ def margins_for(data: Optional[Mapping[str, Any]], outlines: Any, tolerance: flo
     return out
 
 
+def areas_for(data: Optional[Mapping[str, Any]], outlines: Any,
+              tolerance: float = 1e-3) -> List[Optional[Mapping[str, Any]]]:
+    """The map's area (any type) with each of these outlines (as OpenMower sends them to its planner, float32), None
+    where none has it."""
+    own = _areas(data)
+    out: List[Optional[Mapping[str, Any]]] = []
+    for outline in outlines:
+        pts = _outline(outline, tolerance) if own else None
+        out.append(next((a for a in own if _same(a, pts, tolerance)), None) if pts else None)
+    return out
+
+
 def recorded_body(area: Mapping[str, Any]) -> Optional[Tuple[XY, ...]]:
     """The corners of the body the area was recorded with (its properties' recorded_body: robot_width, robot_front,
     robot_rear, robot_outline [] the rectangle, see PlannerConfig.body_outline), None where it has none. ValueError

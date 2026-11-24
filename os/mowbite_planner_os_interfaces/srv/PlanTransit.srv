@@ -10,7 +10,9 @@ bool use_goal_heading false
 # m straight on before the goal, facing its way (e.g. to back onto the dock's contacts from there), needs
 # use_goal_heading
 float64 goal_straight_length 0.0
-# where the mower may drive (mowing and navigation areas): at least one, at least 3 points each
+# where the mower may drive (mowing and navigation areas): at least one, at least 3 points each. The way keeps the
+# strictest margins and edges the map's areas with these outlines have (one of no area: the strictest of the map's,
+# said in message)
 geometry_msgs/Polygon[] drivable_areas
 # no-go zones (flower beds, trees)
 geometry_msgs/Polygon[] obstacles

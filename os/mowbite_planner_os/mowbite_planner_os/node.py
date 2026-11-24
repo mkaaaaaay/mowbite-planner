@@ -40,7 +40,9 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     set; dead ends as starts.reached_starts has them). drive slope and reverse stay forwards either way
     (their own step: the sections are got to on the plan as driven forwards).
   - ~/plan_transit (mowbite_planner_os_interfaces/PlanTransit, transit_route.py): a drive from one pose to another
-    through the drivable areas. A plan's sections start only where it gets to them facing their heading (arrives, see
+    through the drivable areas, with the planner.* settings and the strictest margins (edge, obstacle, spin, body
+    tolerance) and edges of the map's areas it may go through, each with its own settings over them (a drivable area
+    of none: the strictest of all of them, said; TRANSIT_STRICT), ~/cut_plan's ways too. A plan's sections start only where it gets to them facing their heading (arrives, see
     mowbite_planner.starts): the first from ARRIVE_FROM m behind, beside and ahead of it, nearer where the lawn is
     small, the others from where the section before ends, as mowbite_logic drives there (every active mowing and
     navigation area, ARRIVE_OUTSIDE outside at the ends; a goal outside: that stretch checked with the body in the
@@ -91,7 +93,7 @@ import math
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -108,7 +110,7 @@ from mowbite_planner import node as base
 from mowbite_planner.config import INTERNAL, RETIRED, CoveragePlan, PlannerConfig, PlanningError
 from mowbite_planner.footprint import Footprint
 from mowbite_planner.geometry import polygons
-from mowbite_planner.mapfile import bodies_for, margins_for
+from mowbite_planner.mapfile import _areas, area_settings, areas_for, bodies_for, margins_for
 from mowbite_planner.mathutil import Pose2D, quaternion_to_yaw
 from mowbite_planner.progress import Stopped, stoppable
 from mowbite_planner.space import build_space, margins_of
@@ -153,6 +155,9 @@ THREADS = 3
 # role: the planner, or a second instance only for ~/plan_transit (see the top); the planner's settings under data_dir
 ROLES = ('planner', 'transit')
 TRANSIT = 'transit'
+# the settings of a transit an area may have its own of: the strictest (the largest) of the areas it goes through
+# (strictest; Review 19, Master 24.11.), edges hard where one has them
+TRANSIT_STRICT = ('edge_margin', 'obstacle_margin', 'spin_margin', 'body_tolerance')
 SETTINGS_FILE = os.path.join('planner', 'mowbite_planner_settings.json')
 # s ~/plan_transit looks for a way at most by default (transit_search_limit; mowbite_logic waits plan_timeout, 30 s,
 # for its answer)
@@ -596,17 +601,20 @@ class OsNode(base.MowbitePlannerNode):
         why = self.no_body()
         if why:
             return no('NOT_READY', f'cutting the plan failed: {why}')
+        drivable = [base.xy(poly) for poly in request.drivable_areas]
+        said: List[str] = []
         try:
-            cfg = self.transit_config(values)
+            cfg = self.transit_config(values, drivable, said)
         except ValueError as e:
             return no('BAD_REQUEST', f'bad override: {e}')
+        for w in said:
+            self.get_logger().warning(w)
         q = request.start.orientation
         start = (float(request.start.position.x), float(request.start.position.y),
                  quaternion_to_yaw(q.x, q.y, q.z, q.w))
         poses = [Pose2D(float(p.pose.position.x), float(p.pose.position.y), quaternion_to_yaw(
             p.pose.orientation.x, p.pose.orientation.y, p.pose.orientation.z, p.pose.orientation.w))
             for p in request.path.poses]
-        drivable = [base.xy(poly) for poly in request.drivable_areas]
         obstacles = [base.xy(poly) for poly in request.obstacles]
         temporary = [base.xy(poly) for poly in request.temporary_obstacles]
         passing = [base.xy(poly) for poly in request.temporary_passing]
@@ -635,7 +643,7 @@ class OsNode(base.MowbitePlannerNode):
         response.piece_last = [int(t) for _, t in cut.pieces]
         response.left_out_from = int(cut.left_out_from)
         response.message = base.with_warnings(f'{len(cut.pieces)} pieces of the plan from pose {request.from_pose}',
-                                              cut.warnings)
+                                              [*said, *cut.warnings])
         self.get_logger().info(response.message)
         return response
 
@@ -660,8 +668,10 @@ class OsNode(base.MowbitePlannerNode):
         why = self.no_body()
         if why:
             return no('NOT_READY', f'planning the transit failed: {why}')
+        drivable = [base.xy(poly) for poly in request.drivable_areas]
+        said: List[str] = []
         try:
-            cfg = self.transit_config(values)
+            cfg = self.transit_config(values, drivable, said)
         except ValueError as e:  # (PlanningError too: the overrides don't go with the settings)
             return no('BAD_REQUEST', f'bad override: {e}')
         q = request.start.orientation
@@ -670,10 +680,9 @@ class OsNode(base.MowbitePlannerNode):
         q = request.goal.orientation
         goal = (float(request.goal.position.x), float(request.goal.position.y)) + \
             ((quaternion_to_yaw(q.x, q.y, q.z, q.w),) if request.use_goal_heading else ())
-        drivable = [base.xy(poly) for poly in request.drivable_areas]
         obstacles = [base.xy(poly) for poly in request.obstacles]
         temporary = [base.xy(poly) for poly in request.temporary_obstacles]
-        warnings = base.float32_warnings([*drivable, *obstacles])
+        warnings = said + base.float32_warnings([*drivable, *obstacles])
         for w in warnings:
             self.get_logger().warning(w)
         limit = self.search_limit()
@@ -708,17 +717,46 @@ class OsNode(base.MowbitePlannerNode):
         response.goal_outside = float(transit.goal_outside)
         return response
 
-    def transit_config(self, values: dict) -> PlannerConfig:
+    def transit_config(self, values: dict, drivable=(), said: Optional[List[str]] = None) -> PlannerConfig:
         """The settings a transit goes by: where the core is the planner.* settings (the body, the margins, the turns:
-        as the plans' sections are got to, see arrives), else the node's parameters; what a request's overrides
-        (values) change on top."""
+        as the plans' sections are got to, see arrives) with the strictest of the areas' own it goes through
+        (strictest, what to say of that onto said), else the node's parameters; what a request's overrides (values)
+        change on top."""
         asked = self.config(values)
         if self.core is None:
             return asked
         plain = self.config(self.values())
         current = self.core.current
-        return self.core.bound(current.base.with_overrides(dict({'mower_width': current.mower_width}, **{
-            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)})))
+        cfg, told = self.strictest(current.base.with_overrides({'mower_width': current.mower_width}), drivable)
+        if said is not None:
+            said.extend(told)
+        return self.core.bound(cfg.with_overrides({
+            n: getattr(asked, n) for n in PlannerConfig.names() if getattr(asked, n) != getattr(plain, n)}))
+
+    def strictest(self, cfg: PlannerConfig, drivable) -> Tuple[PlannerConfig, List[str]]:
+        """cfg with the strictest of TRANSIT_STRICT that the map's areas with the drivable rings' outlines have (each
+        cfg with its own settings over it; Master 24.11.): the largest margins, hard edges where one has them. A ring
+        of no area: the strictest of all the map's areas, said. Without a map, or an area's settings unreadable: cfg's
+        there."""
+        data = self.core.current_map()
+        if data is None:
+            return cfg, []
+        found = areas_for(data, drivable)
+        unknown = sum(a is None for a in found)
+        own = _areas(data) if unknown else [a for a in found if a is not None]
+        cfgs = []
+        for area in own:
+            try:
+                cfgs.append(cfg.with_overrides(area_settings(area)))
+            except (ValueError, TypeError):  # PlanningError too
+                cfgs.append(cfg)
+        said = [f'{unknown} of the drivable areas no area of the map (to 1 mm): the strictest settings of its areas '
+                f'kept to'] if unknown else []
+        if not cfgs:
+            return cfg, said
+        strict = {n: max(getattr(c, n) for c in cfgs) for n in TRANSIT_STRICT}
+        strict['edges'] = 'hard' if any(c.edges == 'hard' for c in cfgs) else cfg.edges
+        return cfg.with_overrides(strict), said
 
     # planner.calib.evaluate
 

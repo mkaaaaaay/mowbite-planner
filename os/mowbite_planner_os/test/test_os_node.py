@@ -1300,6 +1300,34 @@ def test_role_transit_writes_nothing(make, tmp_path):
     assert (cfg.turn_radius, cfg.edge_margin, cfg.robot_front) == (0.25, 0.05, 0.55)
 
 
+@fake_only
+def test_transit_keeps_the_strictest_of_the_areas(make):
+    """A transit's settings: the strictest margins and edges of the map's areas its drivable areas are, each with its
+    own settings over the planner.* ones (TRANSIT_STRICT); a drivable area of no area of the map: the strictest of all
+    of them, said; none of the map: the planner.* settings."""
+    node = make()
+    path = [(8.0, 1.0), (10.0, 1.0), (10.0, 2.0), (8.0, 2.0)]
+    data = the_map(planner={'edge_margin': 0.15, 'edges': 'hard'})
+    data['areas'].append({'id': 'n', 'outline': ring(path), 'properties': {
+        'name': 'Path', 'type': 'nav', 'planner': {'spin_margin': 0.12, 'edge_margin': 0.02}}})
+    send_map(node, data)
+    plain = node.transit_config(node.values())
+    assert (plain.edge_margin, plain.spin_margin, plain.edges) == (0.05, 0.05, 'recorded')
+    said = []
+    cfg = node.transit_config(node.values(), [GARDEN], said)
+    assert (cfg.edge_margin, cfg.spin_margin, cfg.edges, said) == (0.15, 0.05, 'hard', [])
+    cfg = node.transit_config(node.values(), [GARDEN, path], said)
+    assert (cfg.edge_margin, cfg.spin_margin, cfg.edges, said) == (0.15, 0.12, 'hard', [])
+    cfg = node.transit_config(node.values(), [path], said)
+    assert (cfg.edge_margin, cfg.spin_margin, cfg.edges, said) == (0.02, 0.12, 'recorded', [])
+    cfg = node.transit_config(node.values(), [[(0.0, 0.0), (9.0, 0.0), (9.0, 5.0), (0.0, 5.0)]], said)
+    assert (cfg.edge_margin, cfg.spin_margin, cfg.edges) == (0.15, 0.12, 'hard')
+    assert said == ['1 of the drivable areas no area of the map (to 1 mm): the strictest settings of its areas kept to']
+    res = transit(node, (1.0, 1.0, 0.0), (7.0, 4.0, math.pi / 2), drivable=([(0.0, 0.0), (9.0, 0.0), (9.0, 5.0),
+                                                                            (0.0, 5.0)],))
+    assert 'no area of the map' in res.message
+
+
 def test_role_transit_with_the_real_ros(make):
     """role transit made and asked like on MowBite OS (with a sourced workspace: the real rclpy)."""
     node = make(role='transit', node_name='mowbite_planner_transit')
