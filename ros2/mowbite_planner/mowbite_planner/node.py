@@ -40,9 +40,10 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
     area (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
     request give the same plan (kept); armed leftovers (planner.leftovers arm) are the plan of their area until that
     job ends, an area without them gets success with no poses. Planned in the core's worker, before what waits there.
-    Without a map (none came yet) NOT_READY. An outline of no area is refused where the robot says so (no_area: MowBite
-    OS, its logic asks for areas), but with the override preview (a node parameter, false by default): preview only
-    for plans that are never driven (no pin, no armed leftovers, not timed as a mow; contract.json
+    Without a map (none came yet) NOT_READY, where it can't be planned now (map_unusable) too. An outline of no area is
+    refused where the robot says so (no_area: MowBite OS, its logic asks for areas), but with the override preview (a
+    node parameter, false by default): preview only for plans that are never driven (no pin, no armed leftovers, not
+    timed as a mow; planned whatever the map's state, without one as an outline of none; contract.json
     plan_coverage_overrides).
   - the events of the robot's logic on ~/events (STATE, JOB_COMPLETE, JOB_RESET as OpenMower's events/json):
     angle_increment, perimeter_direction random, the finished mow's planner.drive and timing.
@@ -887,6 +888,8 @@ class MowbitePlannerNode(Node):
         without a map."""
         core = self.core
         data = core.plan_map(core.current_map())
+        if data is None and values['preview']:  # (never driven: without the map's areas, as an outline of none)
+            data = {}
         if data is None:
             response.success = False
             response.code = 'NOT_READY'
@@ -911,7 +914,7 @@ class MowbitePlannerNode(Node):
             else:
                 job = area_job(data, index)
                 where = f'area {job.area_id}'
-            reason = core.unusable()
+            reason = '' if preview else core.unusable()  # (a preview is never driven: whatever the map's state)
             if reason:
                 raise PlanningError(reason, word='NOT_READY')
             armed, plan = core.armed_plan(job) if index is not None and not preview else (False, None)

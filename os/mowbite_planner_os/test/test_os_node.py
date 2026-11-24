@@ -921,6 +921,13 @@ def test_preview(make, planned):
     del node.core.armed_plan
     job = plan_area(node)
     assert job.fingerprint == area.fingerprint and node.core.pinned and len(node.core.served) == 1
+    # (never driven: planned whatever the map's state, an empty one as the first area is drawn too, or none yet)
+    for data, status in ((the_map(), MapStatus.DATUM_MISMATCH), ({'areas': []}, MapStatus.DATUM_EMPTY)):
+        send_map(node, data, status)
+        assert plan_area(node).code == ('NOT_READY' if data['areas'] else 'BAD_REQUEST')
+        assert plan_area(node, outline, preview).success and plan_area(node, overrides=preview).success
+    fresh = make()
+    assert plan_area(fresh, outline).code == 'NOT_READY' and plan_area(fresh, outline, preview).success
 
 
 @fake_only

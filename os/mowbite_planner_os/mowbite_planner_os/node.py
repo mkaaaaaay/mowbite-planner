@@ -8,10 +8,11 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     ~/plan_coverage's code says it: BODY_OUT, NO_PLAN, NOT_READY, START_UNREACHABLE); reliable, volatile, depth 100. A
     method of no node here is another node's: not answered (the bridge answers it).
   - the map of mowbite_map: map/json (OpenMower's JSON, latched). planner.plan, ~/plan_coverage with the map and
-    planning ahead only while map/status says MATCH (the map fits the GNSS datum), else an error with its reason; on
-    MATCH again the areas are planned ahead. planner.area.set writes the map with map/replace, expected_sha256 the
-    digest of the map/json text it changed, and waits for the map/json that follows; mowbite_map's no comes back with
-    its code (-32001: the map changed meanwhile, nothing written). ~/plan_coverage with the map plans areas of it only:
+    planning ahead only while map/status says MATCH (the map fits the GNSS datum), else an error with its reason (a
+    preview whatever it says: never driven); on MATCH again the areas are planned ahead. planner.area.set writes the
+    map with map/replace, expected_sha256 the digest of the map/json text it changed, and waits for the map/json that
+    follows; mowbite_map's no comes back with its code (-32001: the map changed meanwhile, nothing written).
+    ~/plan_coverage with the map plans areas of it only:
     an outline of no area (to 1 mm) is refused with BAD_REQUEST (mowbite_logic asks by an area's outline; planned
     without the map's areas to keep out of, margins and dock it'd be another plan), without a map as ever. Its plans are
     kept till the job ends (JOB_COMPLETE, JOB_RESET on bridge/publish).

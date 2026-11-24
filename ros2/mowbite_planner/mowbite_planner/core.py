@@ -196,7 +196,8 @@ PROGRESS_SLOW = 60.0
 PLAN_COVERAGE_OVERRIDES = {
     'preview': 'boolean, false by default. preview only for plans that are never driven: with use_map an outline of no '
                'area of the map is planned too (the planner.* settings, the request\'s obstacles and drivable areas, no '
-               'dock), the plan isn\'t kept for the job (no pin) and armed leftovers don\'t count'}
+               'dock), the plan isn\'t kept for the job (no pin) and armed leftovers don\'t count; planned whatever '
+               'the map\'s state (none yet, empty, not fitting the GNSS datum)'}
 # how long the last planning of each area took, kept over a restart (mowbite_planner_took.json next to the settings
 # file): the latest TOOK_AREAS areas
 TOOK_FILE = 'mowbite_planner_took.json'
