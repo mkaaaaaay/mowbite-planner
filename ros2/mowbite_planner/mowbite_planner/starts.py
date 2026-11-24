@@ -26,7 +26,7 @@ from shapely.geometry import Point
 from shapely.ops import nearest_points
 
 from .backing import CORNER_COS, CORNER_STEP
-from .config import CoveragePlan, PlanningError, SegmentInfo
+from .config import TRANSIT, CoveragePlan, PlanningError, SegmentInfo
 from .footprint import SPIN, Footprint
 from .geometry import QUAD_SEGS, polygons
 from .maneuvers import path_length, same_position
@@ -443,7 +443,7 @@ def _back(plan: CoveragePlan, to: int, e: int) -> Optional[Tuple[List[Pose2D], L
     """Backing up from pose e to pose to of the same section: the poses (e first), each facing against the step it
     backs up from it (the heading the pose before it had driving that step forwards; pose to its own), the segments
     (indices from e on) driven backwards over each one of plan's there, of its kind and source, maneuver 'back_out',
-    the blade on, and the corners turned. FTC backs up from a pose where it and the next one elsewhere both face
+    the blade on (over a TRANSIT as there), and the corners turned. FTC backs up from a pose where it and the next one elsewhere both face
     against the way between them: at a corner sharper than a quarter turn the pose would face along the step backed up
     to it, so it faces between both ways there and one CORNER_STEP on along the next leg faces against it (as
     backing.corners). None where a corner turns about half round (no heading between both ways)."""
@@ -468,7 +468,8 @@ def _back(plan: CoveragePlan, to: int, e: int) -> Optional[Tuple[List[Pose2D], L
                 continue
         poses.append(c)
     segments = [SegmentInfo(s.kind, where[e - min(e, s.end)], where[e - max(to, s.start)], True, 'back_out', s.section,
-                            s.source, True) for s in reversed(plan.segments) if s.start < e and s.end > to]
+                            s.source, s.blade if s.kind == TRANSIT else True)
+                for s in reversed(plan.segments) if s.start < e and s.end > to]
     # (a step between two segments, the next one starting right after: with the one it leads to, every step backing up)
     for a, b in zip(segments, segments[1:]):
         b.start = a.end

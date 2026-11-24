@@ -1,6 +1,7 @@
 """Tests of starts.py: a plan's sections where a robot that drives to them itself gets to them and away again (MowBite
 OS), backing up out of a dead end (back_out)."""
 
+import dataclasses
 import math
 import os
 import sys
@@ -283,6 +284,11 @@ def test_back_out_backs_up_to_where_it_gets_away():
     assert got.stats['back_out']['corners'] == 0 and fingerprint(got) != fingerprint(p)
     assert any('back up out of a dead end' in w for w in got.warnings)
     backs_up_right(got)
+    # backing up over a drive: the blade as there (off where it was, Review 19)
+    for blade in (False, True):
+        drive = CoveragePlan(**dict(vars(p), segments=[dataclasses.replace(p.segments[0], kind=TRANSIT, blade=blade)]))
+        back = reached_starts(drive, out_of_square, back_out=True).segments[-1]
+        assert (back.kind, back.reverse, back.maneuver, back.blade) == (TRANSIT, True, 'back_out', blade)
     # (not further than BACK_OUT_MAX: it ends earlier then)
     far = corridor(((1.0, 4.0 + BACK_OUT_MAX + 1.0),), back_out=True, extra=[(3.9, 1.6, 45.0, 2.4)])
     got = reached_starts(far, out_of_square, back_out=True)
