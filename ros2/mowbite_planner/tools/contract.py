@@ -31,7 +31,7 @@ OS_PACKAGE = 'os/mowbite_planner_os'
 ROBOTS = {'openmower': 'ros1/mowbite_planner_ros1/nodes/mowbite_planner_node',
           'mowbite-os': 'os/mowbite_planner_os/mowbite_planner_os/node.py'}
 # what a setting says that's the same on every robot
-SETTING_KEYS = ('type', 'choices', 'unit', 'min', 'max', 'nullable')
+SETTING_KEYS = ('type', 'choices', 'unit', 'min', 'max', 'min_exclusive', 'max_exclusive', 'nullable')
 
 
 def digests() -> dict:

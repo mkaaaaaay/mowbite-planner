@@ -218,12 +218,14 @@
     },
     "lane_spacing_max": {
       "min": 0.0,
+      "min_exclusive": true,
       "nullable": true,
       "type": "number",
       "unit": "m"
     },
     "lane_spacing_min": {
       "min": 0.0,
+      "min_exclusive": true,
       "nullable": true,
       "type": "number",
       "unit": "m"
@@ -243,6 +245,7 @@
     },
     "mower_width": {
       "min": 0.0,
+      "min_exclusive": true,
       "type": "number",
       "unit": "m"
     },
@@ -269,6 +272,7 @@
     },
     "overlap": {
       "max": 1.0,
+      "max_exclusive": true,
       "min": 0.0,
       "type": "number",
       "unit": ""

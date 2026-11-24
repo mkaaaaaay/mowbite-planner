@@ -120,6 +120,8 @@ RANGES = {'mower_width': (0.0, None), 'overlap': (0.0, 1.0), 'turn_radius': (0.0
           'edge_margin': (0.0, limits.MAX_BLADE_OFFSET),
           'obstacle_margin': (0.0, limits.MAX_BLADE_OFFSET), 'spin_margin': (0.0, limits.MAX_BLADE_OFFSET),
           'recorded_loop_margin': (0.0, limits.MAX_RECORDED_MARGIN)}
+# the ends of a setting's range it may not be at (PlannerConfig.validate): min_exclusive or max_exclusive true
+OPEN_ENDS = {'mower_width': 'min', 'overlap': 'max', 'lane_spacing_min': 'min', 'lane_spacing_max': 'min'}
 # plans kept, in memory and on disk (in plans_dir, <build>-<key>.pkl: the ones of another planner code or another
 # Python, shapely, GEOS or numpy go at the start, none of them is asked for again), in both the ones last asked for:
 # the same request again (a preview, then the mow; mowing.plan, then planner.plan; a mow going on) gets the plan at once
@@ -1034,6 +1036,8 @@ class PlannerCore:
                 entry['min'], hi = RANGES[name]
                 if hi is not None:
                     entry['max'] = hi
+            if name in OPEN_ENDS:
+                entry[OPEN_ENDS[name] + '_exclusive'] = True
             out[name] = {k: list(v) if isinstance(v, tuple) else v for k, v in entry.items()}
         out['planner'] = {'value': current.planner, 'default': defaults.planner, 'stored': 'planner' in current.stored,
                           'type': 'string', 'settable': True, 'choices': list(PLANNERS)}

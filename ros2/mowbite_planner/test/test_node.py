@@ -513,6 +513,10 @@ def test_settings_over_rpc(make, tmp_path):
     loop, margin = got['settings']['recorded_loop'], got['settings']['recorded_loop_margin']
     assert loop['type'] == 'boolean' and loop['value'] is False and loop['ignored'].startswith('no mower size set')
     assert (margin['value'], margin['min'], margin['max'], margin['unit']) == (0.03, 0.0, 0.5, 'm')
+    # (an end of the range it may not be at, as PlannerConfig.validate has it)
+    overlap, width = got['settings']['overlap'], got['settings']['mower_width']
+    assert (overlap['min'], overlap['max'], overlap['max_exclusive']) == (0.0, 1.0, True)
+    assert width['min_exclusive'] and 'min_exclusive' not in overlap and 'max_exclusive' not in margin
     got, _ = rpc(node, 'planner.settings.set', {'robot_width': 0.4, 'robot_front': 0.43, 'robot_rear': 0.14}, 'r1a')
     assert 'ignored' not in got['settings']['recorded_loop']
     got, _ = rpc(node, 'planner.settings.set', {'edges': 'hard', 'recorded_loop': True}, 'r1b')
