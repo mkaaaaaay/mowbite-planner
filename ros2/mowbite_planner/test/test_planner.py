@@ -4163,6 +4163,14 @@ def test_end_point_in_one_of_parts_joined_by_a_path(kw):
         assert math.hypot(last.x - 0.3, last.y - 1.0) == pytest.approx(0.3 - cfg.first_loop_offset, abs=0.02)
 
 
+def test_small_lawn_keeps_its_lanes():
+    """A lawn too small for a loop further in than the edge's (RING_AREA) keeps the lanes' region: lanes mow it, not the
+    completion stage's bits of loops (3 x 1.4 m with the NX60i's body)."""
+    plan = plan_coverage(rect(0, 0, 3, 1.4), [], PlannerConfig(**NX60I))
+    kinds = [s.kind for s in plan.segments]
+    assert kinds.count(LANE) >= 4 and kinds.count(PERIMETER) <= 5
+
+
 def test_slivers_smaller_than_the_blade_are_no_parts():
     # beds drawn 5 cm apart, the ends of the gap closed: with OpenMower's perimeter_offset 0 the gap (1 dm2)
     # would be a section of its own

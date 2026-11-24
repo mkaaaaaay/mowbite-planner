@@ -374,7 +374,7 @@ def _part_levels(edge, grown: list, lag: List[int], own: List[int], count: int, 
             level = _hair(polygonal(union([_opened(level, RING_ROUND).intersection(near), level.difference(near)])),
                           RING_SEAM)
         levels.append(polygonal(union(p for p in polygons(level) if p.exterior.length >= RING_MIN and
-                                      (k == 0 or p.area >= RING_AREA))))
+                                      (k in (0, most) or p.area >= RING_AREA))))  # (most: the lanes', all)
     return levels
 
 
