@@ -49,6 +49,9 @@
     ]
   },
   "owner": "mowbite-planner",
+  "plan_coverage_overrides": {
+    "preview": "boolean, false by default. preview only for plans that are never driven: with use_map an outline of no area of the map is planned too (the planner.* settings, the request's obstacles and drivable areas, no dock), the plan isn't kept for the job (no pin) and armed leftovers don't count"
+  },
   "requires": {
     "numpy": "1.17.4",
     "python": "3.8",

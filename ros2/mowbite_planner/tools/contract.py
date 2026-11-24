@@ -3,7 +3,9 @@
 from there), made from the code: what a robot and its apps may rely on. interface (only with os/, MowBite OS' update
 reads it) counts up with every change of the services the OS builds (the .srv beside this package and os/'s,
 comments not counted) or of the words their code says (service_codes); requires: the least Python and packages it
-runs with; map_fields: the properties of a map's areas it reads that a robot or app writes (mapfile.MAP_FIELDS).
+runs with; map_fields: the properties of a map's areas it reads that a robot or app writes (mapfile.MAP_FIELDS);
+plan_coverage_overrides: what the switches a ~/plan_coverage request sets in its overrides beyond the planner's
+settings do (core.PLAN_COVERAGE_OVERRIDES; not counted in interface: a planner without one says BAD_REQUEST).
 
   contract.py           the contract as the code has it now
   contract.py --write   into contract.json, interface one up where the services changed
@@ -81,7 +83,8 @@ def make(before=None) -> dict:
              'SUPERSEDED': core.SUPERSEDED}
     out = {'schema': SCHEMA, 'owner': 'mowbite-planner', 'requires': dict(sorted(mowbite_planner.REQUIRES.items())),
            'files_version': mowbite_planner.FILES_VERSION, 'methods': methods, 'codes': codes,
-           'topics': [core.PROGRESS_TOPIC], 'settings': settings, 'map_fields': list(mapfile.MAP_FIELDS)}
+           'topics': [core.PROGRESS_TOPIC], 'settings': settings, 'map_fields': list(mapfile.MAP_FIELDS),
+           'plan_coverage_overrides': dict(sorted(core.PLAN_COVERAGE_OVERRIDES.items()))}
     if os.path.isdir(os.path.join(ROOT, OS)):
         services, words = digests(), service_codes()
         interface = (before or {}).get('interface', 0)

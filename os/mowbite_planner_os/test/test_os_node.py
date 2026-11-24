@@ -901,6 +901,29 @@ def test_plan_coverage_code(make, planned):
 
 
 @fake_only
+def test_preview(make, planned):
+    """The override preview (mowbite_logic's mowing.plan): an outline of no area planned like planner.plan plans it,
+    an area's plan as ever; neither kept for the job (pin) nor timed as a mow (served), armed leftovers left out.
+    Without it the outline refused as before."""
+    node = make()
+    send_map(node, the_map())
+    outline, preview = [(0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0)], [override('preview', True)]
+    assert plan_area(node, outline).code == 'BAD_REQUEST'
+    got = plan_area(node, outline, preview)
+    assert got.success and got.message.startswith('outline, planned: ') and 'overrides left out' not in got.message
+    assert not node.core.served and not node.core.pinned
+    area = plan_area(node, overrides=preview)
+    assert area.success and not node.core.served and not node.core.pinned
+    assert rpc(node, 'planner.settings')[0]['job_open'] is False
+    node.core.armed_plan = lambda job: (True, None)  # (armed leftovers, none of them in this area)
+    assert plan_area(node, overrides=preview).fingerprint == area.fingerprint
+    assert plan_area(node).message.endswith('nothing to mow')
+    del node.core.armed_plan
+    job = plan_area(node)
+    assert job.fingerprint == area.fingerprint and node.core.pinned and len(node.core.served) == 1
+
+
+@fake_only
 def test_every_plan_checked_once_more(make, planned, monkeypatch, tmp_path):
     """Every plan checked once more before it's kept or given out (the body's check of the tests, report.rules'):
     one the body sticks out on (the stand-in's, it doesn't fit the body) is refused with the code BODY_OUT, telling

@@ -184,6 +184,12 @@ PROGRESS_TOPIC = 'mowbite/planner/progress'
 PROGRESS_EVERY = 1.0
 PROGRESS_OF = 1000
 PROGRESS_SLOW = 60.0
+# the ROS 2 node's ~/plan_coverage: the switches a request sets in its overrides beyond the planner's settings, each
+# what it does (contract.json 'plan_coverage_overrides', the node's top)
+PLAN_COVERAGE_OVERRIDES = {
+    'preview': 'boolean, false by default. preview only for plans that are never driven: with use_map an outline of no '
+               'area of the map is planned too (the planner.* settings, the request\'s obstacles and drivable areas, no '
+               'dock), the plan isn\'t kept for the job (no pin) and armed leftovers don\'t count'}
 # how long the last planning of each area took, kept over a restart (mowbite_planner_took.json next to the settings
 # file): the latest TOOK_AREAS areas
 TOOK_FILE = 'mowbite_planner_took.json'

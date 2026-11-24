@@ -40,7 +40,10 @@ logic: the planner.* settings and RPC methods, the plans kept and planned ahead,
     area (a preview) as well, its obstacles and drivable areas the request's, with no dock. The same map, settings and
     request give the same plan (kept); armed leftovers (planner.leftovers arm) are the plan of their area until that
     job ends, an area without them gets success with no poses. Planned in the core's worker, before what waits there.
-    Without a map (none came yet) NOT_READY.
+    Without a map (none came yet) NOT_READY. An outline of no area is refused where the robot says so (no_area: MowBite
+    OS, its logic asks for areas), but with the override preview (a node parameter, false by default): preview only
+    for plans that are never driven (no pin, no armed leftovers, not timed as a mow; contract.json
+    plan_coverage_overrides).
   - the events of the robot's logic on ~/events (STATE, JOB_COMPLETE, JOB_RESET as OpenMower's events/json):
     angle_increment, perimeter_direction random, the finished mow's planner.drive and timing.
   - the planning's progress (mowbite/planner/progress, see the ROS 1 node's top) as JSON {topic, payload, retain} on
@@ -88,8 +91,8 @@ from std_srvs.srv import Trigger
 
 from mowbite_planner_interfaces.srv import PlanCoverage
 
-from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER_LOGIC, OPENMOWER_PROPS, REQUEST,
-                   PlannerCore)
+from .core import (AUTO_VALUES, HISTORY_DIR, LOG, METHOD_NOT_FOUND, MOWER, MOWER_LOGIC, OPENMOWER_PROPS,
+                   PLAN_COVERAGE_OVERRIDES, REQUEST, PlannerCore)
 from .core import call as core_call
 from .export import ANSWER_TOO_BIG, fingerprint, too_big
 from .mapfile import AreaJob, _areas, _number, area_job, bodies_for, body_known, body_told, margins_for, match_area
@@ -251,6 +254,7 @@ PARAMETERS = {
                 lambda v: v > 0.0, 'must be > 0'),
     'workers': (0, 'with rpc or use_map: processes of their own that plan (the areas planned ahead at once too), 0: '
                 'all in this one', lambda v: v >= 0, 'must be >= 0'),
+    'preview': (False, PLAN_COVERAGE_OVERRIDES['preview'], None, ''),
 }
 RANGES = {
     'mower_width': (0.01, 5.0),
@@ -895,9 +899,10 @@ class MowbitePlannerNode(Node):
         core = self.core
         index = match_area(data, xy(request.boundary))
         job, where = None, 'outline' if index is None else f'area {index}'
+        preview = bool(values['preview'])  # (a plan never driven: no pin, no armed leftovers, not served)
         try:
             if index is None:  # (like planner.plan plans an outline: its obstacles and drivable areas, no dock)
-                why = self.no_area()
+                why = '' if preview else self.no_area()
                 if why:
                     raise PlanningError(why, word='BAD_REQUEST')
                 job = AreaJob(area_id='', name='', boundary=xy(request.boundary),
@@ -909,7 +914,7 @@ class MowbitePlannerNode(Node):
             reason = core.unusable()
             if reason:
                 raise PlanningError(reason, word='NOT_READY')
-            armed, plan = core.armed_plan(job) if index is not None else (False, None)
+            armed, plan = core.armed_plan(job) if index is not None and not preview else (False, None)
             kept = False
             if armed and plan is None:  # (a plan without paths: the job goes on with the next area)
                 response.success = True
@@ -938,7 +943,7 @@ class MowbitePlannerNode(Node):
                                             job.keep_out, margins_for(data, obstacles + job.keep_out), job.navigation,
                                             job.unmowed, from_start=bool(request.use_start_pose),
                                             bodies=bodies_for(data, rings))
-                if self.pins and index is not None:
+                if self.pins and index is not None and not preview:
                     core.pin(core.local.key)
                 if job.warnings:  # (what the map has besides, like planner.plan)
                     plan = dataclasses.replace(plan, warnings=plan.warnings + job.warnings)
@@ -954,7 +959,7 @@ class MowbitePlannerNode(Node):
             response.message = f'{where}: planning failed: {type(e).__name__}: {e}'
             self.get_logger().error(response.message)
             return response
-        if not armed:
+        if not armed and not preview:
             core.serve(job.area_id or None, plan)
         path = to_path_msg(plan.poses, values['frame_id'], self.get_clock().now().to_msg())
         if armed:
@@ -993,7 +998,7 @@ class MowbitePlannerNode(Node):
     def left_out(self, request, plan: CoveragePlan) -> List[str]:
         """What of a ~/plan_coverage request with the map doesn't count (see the top), as warnings."""
         out = []
-        others = sorted({msg.name for msg in request.overrides} - set(AREA_OVERRIDES))
+        others = sorted({msg.name for msg in request.overrides} - set(AREA_OVERRIDES) - set(PLAN_COVERAGE_OVERRIDES))
         if others:
             out.append(f'overrides left out, the planner.* settings count: {", ".join(others)}')
         if request.mower_width > 0.0 and request.overlap >= 0.0 and plan.config.lane_spacing_mode == 'fixed':
