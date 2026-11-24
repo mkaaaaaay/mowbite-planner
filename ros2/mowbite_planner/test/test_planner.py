@@ -2710,6 +2710,8 @@ def test_leftovers():
     assert stats['area'] > 0.7 * stats['left_m2'] and check_plan(more)['body_out'] == []
     assert left(mowed, swept_area(more, cfg.mower_width)) < left(swept_area(plan, cfg.mower_width)) + 1.0
     assert {(s.kind, s.maneuver) for s in more.segments} == {(LANE, 'leftover'), (TRANSIT, 'leftover')}
+    # (the drives between them on the lawn with the blade on as in any plan, mkay 31.10.)
+    assert more.stats['blade_on']['on'] > 0 and any(s.kind == TRANSIT and s.blade for s in more.segments)
     assert more.stats['path_length'] < 0.2 * plan.stats['path_length'] and plan.stats['leftovers'] is None
     assert math.hypot(more.poses[0].x - 1, more.poses[0].y - 1) < 3.0  # (the nearest to the start first)
     with pytest.raises(PlanningError, match='nothing left to mow'):

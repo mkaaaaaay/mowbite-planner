@@ -123,7 +123,7 @@ def _coverage(boundary, obstacles, cfg: PlannerConfig, start, end, drivable, kee
         'spacing' if auto else 'route'
     area.progress.at('angles', 0)
     if mowed is not None:
-        plan = _compact(area.one(cfg, mowed=mowed))
+        plan = _final(area, area.one(cfg, mowed=mowed))  # (the blade on along the lawn as in any plan)
     elif not auto:
         plan = _final(area, _completed(area, area.plan(cfg)))
     else:
