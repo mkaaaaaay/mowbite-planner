@@ -48,6 +48,9 @@ BLADE_SLACK = 0.002
 # rad between the headings the blade's checked at turning on the spot (its middle 0.2 mm off the arc between, 0.185 m
 # ahead)
 BLADE_TURN = math.radians(5.0)
+# m between the places the blade's checked turning on the spot anywhere along a way back (SPIN_BACK): its disc a mm
+# closer at most between them (at the two ends only: 12-16 mm)
+BLADE_ALONG = 0.025
 # fits_turn's answers kept (the same turn again, to the bit: the same answer), cleared at this many
 TURNS_KEPT = 100000
 # fit's and fits_pose's answers kept for poses the same way (most poses are asked about again and again: the ways
@@ -204,7 +207,7 @@ class Blade:
     def off_turning(self, x: float, y: float, yaw0: float, yaw1: float, dx: float = 0.0, dy: float = 0.0) -> bool:
         """Whether the blade's off the areas turning on the spot from yaw0 to yaw1 anywhere from (x, y) to (dx, dy)
         back from there."""
-        ends = [(x, y)] + ([(x - dx, y - dy)] if dx or dy else [])
+        ends = _along(x, y, dx, dy)
         ends = [e for e, n in zip(ends, self._near_at([e[0] for e in ends], [e[1] for e in ends])) if n]
         if not ends:
             return True
@@ -217,7 +220,7 @@ class Blade:
         """(m, (x, y)): how far the blade's middle lies in zone at its deepest, at a pose facing yaw0 (turning on the
         spot from yaw0 to yaw1 anywhere from (x, y) to (dx, dy) back), and where; (0, None) where it's off the
         areas."""
-        ends = [(x, y)] + ([(x - dx, y - dy)] if yaw1 is not None and (dx or dy) else [])
+        ends = _along(x, y, dx, dy) if yaw1 is not None else [(x, y)]
         pts = [self._at(ex, ey, h) for ex, ey in ends for h in self._headings(yaw0, yaw1)]
         best: Tuple[float, Optional[Tuple[float, float]]] = (0.0, None)
         for (bx, by), over in zip(pts, self._over([p[0] for p in pts], [p[1] for p in pts])):
@@ -228,6 +231,12 @@ class Blade:
                 if best[1] is None or d > best[0]:
                     best = (max(0.0, d), (float(bx), float(by)))
         return best
+
+
+def _along(x: float, y: float, dx: float, dy: float) -> List[Tuple[float, float]]:
+    """(x, y) and the places back from there to (dx, dy) back, BLADE_ALONG apart at most."""
+    n = int(math.ceil(math.hypot(dx, dy) / BLADE_ALONG))
+    return [(x - dx * i / n, y - dy * i / n) for i in range(n + 1)] if n else [(x, y)]
 
 
 class Footprint:

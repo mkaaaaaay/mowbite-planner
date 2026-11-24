@@ -4185,6 +4185,17 @@ def test_end_point_in_one_of_parts_joined_by_a_path(kw):
         assert math.hypot(last.x - 0.3, last.y - 1.0) == pytest.approx(0.3 - cfg.first_loop_offset, abs=0.02)
 
 
+def test_blade_checked_along_the_way_back(monkeypatch):
+    """Turning on the spot anywhere along a way back the blade's checked BLADE_ALONG apart: a corner of an area not to
+    mow between the way's two ends is found (it wasn't with the two ends only)."""
+    blade = footprint.Blade(Polygon(rect(0.1495, 0.0995, 0.1505, 0.1005)), 0.11, 0.2, 0.0)
+    assert not blade.off_turning(0.0, 0.0, 0.0, 0.0, 0.1, 0.0)
+    assert blade.depth(0.0, 0.0, 0.0, 0.0, 0.1, 0.0)[0] > 0.005
+    monkeypatch.setattr(footprint, 'BLADE_ALONG', 1.0)
+    assert blade.off_turning(0.0, 0.0, 0.0, 0.0, 0.1, 0.0)
+    assert blade.depth(0.0, 0.0, 0.0, 0.0, 0.1, 0.0) == (0.0, None)
+
+
 def test_small_lawn_keeps_its_lanes():
     """A lawn too small for a loop further in than the edge's (RING_AREA) keeps the lanes' region: lanes mow it, not the
     completion stage's bits of loops (3 x 1.4 m with the NX60i's body)."""
