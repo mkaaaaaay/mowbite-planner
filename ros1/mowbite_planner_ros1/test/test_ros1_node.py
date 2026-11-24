@@ -370,8 +370,18 @@ def test_area_settings_and_dock_from_the_map(planner):
 
 
 def test_unknown_outline_is_planned_without_the_map(planner):
+    """An outline of no area of the map: a preview (mower_logic idle) planned without the map's areas, told; mower_logic's
+    own while it mows (or its state not known yet) refused like on MowBite OS (it docks, no finished mow)."""
     send_map(the_map())
-    check(planner.handle(request(outline=[(0.0, 0.0), (15.0, 0.0), (15.0, 8.0), (0.0, 8.0)])))
+    outline = [(0.0, 0.0), (15.0, 0.0), (15.0, 8.0), (0.0, 8.0)]
+    state('IDLE')
+    check(planner.handle(request(outline=outline)))
+    assert any(level == 'info' and 'no area of the map' in line for level, line in rospy.log)
+    state('MOWING')
+    mower_event(type='STATE', job_id='j3')
+    with pytest.raises(rospy.ServiceException, match='no area of the map'):
+        planner.handle(request(outline=outline))
+    assert planner.refused_job == 'j3' and not planner.pinned
     rospy.subscribers['/mower_map_service/json_map'](types.SimpleNamespace(data='not json'))
     assert any(level == 'warn' for level, _ in rospy.log)
 
@@ -3025,7 +3035,7 @@ def state(name):
 def test_no_map_no_plan(planner):
     """With use_map mower_logic's plan waits for the first map (MAP_FIRST s), then it's refused (a failed call: it docks
     and ends the job, that JOB_COMPLETE is no finished mow); a map not readable isn't planned with, nor the one before
-    it. An outline of no area is planned without the map, told."""
+    it. An outline of no area refused while it mows."""
     node_module.MAP_FIRST = 0.05
     state('MOWING')
     mower_event(type='STATE', job_id='j9')
@@ -3044,9 +3054,8 @@ def test_no_map_no_plan(planner):
         planner.handle(request())
     assert rpc('planner.plan', {'area_id': 'a'})[1][1].startswith('the map isn\'t readable')
     send_map(the_map())
-    rospy.log.clear()
-    check(planner.handle(request(outline=[(0.0, 0.0), (15.0, 0.0), (15.0, 8.0), (0.0, 8.0)])))
-    assert any(level == 'warn' and 'no area of the map' in line for level, line in rospy.log)
+    with pytest.raises(rospy.ServiceException, match='no area of the map'):
+        planner.handle(request(outline=[(0.0, 0.0), (15.0, 0.0), (15.0, 8.0), (0.0, 8.0)]))
 
 
 def test_previews_not_the_job(planner):

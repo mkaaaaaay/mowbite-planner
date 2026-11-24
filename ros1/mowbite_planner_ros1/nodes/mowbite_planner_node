@@ -184,7 +184,8 @@ mowing.plan) isn't the job's: not kept for it, nor does it take the leftovers ar
 With use_map mower_logic's plan waits MAP_FIRST s at most for the first map, then it's refused (a failed call:
 mower_logic docks and ends the job, that JOB_COMPLETE is no finished mow); a map that isn't readable isn't planned with,
 nor the one before it, till a readable one comes. An outline of no area of the map is planned without the map's areas
-to keep out of, margins and dock, said in the log (a preview of an outline being edited).
+to keep out of, margins and dock where it's a preview (mower_logic idle: an outline being edited), said in the log;
+mower_logic's own while it mows (or its state isn't known yet) is refused the same way (the map changed meanwhile?).
 
 angle_increment: every angle_increment_every finished mows (mower_logic's JOB_COMPLETE event) the lanes of every plan
 turn that much further (angle_steps, kept in mowbite_planner_angle.json next to settings_file), within an area's
@@ -1501,10 +1502,12 @@ class MowbitePlannerRos1(PlannerCore):
                 obstacles += job.mow_around
                 drivable, keep_out, dock, reach_over = job.drivable, job.keep_out, job.dock, job.navigation
                 unmowed = job.unmowed
-            elif data:  # (a preview of an outline being edited: fine; mower_logic's own: the map's areas changed)
-                (rospy.logwarn if mowing else rospy.loginfo)(
-                    'MowBite Planner: the outline is no area of the map, planned without the map\'s areas to keep out '
-                    'of, margins and dock')
+            elif data and mowing:  # (mower_logic's own: the map's areas changed meanwhile, as on MowBite OS)
+                self.refuse('the outline is no area of the map (to 1 mm): not planned without the map\'s areas to keep '
+                            'out of, margins and dock (the map changed meanwhile?)')
+            elif data:  # (a preview of an outline being edited)
+                rospy.loginfo('MowBite Planner: the outline is no area of the map, planned without the map\'s areas to '
+                              'keep out of, margins and dock')
             armed, left = self.armed_plan(job, mowing)
             if armed:
                 # planner.leftovers armed: what the mow before left in this area, nothing where it left nothing
@@ -1536,6 +1539,8 @@ class MowbitePlannerRos1(PlannerCore):
         except PlanningError as e:
             rospy.logwarn('MowBite Planner: %s', e)
             return PlanPathResponse()
+        except rospy.ServiceException:  # (refuse())
+            raise
         except Exception as e:  # noqa: BLE001 - a bad area must not take the planner down
             rospy.logerr('MowBite Planner failed: %s: %s', type(e).__name__, e, exc_info=True)
             return PlanPathResponse()
