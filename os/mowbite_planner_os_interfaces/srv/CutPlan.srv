@@ -33,7 +33,8 @@ string code
 # the start of a section. The body (and turning on the spot where the heading jumps by more than 15 deg) stays out of
 # the temporary obstacles all along them (against the map it was checked when planned). A way to each piece after
 # poses left out (and to the first one from start) was found by ~/plan_transit with the temporary obstacles, arriving
-# facing the pose's way: the robot plans it again with ~/plan_transit to drive it. The first piece is left out where
+# facing the pose's way (the one from start with temporary_passing: turned away where it stands right ahead of one):
+# the robot plans it again with ~/plan_transit, the same way, to drive it. The first piece is left out where
 # no way goes on from its end but one from start does; none at all where no way gets anywhere (stopped right ahead
 # of one, only backing up would)
 uint32[] piece_first

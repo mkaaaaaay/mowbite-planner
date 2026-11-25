@@ -7,11 +7,11 @@
     "SUPERSEDED": -32003
   },
   "files_version": 1,
-  "interface": 3,
+  "interface": 4,
   "interfaces": {
     "mowbite_planner_interfaces/srv/PlanCoverage": "0bbf84236b6af324eaab8b8f100ca02d839f1e0666ebe8b05ee154ab97b70b2f",
     "mowbite_planner_os_interfaces/srv/CutPlan": "8d0fb7c8953fa03132506622317f202ca065ab2589da2dc966464ef971cec693",
-    "mowbite_planner_os_interfaces/srv/PlanTransit": "afa8643221d335db2f524909a0acdf370a18cce2b93b833888d6b5cdc9a7bf97"
+    "mowbite_planner_os_interfaces/srv/PlanTransit": "f896689bd8aff6b8c3b4753a67c4e710bd623880788eeeb876c3d99c2976d9ff"
   },
   "map_fields": [
     "recorded_body",

@@ -20,6 +20,12 @@ geometry_msgs/Polygon[] obstacles
 # as, no margin of their own (the robot's clearance in them), the body checked against them like against any edge.
 # 16 at most, 3 to 64 points each, each within 3 m of its centre, else BAD_REQUEST
 geometry_msgs/Polygon[] temporary_obstacles
+# the ones to drive past instead at the start (none: the temporary obstacles only), else one for each of them, in
+# their order, smaller (the robot's clearance driving past them): where no way leaves the start with the temporary
+# obstacles and the body can't turn round there (stopped right ahead of one), the way turns away on the spot and goes
+# straight on with the body out of these, till it's out of the temporary obstacles (said in message); one for each
+# or none, else BAD_REQUEST
+geometry_msgs/Polygon[] temporary_passing
 # m, how far the start or the goal may lie outside of where the body fits (by the edge, the dock), the way from or to
 # there runs straight and unchecked. < 0: 0.5, more than 1.0: BAD_REQUEST
 float64 max_outside -1.0

@@ -285,6 +285,28 @@ def test_start_by_a_temporary_obstacle():
     assert out.all_fit(t.poses) and t.start_outside == 0.0
 
 
+def test_turned_away_from_a_temporary_obstacle():
+    # stopped right ahead of one, the body can't turn round clear of it: turned away on the spot with the body out of
+    # the smaller one to pass, then on from where it's clear of it; without that, or too close for that: no way
+    seen, small = circle(5.0, 3.0, 0.45), circle(5.0, 3.0, 0.2)
+    start, goal = (4.1, 3.0, 0.0), (1.0, 1.0, math.pi)
+    with pytest.raises(PlanningError):
+        transit(start, goal, obstacles=[], temporary=[seen])
+    t = transit(start, goal, obstacles=[], temporary=[seen], passing=[small])
+    assert t.warnings[0].startswith('the start lies closer to a temporary obstacle than its clearance')
+    room = Polygon([(-5, -5), (25, -5), (25, 15), (-5, 15)])
+    near = Footprint(room.difference(Polygon(small)), PlannerConfig(**TRON).body_outline, PlannerConfig(**TRON).spin_margin)
+    out = Footprint(room.difference(Polygon(seen)), PlannerConfig(**TRON).body_outline)
+    k = next(i for i, p in enumerate(t.poses) if out.fits_pose(p.x, p.y, p.yaw))
+    assert near.fits_turn(start[0], start[1], start[2], t.poses[1].yaw) and near.all_fit(t.poses[:k + 1])
+    assert out.all_fit(t.poses[k:])
+    with pytest.raises(PlanningError):
+        transit((4.25, 3.0, 0.0), goal, obstacles=[], temporary=[seen], passing=[small])
+    with pytest.raises(PlanningError, match='2 temporary obstacles to pass, 1 temporary obstacles') as e:
+        transit(start, goal, obstacles=[], temporary=[seen], passing=[small, small])
+    assert e.value.word == 'BAD_REQUEST'
+
+
 def test_cut_plan():
     # a plan's lanes cut where the body would get into one seen on them: pieces of at least 3 poses, none across a
     # section, a way checked to the piece after it; none getting there: the rest left out from there
@@ -294,9 +316,9 @@ def test_cut_plan():
     seen = circle(5.0, 1.5, 0.4)
     asked = []
 
-    def way(a, b):
+    def way(a, b, passing=()):
         asked.append((a, b))
-        return transit(a, b, obstacles=[], temporary=[seen])
+        return transit(a, b, obstacles=[], temporary=[seen], passing=passing)
     cut = transit_route.cut_plan((1.0, 1.5, 0.0), poses, starts, 0, [seen], PlannerConfig(**TRON), way)
     assert len(cut.pieces) == 3 and cut.left_out_from == len(poses)
     (a0, a1), (b0, b1), (c0, c1) = cut.pieces
@@ -329,10 +351,11 @@ def test_cut_plan():
     assert past.pieces == [(0, 80)]
     assert len(transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way).pieces) == 2
     # stopped on a lane ahead of one: the first piece ends where the body is clear of it, not driven on into the one
-    # to pass; where no way goes on from its end, it's not driven, the way from the start (none: nothing driven)
+    # to pass; where no way goes on from its end, it's not driven, the way from the start (turned away with the body
+    # out of the ones to pass where it can't turn round; none: nothing driven)
     small = circle(5.0, 1.5, 0.2)
     for i, want, left in ((27, [(27, 29), (52, 80), (81, 161)], len(poses)), (28, [(48, 80), (81, 161)], len(poses)),
-                          (30, [], 44)):
+                          (30, [(48, 80), (81, 161)], len(poses)), (33, [], 44)):
         p = poses[i]
         stopped = transit_route.cut_plan((p.x, p.y, p.yaw), poses, starts, i, [seen], PlannerConfig(**TRON), way,
                                          [small])

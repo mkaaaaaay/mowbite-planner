@@ -314,11 +314,88 @@ def _asked(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Seq
     return heading
 
 
+def _turned_away(start: Sequence[float], passing: Any, fits: Footprint, space: Any, max_outside: float,
+                 step: float):
+    """The ways out of a start boxed in by temporary obstacles (see plan_transit's passing), one after the other:
+    turning on the spot there (OUT_STEP apart, the closest to its heading first, SPIN_TRIES at most), then straight on,
+    max_outside m at most, the body out of passing's room all along (a Footprint), to the first place it fits (fits,
+    the centre in space)."""
+    x, y, yaw = float(start[0]), float(start[1]), normalize_angle(float(start[2]))
+    turns = sorted((normalize_angle(yaw + k * OUT_STEP) for k in range(int(round(2.0 * math.pi / OUT_STEP)))),
+                   key=lambda h: angle_diff(h, yaw))
+    given = 0
+    for h in turns:
+        check()  # (a planning stopped from outside ends here, progress.stoppable)
+        if angle_diff(h, yaw) > 1e-9 and not passing.fits_turn(x, y, yaw, h):
+            continue
+        for k in range(int(max_outside / step + 1e-9) + 1):
+            q = (x + k * step * math.cos(h), y + k * step * math.sin(h))
+            if not passing.fits_pose(q[0], q[1], h):
+                break
+            if space.covers(Point(q)) and fits.fits_pose(q[0], q[1], h):
+                on = sample_straight(x, y, q[0], q[1], h, step) if k else [Pose2D(x, y, h)]
+                yield ([Pose2D(x, y, yaw)] if angle_diff(h, yaw) > 1e-9 else []) + on
+                given += 1
+                break
+        if given >= SPIN_TRIES:
+            return
+
+
 def plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
                  goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=(),
-                 margins: Sequence[Optional[float]] = (),
-                 temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Transit:
+                 margins: Sequence[Optional[float]] = (), temporary: Sequence[Sequence[Sequence[float]]] = (),
+                 passing: Sequence[Sequence[Sequence[float]]] = ()) -> Transit:
+    """_plan_transit (see there), and where no way leaves the start with the temporary obstacles, the body boxed in
+    there by them (turning round on the spot either way sticks into one): passing, one for each of temporary, smaller
+    (the robot's clearance driving past them), the way out of there turning on the spot and straight on with the body
+    out of these instead (_turned_away), then on from where it's out of the temporary obstacles, said."""
+    if not passing:
+        return _plan_transit(start, goal, drivable, obstacles, config, goal_straight, max_outside, bodies, margins,
+                             temporary)
+    inner = temporary_polygons(passing)
+    if len(inner) != len(temporary_polygons(temporary)):
+        raise PlanningError(f'{len(inner)} temporary obstacles to pass, {len(temporary)} temporary obstacles: one for '
+                            'each or none', word='BAD_REQUEST')
+    try:
+        return _plan_transit(start, goal, drivable, obstacles, config, goal_straight, max_outside, bodies, margins,
+                             temporary)
+    except PlanningError as e:
+        if e.word not in ('', 'NO_WAY', 'START_OUTSIDE'):
+            raise
+        first = e
+    cfg = _turning(config or PlannerConfig())
+    space, fits, _ = _room(drivable, obstacles, cfg, bodies, margins, temporary)
+    x, y, yaw = float(start[0]), float(start[1]), normalize_angle(float(start[2]))
+    if fits is None or fits.fits_turn(x, y, yaw, yaw + 0.99 * math.pi) or \
+            fits.fits_turn(x, y, yaw, yaw - 0.99 * math.pi):
+        raise first
+    _, by = centre_space(drivable, obstacles, cfg, bodies, margins, passing)  # (once: the kept room stays)
+    step = cfg.waypoint_spacing
+    for out in _turned_away(start, by, fits, space, max_outside, step):
+        q = out[-1]
+        try:
+            rest = _plan_transit((q.x, q.y, q.yaw), goal, drivable, obstacles, config, goal_straight, max_outside,
+                                 bodies, margins, temporary)
+        except PlanningError as e:
+            if e.word not in ('', 'NO_WAY', 'START_OUTSIDE'):
+                raise
+            continue
+        poses = join(out, rest.poses) if rest.poses else out
+        spins = [i for i in range(1, len(poses)) if angle_diff(poses[i].yaw, poses[i - 1].yaw) > SPIN]
+        if poses and angle_diff(poses[0].yaw, yaw) > SPIN:
+            spins.insert(0, 0)
+        return Transit(poses, path_length(poses), spins, rest.start_outside, rest.goal_outside, [
+            f'the start lies closer to a temporary obstacle than its clearance, {path_length(out):.2f} m from it with '
+            'the body out of the ones to pass', *rest.warnings])
+    raise first
+
+
+def _plan_transit(start: Sequence[float], goal: Sequence[float], drivable: Sequence[Sequence[Sequence[float]]],
+                  obstacles: Sequence[Sequence[Sequence[float]]] = (), config: Optional[PlannerConfig] = None,
+                  goal_straight: float = 0.0, max_outside: float = MAX_OUTSIDE, bodies=(),
+                  margins: Sequence[Optional[float]] = (),
+                  temporary: Sequence[Sequence[Sequence[float]]] = ()) -> Transit:
     """The drive from start (x, y, yaw) to goal ((x, y) or (x, y, yaw): arriving facing yaw) inside the drivable
     areas (mowing and navigation areas, [(x, y), ...] each) but the obstacles, all in one flat frame (map), the mower's
     centre (base_link). goal_straight: m straight on before the goal, facing its yaw (the dock). With the body set
@@ -755,7 +832,8 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
     by temporary obstacles (temporary_polygons: hard lines, no margin): the pieces of it where the body (and turning on
     the spot where the heading jumps) stays out of them, at least 3 poses each, none across the start of a section
     (the plan's body was checked against the map before). Where a piece comes after poses left out (and the first
-    one, from start), way(from (x, y, yaw), to (x, y, yaw)) must get there (plan_transit with the temporary obstacles,
+    one, from start), way(from (x, y, yaw), to (x, y, yaw)) must get there (plan_transit with the temporary obstacles;
+    from start with passing as a third: plan_transit's passing,
     arriving facing the pose's way; PlanningError: none), from the last pose of the piece before to the first of it,
     where none does from and to CUT_ENTRIES m further back and on (CUT_PAIRS of them, the closest first), then from
     and to where the body turns round on the spot clear of them (the pieces end and start where the way does);
@@ -861,7 +939,10 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
                 a = at if e == -1 else begin if e == -2 else (poses[e].x, poses[e].y, poses[e].yaw)
                 p = poses[c]
                 try:
-                    way(a, (p.x, p.y, p.yaw))
+                    if inner and a is begin:  # (from where the robot stands: turned away with the ones to pass)
+                        way(a, (p.x, p.y, p.yaw), passing)
+                    else:
+                        way(a, (p.x, p.y, p.yaw))
                     got = e, c
                     break
                 except PlanningError as err:

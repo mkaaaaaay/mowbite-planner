@@ -64,7 +64,8 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     transit_search_limit s (6.0; 0: none) have passed since it took the request: looked at in the search itself, at
     every check of the body, never from outside. The ways arrives plans for a ~/plan_coverage have no such limit (the
     same plan on any computer). temporary_obstacles (interface 3): seen by the robot, for that request only, hard lines
-    with no margin of their own, taken off the room kept for the map (transit_route.temporary_polygons).
+    with no margin of their own, taken off the room kept for the map (transit_route.temporary_polygons);
+    temporary_passing (interface 4): stopped right ahead of one, turned away with the body out of these.
   - ~/cut_plan (CutPlan, interface 3; not with role transit): a plan cut by temporary obstacles, the pieces the robot
     goes on with and a way checked to each one after poses left out (transit_route.cut_plan), in ~/plan_transit's group
     and thread, each way with transit_search_limit.
@@ -622,11 +623,11 @@ class OsNode(base.MowbitePlannerNode):
         data = self.core.current_map() if self.core is not None else None
         bodies, margins = bodies_for(data, drivable + obstacles), margins_for(data, obstacles)
 
-        def way(a, b):
+        def way(a, b, passing=()):
             began = time.monotonic()
             with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
                 return plan_transit(a, b, drivable, obstacles, cfg, 0.0, max_outside, margins=margins,
-                                    temporary=temporary, **({'bodies': bodies} if bodies else {}))
+                                    temporary=temporary, passing=passing, **({'bodies': bodies} if bodies else {}))
         try:
             if not drivable:
                 raise PlanningError('no drivable area', word='BAD_REQUEST')
@@ -682,6 +683,7 @@ class OsNode(base.MowbitePlannerNode):
             ((quaternion_to_yaw(q.x, q.y, q.z, q.w),) if request.use_goal_heading else ())
         obstacles = [base.xy(poly) for poly in request.obstacles]
         temporary = [base.xy(poly) for poly in request.temporary_obstacles]
+        passing = [base.xy(poly) for poly in request.temporary_passing]
         warnings = said + base.float32_warnings([*drivable, *obstacles])
         for w in warnings:
             self.get_logger().warning(w)
@@ -694,7 +696,7 @@ class OsNode(base.MowbitePlannerNode):
             # (the limit looked at where the search checks the body, progress.check: it ends there with Stopped)
             with stoppable(lambda: 0.0 < limit <= time.monotonic() - began):
                 transit = plan_transit(start, goal, drivable, obstacles, cfg, float(request.goal_straight_length),
-                                       max_outside, margins=margins, temporary=temporary,
+                                       max_outside, margins=margins, temporary=temporary, passing=passing,
                                        **({'bodies': bodies} if bodies else {}))
         except Stopped:
             return no('SEARCH_LIMIT', base.with_warnings(
