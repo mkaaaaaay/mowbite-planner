@@ -762,7 +762,8 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
     none: the next piece (CUT_TRIES at most), none: the rest left out from the first piece no way gets to. Stopped
     and other errors of way go through. passing: one for each of temporary (none: they themselves), smaller: the
     poses kept are the ones where the body stays out of these (driven on past the temporary obstacles), a piece
-    ends and starts where it's out of the temporary obstacles (from and to which the ways go)."""
+    ends and starts where it's out of the temporary obstacles (from and to which the ways go; none of it is: not
+    driven). Where no way goes on from the first piece, from start (that piece not driven)."""
     n = len(poses)
     if not 0 <= from_pose <= n:
         raise PlanningError(f'from_pose {from_pose} is not a pose of the plan ({n})', word='BAD_REQUEST')
@@ -815,7 +816,23 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
 
     pieces: List[Tuple[int, int]] = []
     warnings: List[str] = []
-    at = (float(start[0]), float(start[1]), float(start[2]))
+    begin = (float(start[0]), float(start[1]), float(start[2]))
+    at = begin
+
+    def clear_end() -> Optional[int]:
+        """The last pose of the piece before the body is clear of the temporary obstacles at, 3 poses left at least;
+        none: that piece dropped (not driven deeper into them), the one before it (or the start) left from."""
+        nonlocal at
+        while pieces:
+            f, t = pieces[-1]
+            t = next((i for i in range(t, f + 1, -1) if clear(poses[i])), None)
+            if t is not None:
+                return t
+            pieces.pop()
+            q = poses[pieces[-1][1]] if pieces else None
+            at = (q.x, q.y, q.yaw) if q is not None else begin
+        return None
+
     gap, tried, left_out = True, 0, n  # (gap: a way to be checked to the next piece; tried: ways none got to since)
     for first, last in runs:
         if pieces and not gap:
@@ -824,9 +841,7 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
             # (from the last pose of the piece before, to the first of this one; where no way does, from and to
             # CUT_ENTRIES m further back and on, the closest first, CUT_PAIRS at most)
             # (where a way is to leave or arrive, the body clear of the temporary obstacles themselves)
-            if pieces:
-                f, t = pieces[-1]
-                t = next((i for i in range(t, f + 1, -1) if clear(poses[i])), t)
+            t = clear_end()
             ons_from = next((i for i in range(first, last - 1) if clear(poses[i])), first)
             ends = _entries(poses, pieces[-1][0], t, back=True) if pieces else [-1]
             ons = _entries(poses, ons_from, last)
@@ -838,8 +853,12 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
                 if pieces else -1
             on = next((i for i in range(first, last - 1) if turns(poses[i])), first)
             tries += [(end, c) for c in _entries(poses, on, last) if (end, c) not in tries]
+            # (none from the first piece: from the start, that piece not driven; a short one may end where no way
+            # leaves without backing up, as by an obstacle seen ahead)
+            if len(pieces) == 1:
+                tries += [(-2, c) for c in dict.fromkeys(ons[:CUT_PAIRS // 2] + _entries(poses, on, last))]
             for e, c in tries:
-                a = at if e < 0 else (poses[e].x, poses[e].y, poses[e].yaw)
+                a = at if e == -1 else begin if e == -2 else (poses[e].x, poses[e].y, poses[e].yaw)
                 p = poses[c]
                 try:
                     way(a, (p.x, p.y, p.yaw))
@@ -847,7 +866,9 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
                     break
                 except PlanningError as err:
                     why = why or str(err)
-            if got is not None and got[0] >= 0:
+            if got is not None and got[0] == -2:
+                pieces.pop()
+            elif got is not None and got[0] >= 0:
                 pieces[-1] = (pieces[-1][0], got[0])
             if got is None:
                 if not tried:
@@ -861,6 +882,9 @@ def cut_plan(start: Sequence[float], poses: Sequence[Pose2D], section_start: Seq
         pieces.append((first, last))
         q = poses[last]
         at, gap, tried, left_out = (q.x, q.y, q.yaw), False, 0, n
+    t = clear_end()  # (the last piece too: where nothing after it is got to, it ends clear of them)
+    if t is not None:
+        pieces[-1] = (pieces[-1][0], t)
     if left_out < n:
         warnings.append(f'from pose {left_out} on no way gets to the plan' +
                         (f' ({CUT_TRIES} places of it tried)' if tried >= CUT_TRIES else ''))

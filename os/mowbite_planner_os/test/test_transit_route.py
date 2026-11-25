@@ -328,6 +328,17 @@ def test_cut_plan():
                                   [circle(5.0, 1.5, 0.25)])
     assert past.pieces == [(0, 80)]
     assert len(transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way).pieces) == 2
+    # stopped on a lane ahead of one: the first piece ends where the body is clear of it, not driven on into the one
+    # to pass; where no way goes on from its end, it's not driven, the way from the start (none: nothing driven)
+    small = circle(5.0, 1.5, 0.2)
+    for i, want, left in ((27, [(27, 29), (52, 80), (81, 161)], len(poses)), (28, [(48, 80), (81, 161)], len(poses)),
+                          (30, [], 44)):
+        p = poses[i]
+        stopped = transit_route.cut_plan((p.x, p.y, p.yaw), poses, starts, i, [seen], PlannerConfig(**TRON), way,
+                                         [small])
+        assert (stopped.pieces, stopped.left_out_from) == (want, left)
+        for f, t in stopped.pieces:
+            assert out.bad_poses([poses[f], poses[t]]) == []
     with pytest.raises(PlanningError, match='2 temporary obstacles to pass, 1 temporary obstacles') as e:
         transit_route.cut_plan((1.0, 2.05, 0.0), by, [0], 0, [seen], PlannerConfig(**TRON), way, [seen, seen])
     assert e.value.word == 'BAD_REQUEST'
