@@ -2,8 +2,9 @@
 antenna_offset_y, on MowBite OS imu_roll and imu_pitch too, each a proposal next to the old value with its sigma,
 quality and whether it's fit to take (ok). Nothing here writes them anywhere.
 
-    python3 -m mowbite_planner.calib [--interim|--cut] <recording>   prints the result as JSON (one it can't read or
-                                                                     without its end line: {"error": why}, exit 1)
+    python3 -m mowbite_planner.calib [--interim|--cut] <recording>...   prints the result as JSON (one it can't read
+                                                                        or without its end line: {"error": why},
+                                                                        exit 1)
 
 The recording (calibread.py): from OpenMower's ROS 1 node a drive by joystick or a mow (passive), from MowBite OS its
 calibration program (phase marks). Only numpy, no shapely: any thread will do.
@@ -25,6 +26,12 @@ wheels' difference in m/s there):
     turn), left and right turns averaged, their difference counts into sigma (a pivot off the axle).
   - imu_roll/pitch (the IMU's tilt on level ground, atan2(ay, az) and atan2(-ax, hypot(ay, az)) of gravity): the
     stands; where the mower stood on one place in two headings the slope drops out.
+Several recordings of one mower (MAX_RECORDINGS at most, the newest): those since its settings last changed (the
+header's SAME, the newest's and those before it alike; the older ones left out, said), each fit on its own (its delay,
+gyro, odometry), their runs, turns and stands together for the values and their sigma, info from the newest. Without
+wheel ticks on the platform (the header's wheel_ticks false) the wheel distance is skipped (not counted for ready).
+one_more_round: the values not ready yet that one more drive like these likely makes fit (sigma at most MORE times
+what they need; not where the antenna's left and right turns are that far apart, more turns don't shrink that).
 sigma: bootstrap over runs and turns. quality good: sigma <= target / 4, fair: <= target / 2, else poor and no value,
 nor one without the least data (MIN). ok: a value within its fixed limits (VALUES).
 """
@@ -32,6 +39,7 @@ nor one without the least data (MIN). ok: a value within its fixed limits (VALUE
 import json
 import math
 import sys
+import types
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -63,8 +71,14 @@ MIN = {
     'mow': {'run_m': 2.0, 'runs': 8, 'm': 50.0, 'turns': 20, 'rotation': 0.0, 'antenna': 2.0, 'stand_s': 10.0},
     'program': {'run_m': 1.5, 'runs': 4, 'm': 7.0, 'turns': 1, 'rotation': 1.5, 'antenna': 1.5, 'stand_s': 10.0},
 }
-# why the wheel distance isn't offered without ticks (not counted for ready)
+# why the wheel distance isn't offered without ticks (not counted for ready), on a platform without them (skipped)
 NO_TICKS = 'no wheel ticks recorded: the wheel distance comes only from them'
+SKIPPED = 'not measured on this platform (no wheel ticks)'
+# recordings evaluated together at most (the newest), the header fields they agree in (the settings they were taken
+# with), sigma this many times over what a value needs at most for one more drive to likely do (one as long: / sqrt 2)
+MAX_RECORDINGS = 4
+SAME = ('source', 'mode', 'params', 'basis', 'imu', 'imu_frame', 'ticks_source', 'wheel_ticks')
+MORE = 1.4
 # bootstrap draws and its seed; a wheel difference that warns, arcs vs on the spot that warn, a tilt of the IMU that
 # warns on OpenMower; places within PLACE_R m are one, two headings PLACE_TURN apart at one tell the slope from the tilt
 BOOT = 200
@@ -87,14 +101,27 @@ def _spread(draws: np.ndarray, n: int) -> float:
     return float(np.std(draws, ddof=1) * math.sqrt(n / (n - 1.0)))
 
 
+def _yard(name: str, value: float) -> Tuple[float, float]:
+    """(the target sigma is measured against, sigma's floor) for value."""
+    _, target, relative, _, _ = VALUES[name]
+    return (target * abs(value) if relative else target), FLOOR[name] * (abs(value) if relative else 1.0)
+
+
+def _more(name: str, value: float, sigma: float, fixed: float = 0.0) -> bool:
+    """Whether one more drive likely makes a value poor so far fit: sigma at most MORE times what it needs, the part
+    of it more data doesn't shrink (fixed, the floor) within."""
+    yard, floor = _yard(name, value)
+    return math.isfinite(sigma) and max(sigma, floor) > yard / 2 >= max(sigma / MORE, fixed, floor)
+
+
 def _entry(name: str, value: Optional[float], sigma: Optional[float], old, why: Optional[str]) -> dict:
     unit, target, relative, (low, high), large = VALUES[name]
     entry = {'name': name, 'value': None, 'unit': unit, 'old': old, 'sigma': None, 'quality': 'poor', 'ok': False,
-             'warning': why or 'no estimate'}
+             'warning': why or 'no estimate', 'skipped': why == SKIPPED}
     if value is None or sigma is None or not math.isfinite(sigma):
         return entry
-    sigma = max(sigma, FLOOR[name] * (abs(value) if relative else 1.0))
-    yard = target * abs(value) if relative else target
+    yard, floor = _yard(name, value)
+    sigma = max(sigma, floor)
     digits = DIGITS[name]
     entry.update(sigma=round(sigma, digits + 1), warning=None,
                  quality='good' if sigma <= yard / 4 else 'fair' if sigma <= yard / 2 else 'poor')
@@ -165,7 +192,8 @@ def _wheels(rec: Recording, fit: Fit, need: dict, rng: np.random.RandomState, sv
 
 
 def _antenna(fit: Fit, need: dict, rng: np.random.RandomState) -> dict:
-    """antenna_offset_x/y: (value, sigma) or why not, from tight turns each way, both ways averaged."""
+    """antenna_offset_x/y: (value, sigma, the part of it from left and right apart) or why not, from tight turns each
+    way, both ways averaged."""
     fitted = [[t for t in fit.turns if t.fit is not None and t.left == left] for left in (True, False)]
     turned = [sum(abs(t.true if t.true is not None else t.omega) for t in way) / (2 * math.pi) for way in fitted]
     if min(len(way) for way in fitted) < 2 or min(turned) < need['antenna']:
@@ -181,7 +209,8 @@ def _antenna(fit: Fit, need: dict, rng: np.random.RandomState) -> dict:
         sides.append(antenna_mean(way))
     a, mean, n = (sides[0] + sides[1]) / 2, (draws[0] + draws[1]) / 2, min(len(way) for way in fitted)
     # (left and right apart: a pivot off the axle, half of it at least)
-    return {name: (float(a[i]), max(_spread(mean[:, i], n), abs(float(sides[0][i] - sides[1][i])) / 2))
+    apart = [abs(float(sides[0][i] - sides[1][i])) / 2 for i in range(2)]
+    return {name: (float(a[i]), max(_spread(mean[:, i], n), apart[i]), apart[i])
             for i, name in enumerate(('antenna_offset_x', 'antenna_offset_y'))}
 
 
@@ -205,8 +234,8 @@ def _stand_heading(fit: Fit, t0: float, t1: float) -> Optional[float]:
     return None if best is None else wrap(best[1])
 
 
-def _gravity(rec: Recording, fit: Fit, stands):
-    """The IMU's tilt on level ground from the stands with a heading: (roll, pitch, sigma, slope rad) or why not."""
+def _stood(rec: Recording, fit: Fit, stands) -> list:
+    """The stands with a heading: [(the body's place, heading, roll, pitch)]."""
     imu, heads = rec.columns['imu'], []
     for t0, t1 in stands:
         i0, i1 = np.searchsorted(imu['t'], t0), np.searchsorted(imu['t'], t1)
@@ -217,6 +246,12 @@ def _gravity(rec: Recording, fit: Fit, stands):
         a = [float(imu[n][i0:i1].mean()) for n in ('ax', 'ay', 'az')]
         heads.append((P.mean(axis=0) - rot(heading) @ fit.a, heading, math.atan2(a[1], a[2]),
                       math.atan2(-a[0], math.hypot(a[1], a[2]))))
+    return heads
+
+
+def _gravity(heads: list):
+    """The IMU's tilt on level ground from the stands with a heading (_stood's): (roll, pitch, sigma, slope rad) or
+    why not."""
     places = []
     for h in heads:
         near = [p for p in places if float(np.hypot(*(p[0][0] - h[0]))) <= PLACE_R]
@@ -245,17 +280,20 @@ def _gravity(rec: Recording, fit: Fit, stands):
     return float(x[0]), float(x[1]), math.sqrt(max(cov[0, 0], cov[1, 1])), slope
 
 
-def _tilt(rec: Recording, fit: Fit, stands, need: dict, info: dict, warnings: List[str]) -> dict:
-    """imu_roll/pitch: (value, sigma) or why not; on OpenMower a warning where it sits tilted."""
-    stood = sum(t1 - t0 for t0, t1 in stands)
+def _tilt(fits, need: dict, info: dict, warnings: List[str]) -> dict:
+    """imu_roll/pitch from the recordings' stands (fits: [(rec, fit, stands)], the same imu_frame): (value, sigma) or
+    why not; on OpenMower a warning where it sits tilted."""
+    rec = fits[-1][0]
+    stood = sum(t1 - t0 for _, _, stands in fits for t0, t1 in stands)
+    with_imu = [f for f in fits if f[0].columns['imu']['t'].size]
     if stood < need['stand_s']:
         got = 'too little standing: %.0f of %.0f s' % (stood, need['stand_s'])
-    elif rec.columns['imu']['t'].size == 0:
+    elif not with_imu:
         got = 'no imu lines'
     elif rec.imu_frame not in (None, 'base_link'):
         got = 'IMU data not in base_link (%s)' % rec.imu_frame
     else:
-        got = _gravity(rec, fit, stands)
+        got = _gravity([h for r, fit, stands in with_imu for h in _stood(r, fit, stands)])
     if not isinstance(got, tuple):
         return {'imu_roll': got, 'imu_pitch': got}
     roll, pitch, sigma, slope = got
@@ -266,60 +304,123 @@ def _tilt(rec: Recording, fit: Fit, stands, need: dict, info: dict, warnings: Li
     return {'imu_roll': (roll, sigma), 'imu_pitch': (pitch, sigma)}
 
 
-def evaluate(path, interim: bool = False, cut: bool = False) -> dict:
-    """The calibration from a recording (a path or a Recording): {ready, version, based_on: {m, turns (full turns),
-    runs}, warnings, values: [{name, value, unit, old, sigma, quality, ok, warning}], info: {gyro_scale, gyro_bias,
-    gnss_delay_s, rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_source, ticks_per_m_left,
-    ticks_per_m_right}}. interim: one still recorded; cut: one whose writer ended before its end line (evaluated up to
-    there, said so). CalibError: no recording that can be read, one without its end line else (calibread.NO_END)."""
-    rec = path if isinstance(path, Recording) else read(path, unfinished=interim or cut)
-    warnings = []
+class _Pool:
+    """The runs and turns of recordings evaluated together (their fits), as one Fit for _ticks, _wheels and
+    _antenna."""
+
+    def __init__(self, fits: List[Fit]) -> None:
+        self.scales = [s for f in fits for s in f.scales]
+        self.turns = [t for f in fits for t in f.turns]
+        got = [s for s in self.scales if s is not None]
+        self.sv = sum(s.scale * s.length for s in got) / sum(s.length for s in got) if got else 1.0
+        self.odo = types.SimpleNamespace(wheels=None if any(f.odo.wheels is None for f in fits) else True)
+
+
+def _same(rec: Recording) -> str:
+    return json.dumps({k: rec.header.get(k) for k in SAME}, sort_keys=True)
+
+
+def _ended(rec: Recording, interim: bool, cut: bool) -> List[str]:
+    """How the recording ended, where that's to be said; CalibError without its end line (unless interim or cut)."""
     if rec.end is None and not interim and not cut:
         raise CalibError(NO_END)
     if rec.end is None and not interim:
-        warnings.append('the recording stops in the middle (no end line): evaluated up to there')
-    elif rec.end is not None and rec.end['why'] == 'error':
-        warnings.append('the recording ended with an error%s' % (': ' + rec.end['reason'] if rec.end['reason'] else ''))
-    elif rec.end is not None and rec.end['why'] in ('time', 'size'):
-        warnings.append('the recording ended at its %s limit' % rec.end['why'])
+        return ['the recording stops in the middle (no end line): evaluated up to there']
+    if rec.end is not None and rec.end['why'] == 'error':
+        return ['the recording ended with an error%s' % (': ' + rec.end['reason'] if rec.end['reason'] else '')]
+    if rec.end is not None and rec.end['why'] in ('time', 'size'):
+        return ['the recording ended at its %s limit' % rec.end['why']]
+    return []
+
+
+def _together(recs: List[Recording], warnings: List[str]) -> List[Recording]:
+    """Of recordings the ones to evaluate together: the newest MAX_RECORDINGS, of them the newest and those before it
+    taken with the same settings (SAME); the others left out, said."""
+    recs = sorted(recs, key=lambda r: float(r.header['started']))
+    if len(recs) > MAX_RECORDINGS:
+        warnings.append('%d recordings: the newest %d evaluated' % (len(recs), MAX_RECORDINGS))
+        recs = recs[-MAX_RECORDINGS:]
+    k = len(recs) - 1
+    while k > 0 and _same(recs[k - 1]) == _same(recs[-1]):
+        k -= 1
+    if k:
+        before, now = recs[k - 1].header, recs[-1].header
+        changed = [n for n in SAME if n != 'params' and before.get(n) != now.get(n)] + \
+            [n for n in PARAMS if before['params'][n] != now['params'][n]]
+        warnings.append('%d older recording%s left out: taken with other settings than the newest (%s)' % (
+            k, '' if k == 1 else 's', ', '.join(changed)))
+    return recs[k:]
+
+
+def evaluate(path, interim: bool = False, cut: bool = False) -> dict:
+    """The calibration from a recording (a path or a Recording) or several of one mower (a list of them, see the top):
+    {ready, version, based_on: {m, turns (full turns), runs, recordings}, warnings, values: [{name, value, unit, old,
+    sigma, quality, ok, warning, skipped}], one_more_round: [name, ...], info: {gyro_scale, gyro_bias, gnss_delay_s,
+    rtk_spread_m, slope_deg, speed_ratio, turn_ratio, ticks_source, ticks_per_m_left, ticks_per_m_right}}. interim:
+    one still recorded; cut: one whose writer ended before its end line (evaluated up to there, said so). CalibError:
+    no recording that can be read, one without its end line else (calibread.NO_END)."""
+    given = list(path) if isinstance(path, (list, tuple)) else [path]
+    if not given:
+        raise CalibError('no recording')
+    warnings = []
+    recs = _together([p if isinstance(p, Recording) else read(p, unfinished=interim or cut) for p in given],
+                     warnings)
+    rec = recs[-1]  # (the newest: the settings are the same in all)
     names = list(PARAMS) + (['imu_roll', 'imu_pitch'] if rec.source == 'mowbite-os' else [])
     old = dict(rec.params, imu_roll=rec.imu_old[0], imu_pitch=rec.imu_old[1])
     info = dict.fromkeys(('gyro_scale', 'gyro_bias', 'gnss_delay_s', 'rtk_spread_m', 'slope_deg', 'speed_ratio',
                           'turn_ratio', 'ticks_source', 'ticks_per_m_left', 'ticks_per_m_right'))
-    result = {'ready': False, 'version': FORMAT, 'based_on': {'m': 0.0, 'turns': 0.0, 'runs': 0},
-              'warnings': warnings, 'info': info}
-    try:
-        odo = Odometry(rec)
-    except CalibError as e:
-        warnings.append(str(e))
-        return dict(result, values=[_entry(n, None, None, old[n], 'no odometry') for n in names])
-    warnings.extend(odo.notes)
-    runs, stands = segments(rec, odo)
-    fit = Fit(rec, odo, runs, stands)
-    if len(fit.tg) < 20:
-        warnings.append('no RTK fixed positions (%d)' % len(fit.tg))
-        return dict(result, values=[_entry(n, None, None, old[n], 'no RTK fixed') for n in names])
-    fit.solve()
+    result = {'ready': False, 'version': FORMAT, 'based_on': {'m': 0.0, 'turns': 0.0, 'runs': 0, 'recordings': 0},
+              'warnings': warnings, 'one_more_round': [], 'info': info}
+    fits, why = [], None
+    for i, r in enumerate(recs):
+        def tell(lines, i=i):
+            warnings.extend(lines if len(recs) == 1 else ['recording %d: %s' % (i + 1, w) for w in lines])
+        tell(_ended(r, interim, cut))
+        try:
+            odo = Odometry(r)
+        except CalibError as e:
+            tell([str(e)])
+            why = 'no odometry'
+            continue
+        tell(odo.notes)
+        runs, stands = segments(r, odo)
+        fit = Fit(r, odo, runs, stands)
+        if len(fit.tg) < 20:
+            tell(['no RTK fixed positions (%d)' % len(fit.tg)])
+            why = 'no RTK fixed'
+            continue
+        fit.solve()
+        fits.append((r, odo, fit, stands, tell))
+    if not fits:
+        return dict(result, values=[_entry(n, None, None, old[n], why) for n in names])
+    pool = _Pool([f[2] for f in fits])
     need, rng = MIN[rec.mode], np.random.RandomState(SEED)
     estimates = {}
-    estimates['ticks_per_m'], sv_draws, counted = _ticks(rec, fit, need, rng)
-    estimates['wheel_distance_m'] = estimates['ticks_per_m'] if sv_draws is None else \
-        _wheels(rec, fit, need, rng, sv_draws, counted, warnings)
-    estimates.update(_antenna(fit, need, rng))
-    estimates.update(_tilt(rec, fit, stands, need, info, warnings))
-    values = [_entry(n, *(estimates[n] if isinstance(estimates[n], tuple) else (None, None)), old[n],
+    estimates['ticks_per_m'], sv_draws, counted = _ticks(rec, pool, need, rng)
+    estimates['wheel_distance_m'] = SKIPPED if not rec.wheel_ticks else estimates['ticks_per_m'] \
+        if sv_draws is None else _wheels(rec, pool, need, rng, sv_draws, counted, warnings)
+    estimates.update(_antenna(pool, need, rng))
+    estimates.update(_tilt([(r, fit, stands) for r, _, fit, stands, _ in fits], need, info, warnings))
+    values = [_entry(n, *(estimates[n][:2] if isinstance(estimates[n], tuple) else (None, None)), old[n],
                      None if isinstance(estimates[n], tuple) else estimates[n]) for n in names]
     wanted = [v for v in values if (not v['name'].startswith('imu_') or rec.imu_frame in (None, 'base_link')) and
-              v['warning'] != NO_TICKS]
-    _info(rec, fit, info)
-    info['ticks_source'] = rec.ticks_source if odo.L is not None else None
-    _warn(rec, odo, fit, values, info, warnings)
-    used = [s for s in fit.scales if s is not None]
-    turned = sum(abs(t.true if t.true is not None else t.omega) for t in fit.turns
+              v['warning'] not in (NO_TICKS, SKIPPED)]
+    newest = fits[-1]
+    _info(rec, newest[2], info)
+    info['ticks_source'] = rec.ticks_source if newest[1].L is not None else None
+    for r, odo, fit, _, tell in fits:
+        said = []
+        _warn(r, odo, fit, values, info, said)
+        tell(said)
+    used = [s for s in pool.scales if s is not None]
+    turned = sum(abs(t.true if t.true is not None else t.omega) for t in pool.turns
                  if t.true is not None or t.fit is not None)
-    return dict(result, ready=all(v['ok'] for v in wanted), values=values,
-                based_on={'m': round(float(sum(s.length for s in used) * fit.sv), 1),
-                          'turns': round(turned / (2 * math.pi), 1), 'runs': len(used)})
+    more = [v['name'] for v in wanted if not v['ok'] and isinstance(estimates[v['name']], tuple) and
+            _more(v['name'], *estimates[v['name']])]
+    return dict(result, ready=all(v['ok'] for v in wanted), values=values, one_more_round=more,
+                based_on={'m': round(float(sum(s.length for s in used) * pool.sv), 1),
+                          'turns': round(turned / (2 * math.pi), 1), 'runs': len(used), 'recordings': len(fits)})
 
 
 def _info(rec: Recording, fit: Fit, info: dict) -> None:
@@ -412,11 +513,11 @@ def _warn(rec: Recording, odo: Odometry, fit: Fit, values: List[dict], info: dic
 def main(argv: Optional[List[str]] = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     paths = [a for a in args if not a.startswith('--')]
-    if len(paths) != 1 or any(a not in ('--interim', '--cut') for a in args if a.startswith('--')):
-        print('usage: python3 -m mowbite_planner.calib [--interim|--cut] <recording>', file=sys.stderr)
+    if not paths or any(a not in ('--interim', '--cut') for a in args if a.startswith('--')):
+        print('usage: python3 -m mowbite_planner.calib [--interim|--cut] <recording>...', file=sys.stderr)
         return 2
     try:
-        result = evaluate(paths[0], interim='--interim' in args, cut='--cut' in args)
+        result = evaluate(paths[0] if len(paths) == 1 else paths, interim='--interim' in args, cut='--cut' in args)
     except CalibError as e:
         print(json.dumps({'error': str(e)}))
         return 1

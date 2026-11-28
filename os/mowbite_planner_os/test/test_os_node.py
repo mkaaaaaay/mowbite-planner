@@ -35,6 +35,7 @@ from mowbite_planner import core as core_module  # noqa: E402
 # (on MowBite OS' Jazzy too, contract.json as installed there)
 from test_contract import test_in_the_package_and_in_share, test_requires_met  # noqa: E402,F401
 from mowbite_planner import node as node_module  # noqa: E402
+from mowbite_planner import calib as calib_module  # noqa: E402
 from mowbite_planner.calib import evaluate  # noqa: E402
 from mowbite_planner.config import PlannerConfig, PlanningError  # noqa: E402
 from mowbite_planner.geometry import inset  # noqa: E402
@@ -427,6 +428,17 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
         example = json.load(f)
     assert set(example['response']['result']) == set(got)
     assert [v['name'] for v in example['response']['result']['values']] == [v['name'] for v in got['values']]
+    # (several together, calib.MAX_RECORDINGS at most, not with path)
+    second = calibsim.program(1).recording(str(root / 'recordings' / 'calib-20261104T020304Z.jsonl.gz'))
+    got, error = rpc(node, 'planner.calib.evaluate', {'paths': [path, second]}, 'r1b', wait=240.0)
+    assert error is None and got == json.loads(json.dumps(evaluate([path, second])))
+    assert os_module.MAX_RECORDINGS == calib_module.MAX_RECORDINGS
+    for rid, params in (('r1c', {'paths': [path] * 5}), ('r1d', {'paths': []}), ('r1e', {'paths': path}),
+                        ('r1f', {'paths': [path], 'path': path}), ('r1g', {'paths': [path, 'recordings/x']}),
+                        ('r1h', {'paths': [path, str(tmp_path / 'elsewhere.jsonl.gz')]})):
+        assert rpc(node, 'planner.calib.evaluate', params, rid)[1][0] == -32602, params
+    assert rpc(node, 'planner.calib.evaluate', {'paths': [path, str(root / 'none.jsonl.gz')]}, 'r1i')[1] == (
+        -32603, 'no recording at %s' % (root / 'none.jsonl.gz'))
     outside = tmp_path / 'elsewhere.jsonl.gz'
     outside.write_bytes(b'')
     os.symlink(str(outside), str(root / 'link.jsonl.gz'))
@@ -454,7 +466,10 @@ def test_calib_evaluate(make, tmp_path, monkeypatch):
     go.set()
     assert answer(node, 'r9')[1] == (
         -32603, 'the calibration not evaluated: the evaluation took over 120 s')
-    assert asked == [120.0]
+    give(node, 'bridge/rpc/request', RpcRequest(method='planner.calib.evaluate',
+                                                params=json.dumps({'paths': [path, second]}), id='r11'))
+    assert answer(node, 'r11')[1][0] == -32603
+    assert asked == [120.0, 240.0]
 
 
 @fake_only

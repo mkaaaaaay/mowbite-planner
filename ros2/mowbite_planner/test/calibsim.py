@@ -160,16 +160,17 @@ class Mower:
         else:
             raise RuntimeError('the arc never ends')
 
-    def recording(self, path, end='stop', cut=None):
-        """Writes the recording to path (cut: only so many bytes of it, as if cut off)."""
+    def recording(self, path, end='stop', cut=None, header=None):
+        """Writes the recording to path (cut: only so many bytes of it, as if cut off; header: fields more in it)."""
         h = np.array(self.hist)
         t, x, y, th, v, w, tl, tr, cv, cw = h.T
-        rng, t0 = self.rng, 1.7e9 + self.seed * 1000.0
+        rng, t0, header_more = self.rng, 1.7e9 + self.seed * 1000.0, header
         header = {'format': FORMAT, 'source': self.source, 'mode': self.mode, 'started': t0, 'params': self.params,
                   'imu_frame': self.imu_frame, 'software': 'calibsim'}
         if self.source == 'mowbite-os':
             header['basis'] = {'ticks_per_m': self.basis[0], 'wheel_distance_m': self.basis[1]}
             header['imu'] = {'roll': 0.0, 'pitch': 0.0}
+        header.update(header_more or {})
         lines = []
         ts = np.arange(0.5, t[-1], 1 / RATES['gps'])
         hx, hy, hth = np.interp(ts, t, x), np.interp(ts, t, y), np.interp(ts, t, th)

@@ -108,6 +108,8 @@ def _header(line: dict) -> dict:
         raise CalibError('line 1: imu_frame is not a string')
     if line.get('ticks_source', 'counter') not in TICKS_SOURCES:
         raise CalibError('line 1: ticks_source must be one of %s' % ', '.join(TICKS_SOURCES))
+    if not isinstance(line.get('wheel_ticks', True), bool):
+        raise CalibError('line 1: wheel_ticks is not true or false')
     return line
 
 
@@ -128,6 +130,8 @@ class Recording:
         self.imu_old = (imu.get('roll'), imu.get('pitch'))
         self.imu_frame = header.get('imu_frame')
         self.ticks_source = header.get('ticks_source', 'counter')
+        # (false: the platform has none, the wheel distance isn't measured on it)
+        self.wheel_ticks = header.get('wheel_ticks', True)
         self.columns = {}
         for kind, cols in data.items():
             t = np.array(cols['t'], dtype=float)

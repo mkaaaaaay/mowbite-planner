@@ -74,10 +74,12 @@ robot, the node mowbite_planner (executable mowbite_planner_os_node).
     Footprint, the blade aside). Where the body sticks out the plan is refused, ~/plan_coverage's code BODY_OUT, the
     message telling where (a pose of every place, what it's part of); never given out, not kept as a plan (the no
     is, as any other).
-  - planner.calib.evaluate {path} (with calib_root, MowBite OS' data_dir/calibration): the calibration of the recording
-    at path (absolute, under calib_root, else -32602) evaluated in a process of its own, CALIB_TIMEOUT s at most: the
-    whole mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read (one without its end
-    line too: its writer ended before it) or a timeout: -32603. On a thread of its own, the other methods go on.
+  - planner.calib.evaluate {path} or {paths: [...]} (with calib_root, MowBite OS' data_dir/calibration): the
+    calibration of the recording at path (absolute, under calib_root, else -32602), or of the recordings at paths
+    together (one mower's, calib.MAX_RECORDINGS at most, else -32602; those since its settings last changed, see
+    mowbite_planner.calib), evaluated in a process of its own, CALIB_TIMEOUT s a recording at most: the whole
+    mowbite-calib/1 object (mowbite_planner.calib); no recording there, one it can't read (one without its end line
+    too: its writer ended before it) or a timeout: -32603. On a thread of its own, the other methods go on.
     Without calib_root not offered.
   - role (planner): transit, a second instance for ~/plan_transit only (MowBite OS' heading home, masterplan 40 V2):
       - a name of its own (the launch's, not mowbite_planner: refused), its own log; one transit at a time, workers 0
@@ -132,8 +134,10 @@ MAP_WAIT = 60.0
 MAP_SETTLE = 5.0
 # MapStatus.datum_state by its value
 DATUM_STATES = ('UNKNOWN', 'EMPTY', 'MATCH', 'MISMATCH', 'UNBOUND')
-# planner.calib.evaluate: s an evaluation may take (MowBite OS waits 120 s)
+# planner.calib.evaluate: s an evaluation may take a recording (MowBite OS waits 120 s each), recordings at most
+# (mowbite_planner.calib.MAX_RECORDINGS: not imported, it takes numpy into the node)
 CALIB_TIMEOUT = 120.0
+MAX_RECORDINGS = 4
 # arrives: m from a plan's first section's start the ways to it start (behind it, beside it, ahead of it; where none is
 # that far in the lawn, halved till ARRIVE_NEAREST), at least half that far from it and ARRIVE_APART m from each other;
 # m the ways to every section may start and end outside (mowbite_logic's transit_max_outside); ways
@@ -764,15 +768,21 @@ class OsNode(base.MowbitePlannerNode):
 
     def calib_evaluate(self, params: dict) -> dict:
         """planner.calib.evaluate, see the top."""
-        path, root = params.get('path'), self.calib_root()
-        if not isinstance(path, str) or not os.path.isabs(path):
-            raise PlanningError('path must be an absolute path')
-        real, top = os.path.realpath(path), os.path.realpath(root)
-        if os.path.commonpath([real, top]) != top:
-            raise PlanningError(f'path must lie under {root}')
-        if not os.path.isfile(real):
-            raise _internal(f'no recording at {path}')
-        result = core.run_calib(real, timeout=CALIB_TIMEOUT)
+        root, many = self.calib_root(), 'paths' in params
+        paths = params.get('paths') if many else [params.get('path')]
+        if many and ('path' in params or not isinstance(paths, list) or not 1 <= len(paths) <= MAX_RECORDINGS):
+            raise PlanningError(f'paths must be a list of 1 to {MAX_RECORDINGS} paths, without path')
+        top, real = os.path.realpath(root), []
+        for path in paths:
+            if not isinstance(path, str) or not os.path.isabs(path):
+                raise PlanningError(f'{"paths" if many else "path"} must be absolute paths')
+            real.append(os.path.realpath(path))
+            if os.path.commonpath([real[-1], top]) != top:
+                raise PlanningError(f'{"paths" if many else "path"} must lie under {root}')
+        for path, got in zip(paths, real):
+            if not os.path.isfile(got):
+                raise _internal(f'no recording at {path}')
+        result = core.run_calib(real if many else real[0], timeout=CALIB_TIMEOUT * len(real))
         if 'error' in result:
             raise _internal(f'the calibration not evaluated: {result["error"]}')
         return result

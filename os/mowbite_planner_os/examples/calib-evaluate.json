@@ -14,9 +14,11 @@
    "based_on": {
     "m": 12.0,
     "turns": 6.0,
-    "runs": 4
+    "runs": 4,
+    "recordings": 1
    },
    "warnings": [],
+   "one_more_round": [],
    "info": {
     "gyro_scale": 1.0177,
     "gyro_bias": -0.00232,
@@ -38,7 +40,8 @@
      "sigma": 1.03,
      "quality": "good",
      "ok": true,
-     "warning": null
+     "warning": null,
+     "skipped": false
     },
     {
      "name": "wheel_distance_m",
@@ -48,7 +51,8 @@
      "sigma": 0.0008,
      "quality": "good",
      "ok": true,
-     "warning": null
+     "warning": null,
+     "skipped": false
     },
     {
      "name": "antenna_offset_x",
@@ -58,7 +62,8 @@
      "sigma": 0.0059,
      "quality": "fair",
      "ok": true,
-     "warning": "large change from -0.1: 0.180 m"
+     "warning": "large change from -0.1: 0.180 m",
+     "skipped": false
     },
     {
      "name": "antenna_offset_y",
@@ -68,7 +73,8 @@
      "sigma": 0.0072,
      "quality": "fair",
      "ok": true,
-     "warning": null
+     "warning": null,
+     "skipped": false
     },
     {
      "name": "imu_roll",
@@ -78,7 +84,8 @@
      "sigma": 0.00175,
      "quality": "good",
      "ok": true,
-     "warning": null
+     "warning": null,
+     "skipped": false
     },
     {
      "name": "imu_pitch",
@@ -88,7 +95,8 @@
      "sigma": 0.00175,
      "quality": "good",
      "ok": true,
-     "warning": null
+     "warning": null,
+     "skipped": false
     }
    ]
   }

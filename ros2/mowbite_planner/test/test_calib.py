@@ -9,6 +9,7 @@ import math
 import os
 import re
 import sys
+import types
 
 import pytest
 
@@ -176,6 +177,100 @@ def test_too_few_data_no_value(tmp_path):
     for v in result['values']:
         assert v['value'] is None and not v['ok'] and v['warning'].startswith('too few')
     assert values(result)['ticks_per_m']['warning'].startswith('too few straight runs: 1 of 4')
+
+
+def one_mower(seed, **kw):
+    """MowBite OS's program on one mower (the same truth whatever the seed, only the noise apart)."""
+    truth = dict(ticks=1012.0, wheel_distance=0.41, antenna=(-0.05, 0.02), wheel_diff=0.002, slip=0.01,
+                 spin_slip=0.02, arc_slip=0.01, imu=(0.01, -0.01), slope=(0.01, 0.0))
+    return calibsim.program(seed, **dict(truth, **kw))
+
+
+def test_no_wheel_ticks_on_the_platform(tmp_path):
+    """The header's wheel_ticks false: the wheel distance skipped (not counted for ready), the rest as without it."""
+    m = one_mower(0, odometry='twist')
+    plain = evaluate(m.recording(str(tmp_path / 'plain.jsonl.gz')))
+    result = evaluate(one_mower(0, odometry='twist').recording(str(tmp_path / 'tron.jsonl.gz'),
+                                                                header={'wheel_ticks': False}))
+    got = values(result)
+    assert got['wheel_distance_m']['skipped'] and got['wheel_distance_m']['warning'] == calib.SKIPPED
+    assert not any(v['skipped'] for n, v in got.items() if n != 'wheel_distance_m')
+    assert values(plain)['wheel_distance_m']['warning'] == calib.NO_TICKS
+    assert result['ready'] == plain['ready'] and 'wheel_distance_m' not in result['one_more_round']
+    assert [v for n, v in got.items() if n != 'wheel_distance_m'] == \
+        [v for n, v in values(plain).items() if n != 'wheel_distance_m']
+    with pytest.raises(CalibError, match='wheel_ticks'):
+        evaluate(m.recording(str(tmp_path / 'bad.jsonl.gz'), header={'wheel_ticks': 'no'}))
+
+
+def test_recordings_together(tmp_path):
+    """Two drives of one mower: one recording alone as ever, both together every run and turn of them (sigma
+    smaller, within the targets), info from the newest; a list of one the same as the path."""
+    m0, m1 = one_mower(0), one_mower(1)
+    p0, p1 = (m.recording(str(tmp_path / ('%d.jsonl.gz' % m.seed))) for m in (m0, m1))
+    alone = [evaluate(p) for p in (p0, p1)]
+    assert evaluate([p1]) == alone[1]
+    both = evaluate([p1, p0])  # (in the order they were taken whatever the order given)
+    assert both['based_on']['recordings'] == 2 and both['based_on']['runs'] == 8
+    assert both['based_on']['m'] == pytest.approx(sum(a['based_on']['m'] for a in alone), abs=0.15)
+    assert both['info']['gnss_delay_s'] == alone[1]['info']['gnss_delay_s']
+    for name in ('ticks_per_m', 'antenna_offset_x', 'antenna_offset_y'):  # (ticks at their floor in all)
+        assert values(both)[name]['sigma'] <= min(values(a)[name]['sigma'] for a in alone), name
+    assert values(both)['antenna_offset_x']['sigma'] < max(values(a)['antenna_offset_x']['sigma'] for a in alone)
+    errs = errors(m1, both)
+    assert all(errs[n] < TARGETS[n] for n in TARGETS), errs
+    assert both['ready'] and both['one_more_round'] == []
+
+
+def test_recordings_with_other_settings_left_out(tmp_path):
+    """A value taken between two drives: only the newest one evaluated, said which settings changed."""
+    m0, m1 = one_mower(0), one_mower(1)
+    m1.params = dict(m1.params, antenna_offset_x=-0.05)
+    p0, p1 = (m.recording(str(tmp_path / ('%d.jsonl.gz' % m.seed))) for m in (m0, m1))
+    result = evaluate([p0, p1])
+    assert result['based_on']['recordings'] == 1
+    assert result['warnings'][0] == '1 older recording left out: taken with other settings than the newest ' \
+        '(antenna_offset_x)'
+    assert dict(result, warnings=result['warnings'][1:]) == evaluate(p1)
+
+
+def test_which_recordings_together():
+    """The newest MAX_RECORDINGS by when they started, of them those since the settings last changed."""
+    def rec(started, x=0.0, **more):
+        return types.SimpleNamespace(header=dict({'source': 'mowbite-os', 'mode': 'program', 'started': started,
+                                                  'params': dict.fromkeys(calibread.PARAMS, 1.0)}, **more),
+                                     started=started) if not x else \
+            types.SimpleNamespace(header=dict(rec(started).header, params=dict(
+                dict.fromkeys(calibread.PARAMS, 1.0), antenna_offset_x=x)), started=started)
+    said = []
+    got = calib._together([rec(t) for t in (5, 1, 4, 3, 2, 6)], said)
+    assert [r.started for r in got] == [3, 4, 5, 6] and said == ['6 recordings: the newest 4 evaluated']
+    said = []
+    got = calib._together([rec(1), rec(2, x=0.5), rec(3), rec(4)], said)
+    assert [r.started for r in got] == [3, 4] and said[0].startswith('2 older recordings left out')
+    said = []
+    assert [r.started for r in calib._together([rec(1), rec(2, wheel_ticks=False)], said)] == [2]
+    assert said == ['1 older recording left out: taken with other settings than the newest (wheel_ticks)']
+
+
+def test_one_more_round(tmp_path, monkeypatch):
+    """A value poor by at most MORE times what it needs: one more drive likely does; not where more data doesn't
+    shrink sigma (the antenna's left and right turns apart), not one fit already. The Tron's of 28.11.; in a result
+    (its target made tighter than the drive's sigma)."""
+    path = one_mower(0, odometry='twist').recording(str(tmp_path / 'r.jsonl.gz'), header={'wheel_ticks': False})
+    monkeypatch.setitem(calib.FLOOR, 'ticks_per_m', 0.0)  # (the drive's sigma under the floor)
+    plain = values(evaluate(path))['ticks_per_m']
+    unit, _, relative, limits, large = calib.VALUES['ticks_per_m']
+    monkeypatch.setitem(calib.VALUES, 'ticks_per_m', (unit, 2 * plain['sigma'] / (1.2 * plain['value']), relative,
+                                                      limits, large))
+    result = evaluate(path)
+    assert not result['ready'] and result['one_more_round'] == ['ticks_per_m']
+    assert values(result)['ticks_per_m']['quality'] == 'poor'
+    monkeypatch.undo()
+    assert calib._more('ticks_per_m', 928.1, 5.73) and calib._more('antenna_offset_x', 0.063, 0.0101)
+    assert not calib._more('antenna_offset_y', 0.026, 0.0173)
+    assert not calib._more('antenna_offset_x', 0.063, 0.0101, fixed=0.0101)
+    assert not calib._more('ticks_per_m', 928.1, 4.0) and not calib._more('ticks_per_m', 928.1, math.inf)
 
 
 def test_cut_off(tmp_path, capsys):

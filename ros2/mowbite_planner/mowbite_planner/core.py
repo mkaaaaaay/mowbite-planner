@@ -2055,10 +2055,10 @@ def mowing_time(paths, ended=None):
 
 
 def run_calib(path, interim=False, timeout=CALIB_EVALUATE, cut=False):
-    """mowbite_planner.calib on the recording at path in a process of its own (niced, timeout s at most; interim, cut:
-    see calib.evaluate): its result, else {'error': why}."""
+    """mowbite_planner.calib on the recording at path (or several, a list of paths: evaluated together) in a process of
+    its own (niced, timeout s at most; interim, cut: see calib.evaluate): its result, else {'error': why}."""
     command = [sys.executable, '-m', 'mowbite_planner.calib'] + (['--interim'] if interim else []) + \
-        (['--cut'] if cut else []) + [path]
+        (['--cut'] if cut else []) + (list(path) if isinstance(path, (list, tuple)) else [path])
     if shutil.which('nice'):
         command = ['nice', '-n', str(CALIB_NICE)] + command
     roots = [os.path.dirname(p) for p in mowbite_planner.__path__ if os.path.exists(os.path.join(p, 'calib.py'))]
